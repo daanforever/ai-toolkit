@@ -112,6 +112,9 @@ class SDTrainer(BaseSDTrainProcess):
             self._guidance_loss_target_batch = float(self.train_config.guidance_loss_target[0])
         else:
             raise ValueError(f"Unknown guidance loss target type {type(self.train_config.guidance_loss_target)}")
+        
+        # store differential guidance norm metric for logging
+        self.diff_guidance_norm = None
 
 
     def before_model_load(self):
@@ -712,7 +715,10 @@ class SDTrainer(BaseSDTrainProcess):
             if self.train_config.do_differential_guidance:
                 with torch.no_grad():
                     guidance_scale = self.train_config.differential_guidance_scale
-                    target = noise_pred + guidance_scale * (target - noise_pred)
+                    diff_correction = guidance_scale * (target - noise_pred)
+                    # Calculate L2 norm for monitoring
+                    self.diff_guidance_norm = torch.norm(diff_correction).item()
+                    target = noise_pred + diff_correction
             
         if target is None:
             target = noise
@@ -2110,6 +2116,11 @@ class SDTrainer(BaseSDTrainProcess):
         loss_dict = OrderedDict(
             {'loss': (total_loss / len(batch_list)).item()}
         )
+
+        # Add differential guidance norm metric if available
+        if self.diff_guidance_norm is not None:
+            loss_dict['diff_guidance_norm'] = self.diff_guidance_norm
+            self.diff_guidance_norm = None  # Reset for next iteration
 
         self.end_of_training_loop()
 
