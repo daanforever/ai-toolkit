@@ -344,6 +344,11 @@ export default function JobLossGraph({ job }: Props) {
                 label="Learning Rate" 
               />
               <ToggleButton 
+                checked={metricFilter === 'diff_guidance'} 
+                onClick={() => setMetricFilter('diff_guidance')} 
+                label="Diff Guidance" 
+              />
+              <ToggleButton 
                 checked={metricFilter === 'all'} 
                 onClick={() => setMetricFilter('all')} 
                 label="All" 

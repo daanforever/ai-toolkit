@@ -11,11 +11,12 @@ export interface LossPoint {
 
 type SeriesMap = Record<string, LossPoint[]>;
 
-export type MetricFilter = 'loss' | 'learning_rate' | 'all' | 'other';
+export type MetricFilter = 'loss' | 'learning_rate' | 'diff_guidance' | 'all' | 'other';
 
-function categorizeMetric(key: string): 'loss' | 'learning_rate' | 'other' {
-  if (/loss/i.test(key)) return 'loss';
+function categorizeMetric(key: string): 'loss' | 'learning_rate' | 'diff_guidance' | 'other' {
   if (key === 'learning_rate') return 'learning_rate';
+  if (key === 'diff_guidance_norm') return 'diff_guidance';
+  if (/loss/i.test(key)) return 'loss';
   return 'other';
 }
 
