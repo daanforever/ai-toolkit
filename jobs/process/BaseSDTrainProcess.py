@@ -1254,6 +1254,30 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         max_noise_steps
                     )
                     
+                elif content_or_style == 'gaussian':
+                    # Gaussian (normal) distribution centered at 0.5
+                    # This concentrates probability around middle timesteps
+                    gaussian_samples = torch.randn((batch_size,), device=latents.device) * 0.2 + 0.5
+                    # Clamp to (0, 1) range (open interval) to avoid division by zero
+                    # Use small epsilon to exclude exact 0 and 1
+                    eps = 1e-7
+                    gaussian_samples = torch.clamp(gaussian_samples, eps, 1.0 - eps)
+                    # Scale to num_train_timesteps
+                    timestep_indices = gaussian_samples * self.train_config.num_train_timesteps
+                    
+                    # Map to min/max_noise_steps range (same as content/style)
+                    timestep_indices = value_map(
+                        timestep_indices,
+                        0,
+                        self.train_config.num_train_timesteps - 1,
+                        min_noise_steps,
+                        max_noise_steps
+                    )
+                    timestep_indices = timestep_indices.long().clamp(
+                        min_noise_steps,
+                        max_noise_steps
+                    )
+                    
                 elif content_or_style == 'balanced':
                     if min_noise_steps == max_noise_steps:
                         timestep_indices = torch.ones((batch_size,), device=self.device_torch) * min_noise_steps

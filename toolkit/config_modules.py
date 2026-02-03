@@ -344,7 +344,7 @@ class DecoratorConfig:
         self.num_tokens: str = kwargs.get('num_tokens', 4)
 
 
-ContentOrStyleType = Literal['balanced', 'style', 'content']
+ContentOrStyleType = Literal['balanced', 'style', 'content', 'gaussian']
 LossTarget = Literal['noise', 'source', 'unaugmented', 'differential_noise']
 
 

@@ -537,6 +537,7 @@ export default function SimpleJob({
                     { value: 'balanced', label: 'Balanced' },
                     { value: 'content', label: 'High Noise' },
                     { value: 'style', label: 'Low Noise' },
+                    { value: 'gaussian', label: 'Gaussian (Normal)' },
                   ]}
                 />
                 <SelectInput
