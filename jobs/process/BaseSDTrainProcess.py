@@ -1318,13 +1318,13 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 timesteps = self.sd.noise_scheduler.timesteps[timestep_indices.long()]
                 
                 # Debug logging for timestep distribution
-                if self.train_config.timestep_debug_log > 0 and self.step_num % self.train_config.timestep_debug_log == 0:
-                    # Collect data
+                if self.train_config.timestep_debug_log > 0:
+                    # Always collect data
                     self._collected_indices.extend(timestep_indices.cpu().tolist())
                     self._collected_timesteps.extend(timesteps.cpu().tolist())
                     
-                    # Log once we have 100 samples
-                    if len(self._collected_indices) >= 100:
+                    # Log when we have enough samples
+                    if len(self._collected_indices) >= self.train_config.timestep_debug_log:
                         scheduler_timesteps = self.sd.noise_scheduler.timesteps.cpu().tolist()
                         
                         print_acc(f"\n{'='*70}")
@@ -1349,22 +1349,23 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         print_acc(f"Scheduler timesteps array (last 20): {scheduler_timesteps[-20:]}")
                         print_acc(f"Total scheduler timesteps length: {len(scheduler_timesteps)}")
                         
-                        print_acc(f"\nFirst 100 timestep_indices (generated indices):")
-                        print_acc(f"{self._collected_indices[:100]}")
+                        print_acc(f"\nFirst {self.train_config.timestep_debug_log} timestep_indices (generated indices):")
+                        print_acc(f"{self._collected_indices[:self.train_config.timestep_debug_log]}")
                         
-                        print_acc(f"\nFirst 100 timesteps (actual values after indexing):")
-                        print_acc(f"{self._collected_timesteps[:100]}")
+                        print_acc(f"\nFirst {self.train_config.timestep_debug_log} timesteps (actual values after indexing):")
+                        print_acc(f"{self._collected_timesteps[:self.train_config.timestep_debug_log]}")
                         
                         # Statistics
-                        indices_min = min(self._collected_indices[:100])
-                        indices_max = max(self._collected_indices[:100])
-                        indices_mean = sum(self._collected_indices[:100]) / 100
+                        num_samples = self.train_config.timestep_debug_log
+                        indices_min = min(self._collected_indices[:num_samples])
+                        indices_max = max(self._collected_indices[:num_samples])
+                        indices_mean = sum(self._collected_indices[:num_samples]) / num_samples
                         
-                        timesteps_min = min(self._collected_timesteps[:100])
-                        timesteps_max = max(self._collected_timesteps[:100])
-                        timesteps_mean = sum(self._collected_timesteps[:100]) / 100
+                        timesteps_min = min(self._collected_timesteps[:num_samples])
+                        timesteps_max = max(self._collected_timesteps[:num_samples])
+                        timesteps_mean = sum(self._collected_timesteps[:num_samples]) / num_samples
                         
-                        print_acc(f"\nStatistics (first 100 samples):")
+                        print_acc(f"\nStatistics (first {num_samples} samples):")
                         print_acc(f"  Indices: min={indices_min}, max={indices_max}, mean={indices_mean:.1f}")
                         print_acc(f"  Timesteps: min={timesteps_min:.1f}, max={timesteps_max:.1f}, mean={timesteps_mean:.1f}")
                         print_acc(f"{'='*70}\n")
