@@ -2117,11 +2117,6 @@ class SDTrainer(BaseSDTrainProcess):
             {'loss': (total_loss / len(batch_list)).item()}
         )
 
-        # Add differential guidance norm metric if available
-        if self.diff_guidance_norm is not None:
-            loss_dict['diff_guidance_norm'] = self.diff_guidance_norm
-            self.diff_guidance_norm = None  # Reset for next iteration
-
         self.end_of_training_loop()
 
         return loss_dict

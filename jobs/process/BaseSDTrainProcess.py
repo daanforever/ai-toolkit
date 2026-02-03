@@ -2296,11 +2296,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                 'learning_rate': learning_rate,
                             })
                             # Log differential guidance norm if available
-                            if hasattr(self.trainer, 'diff_guidance_norm') and self.trainer.diff_guidance_norm is not None:
+                            if hasattr(self, 'diff_guidance_norm') and self.diff_guidance_norm is not None:
                                 self.logger.log({
-                                    'diff_guidance_norm': self.trainer.diff_guidance_norm,
+                                    'diff_guidance_norm': self.diff_guidance_norm,
                                 })
-                                self.trainer.diff_guidance_norm = None
+                                self.diff_guidance_norm = None
                             if loss_dict is not None:
                                 for key, value in loss_dict.items():
                                     self.logger.log({
@@ -2313,11 +2313,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                 'learning_rate': learning_rate,
                             })
                             # Log differential guidance norm if available
-                            if hasattr(self.trainer, 'diff_guidance_norm') and self.trainer.diff_guidance_norm is not None:
+                            if hasattr(self, 'diff_guidance_norm') and self.diff_guidance_norm is not None:
                                 self.logger.log({
-                                    'diff_guidance_norm': self.trainer.diff_guidance_norm,
+                                    'diff_guidance_norm': self.diff_guidance_norm,
                                 })
-                                self.trainer.diff_guidance_norm = None
+                                self.diff_guidance_norm = None
                             for key, value in loss_dict.items():
                                 self.logger.log({
                                     f'loss/{key}': value,
