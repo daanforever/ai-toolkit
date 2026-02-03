@@ -98,6 +98,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
         self.start_step = 0
         self.epoch_num = 0
         self.last_save_step = 0
+        # For logging timestep debugging
+        self._timestep_debug_logged = False
+        self._collected_indices = []
+        self._collected_timesteps = []
         # start at 1 so we can do a sample at the start
         self.grad_accumulation_step = 1
         # if true, then we do not do an optimizer step. We are accumulating gradients
@@ -1305,6 +1309,57 @@ class BaseSDTrainProcess(BaseTrainProcess):
             with self.timer('convert_timestep_indices_to_timesteps'):
                 # convert the timestep_indices to a timestep
                 timesteps = self.sd.noise_scheduler.timesteps[timestep_indices.long()]
+                
+                # Debug logging for timestep distribution (once)
+                if not self._timestep_debug_logged:
+                    # Collect data
+                    self._collected_indices.extend(timestep_indices.cpu().tolist())
+                    self._collected_timesteps.extend(timesteps.cpu().tolist())
+                    
+                    # Log once we have 100 samples
+                    if len(self._collected_indices) >= 100:
+                        scheduler_timesteps = self.sd.noise_scheduler.timesteps.cpu().tolist()
+                        
+                        print_acc(f"\n{'='*70}")
+                        print_acc(f"TIMESTEP DISTRIBUTION DEBUG")
+                        print_acc(f"{'='*70}")
+                        print_acc(f"Config:")
+                        print_acc(f"  content_or_style: {content_or_style}")
+                        print_acc(f"  noise_scheduler: {self.train_config.noise_scheduler}")
+                        print_acc(f"  timestep_type: {self.train_config.timestep_type}")
+                        print_acc(f"  gaussian_mean: {self.train_config.gaussian_mean}")
+                        print_acc(f"  gaussian_std: {self.train_config.gaussian_std}")
+                        print_acc(f"  min_denoising_steps: {min_noise_steps}")
+                        print_acc(f"  max_denoising_steps: {max_noise_steps}")
+                        print_acc(f"  num_train_timesteps: {self.train_config.num_train_timesteps}")
+                        
+                        print_acc(f"\nScheduler timesteps array (first 20): {scheduler_timesteps[:20]}")
+                        print_acc(f"Scheduler timesteps array (last 20): {scheduler_timesteps[-20:]}")
+                        print_acc(f"Total scheduler timesteps length: {len(scheduler_timesteps)}")
+                        
+                        print_acc(f"\nFirst 100 timestep_indices (generated indices):")
+                        print_acc(f"{self._collected_indices[:100]}")
+                        
+                        print_acc(f"\nFirst 100 timesteps (actual values after indexing):")
+                        print_acc(f"{self._collected_timesteps[:100]}")
+                        
+                        # Statistics
+                        indices_min = min(self._collected_indices[:100])
+                        indices_max = max(self._collected_indices[:100])
+                        indices_mean = sum(self._collected_indices[:100]) / 100
+                        
+                        timesteps_min = min(self._collected_timesteps[:100])
+                        timesteps_max = max(self._collected_timesteps[:100])
+                        timesteps_mean = sum(self._collected_timesteps[:100]) / 100
+                        
+                        print_acc(f"\nStatistics (first 100 samples):")
+                        print_acc(f"  Indices: min={indices_min}, max={indices_max}, mean={indices_mean:.1f}")
+                        print_acc(f"  Timesteps: min={timesteps_min:.1f}, max={timesteps_max:.1f}, mean={timesteps_mean:.1f}")
+                        print_acc(f"{'='*70}\n")
+                        
+                        self._timestep_debug_logged = True
+                        self._collected_indices = []
+                        self._collected_timesteps = []
                 
             with self.timer('prepare_noise'):
                 # get noise
