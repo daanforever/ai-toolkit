@@ -99,7 +99,6 @@ class BaseSDTrainProcess(BaseTrainProcess):
         self.epoch_num = 0
         self.last_save_step = 0
         # For logging timestep debugging
-        self._timestep_debug_logged = False
         self._collected_indices = []
         self._collected_timesteps = []
         # start at 1 so we can do a sample at the start
@@ -1318,8 +1317,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 # convert the timestep_indices to a timestep
                 timesteps = self.sd.noise_scheduler.timesteps[timestep_indices.long()]
                 
-                # Debug logging for timestep distribution (once)
-                if not self._timestep_debug_logged:
+                # Debug logging for timestep distribution
+                if self.train_config.timestep_debug_log > 0 and self.step_num % self.train_config.timestep_debug_log == 0:
                     # Collect data
                     self._collected_indices.extend(timestep_indices.cpu().tolist())
                     self._collected_timesteps.extend(timesteps.cpu().tolist())
@@ -1370,7 +1369,6 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         print_acc(f"  Timesteps: min={timesteps_min:.1f}, max={timesteps_max:.1f}, mean={timesteps_mean:.1f}")
                         print_acc(f"{'='*70}\n")
                         
-                        self._timestep_debug_logged = True
                         self._collected_indices = []
                         self._collected_timesteps = []
                 
