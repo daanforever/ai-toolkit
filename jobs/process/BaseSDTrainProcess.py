@@ -98,6 +98,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
         self.start_step = 0
         self.epoch_num = 0
         self.last_save_step = 0
+        # For logging timestep_indices
+        self._timestep_indices_log = []
+        self._timestep_params_logged = False
         # start at 1 so we can do a sample at the start
         self.grad_accumulation_step = 1
         # if true, then we do not do an optimizer step. We are accumulating gradients
@@ -1302,6 +1305,31 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     timestep_indices = timestep_indices.long()
                 else:
                     raise ValueError(f"Unknown content_or_style {content_or_style}")
+                
+                # Log timestep parameters once (collect first 100 values)
+                if not self._timestep_params_logged:
+                    # Collect timestep_indices values
+                    indices_list = timestep_indices.cpu().tolist()
+                    self._timestep_indices_log.extend(indices_list)
+                    
+                    # When we have at least 100 values, log everything once
+                    if len(self._timestep_indices_log) >= 100:
+                        print_acc(f"\n{'='*60}")
+                        print_acc(f"TIMESTEP SAMPLING CONFIGURATION")
+                        print_acc(f"{'='*60}")
+                        print_acc(f"content_or_style: {content_or_style}")
+                        print_acc(f"min_denoising_steps: {min_noise_steps}")
+                        print_acc(f"max_denoising_steps: {max_noise_steps}")
+                        if content_or_style == 'gaussian':
+                            print_acc(f"gaussian_mean: {self.train_config.gaussian_mean}")
+                            print_acc(f"gaussian_std: {self.train_config.gaussian_std}")
+                        print_acc(f"\nFirst 100 timestep_indices values:")
+                        print_acc(f"{self._timestep_indices_log[:100]}")
+                        print_acc(f"{'='*60}\n")
+                        
+                        self._timestep_params_logged = True
+                        # Clear the list to free memory
+                        self._timestep_indices_log = []
             with self.timer('convert_timestep_indices_to_timesteps'):
                 # convert the timestep_indices to a timestep
                 timesteps = self.sd.noise_scheduler.timesteps[timestep_indices.long()]
