@@ -299,6 +299,26 @@ const docs: { [key: string]: ConfigDoc } = {
       </>
     ),
   },
+  'train.content_or_style': {
+    title: 'Timestep Bias',
+    description: (
+      <>
+        Controls how timesteps are sampled during training:
+        <br /><br />
+        <b>Balanced</b>: Uniform distribution across all timesteps.
+        <br /><br />
+        <b>High Noise</b>: Cubic distribution favoring earlier timesteps (more noise). Best for learning content/structure.
+        <br /><br />
+        <b>Low Noise</b>: Cubic distribution favoring later timesteps (less noise). Best for learning style/details.
+        <br /><br />
+        <b>Gaussian (Normal)</b>: Normal distribution with configurable center and spread. Use <code>gaussian_mean</code> and <code>gaussian_std</code> in YAML config:
+        <br />
+        • <code>gaussian_mean</code> (default 0.5): Center of distribution. Lower values (0.0-0.5) = more noise/earlier timesteps, higher values (0.5-1.0) = less noise/later timesteps.
+        <br />
+        • <code>gaussian_std</code> (default 0.2): Spread of distribution. Smaller = narrower focus, larger = wider coverage.
+      </>
+    ),
+  },
   'train.do_differential_guidance': {
     title: 'Differential Guidance',
     description: (

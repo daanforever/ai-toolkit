@@ -1255,9 +1255,13 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     )
                     
                 elif content_or_style == 'gaussian':
-                    # Gaussian (normal) distribution centered at 0.5
-                    # This concentrates probability around middle timesteps
-                    gaussian_samples = torch.randn((batch_size,), device=latents.device) * 0.2 + 0.5
+                    # Gaussian (normal) distribution with configurable mean and std
+                    # gaussian_mean: controls the center of distribution (default 0.5)
+                    #   - Lower values (0.0-0.5): favor earlier timesteps (more noise)
+                    #   - Higher values (0.5-1.0): favor later timesteps (less noise)
+                    # gaussian_std: controls the spread of distribution (default 0.2)
+                    #   - Affects the shape: smaller = narrower, larger = wider
+                    gaussian_samples = torch.randn((batch_size,), device=latents.device) * self.train_config.gaussian_std + self.train_config.gaussian_mean
                     # Clamp to (0, 1) range (open interval) to avoid division by zero
                     # Use small epsilon to exclude exact 0 and 1
                     eps = 1e-7

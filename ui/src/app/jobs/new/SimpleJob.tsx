@@ -531,6 +531,7 @@ export default function SimpleJob({
                 <SelectInput
                   label="Timestep Bias"
                   className="pt-2"
+                  docKey="train.content_or_style"
                   value={jobConfig.config.process[0].train.content_or_style}
                   onChange={value => setJobConfig(value, 'config.process[0].train.content_or_style')}
                   options={[
