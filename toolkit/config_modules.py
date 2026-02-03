@@ -355,6 +355,7 @@ class TrainConfig:
         self.content_or_style_reg: ContentOrStyleType = kwargs.get('content_or_style', 'balanced')
         self.gaussian_mean: float = kwargs.get('gaussian_mean', 0.5)
         self.gaussian_std: float = kwargs.get('gaussian_std', 0.2)
+        self.gaussian_std_target: float = kwargs.get('gaussian_std_target', None)
         self.steps: int = kwargs.get('steps', 1000)
         self.lr = kwargs.get('lr', 1e-6)
         self.unet_lr = kwargs.get('unet_lr', self.lr)

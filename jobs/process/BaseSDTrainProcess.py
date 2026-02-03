@@ -1265,7 +1265,15 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     #   - Higher values (0.5-1.0): favor later timesteps (less noise)
                     # gaussian_std: controls the spread of distribution (default 0.2)
                     #   - Affects the shape: smaller = narrower, larger = wider
-                    gaussian_samples = torch.randn((batch_size,), device=latents.device) * self.train_config.gaussian_std + self.train_config.gaussian_mean
+                    
+                    # Curriculum learning: linearly interpolate gaussian_std if target is set
+                    if self.train_config.gaussian_std_target is not None:
+                        progress = self.step_num / self.train_config.steps
+                        current_std = self.train_config.gaussian_std + progress * (self.train_config.gaussian_std_target - self.train_config.gaussian_std)
+                    else:
+                        current_std = self.train_config.gaussian_std
+                    
+                    gaussian_samples = torch.randn((batch_size,), device=latents.device) * current_std + self.train_config.gaussian_mean
                     # Clamp to (0, 1) range (open interval) to avoid division by zero
                     # Use small epsilon to exclude exact 0 and 1
                     eps = 1e-7
@@ -1329,6 +1337,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         print_acc(f"  timestep_type: {self.train_config.timestep_type}")
                         print_acc(f"  gaussian_mean: {self.train_config.gaussian_mean}")
                         print_acc(f"  gaussian_std: {self.train_config.gaussian_std}")
+                        print_acc(f"  gaussian_std_target: {self.train_config.gaussian_std_target}")
+                        if self.train_config.gaussian_std_target is not None:
+                            progress = self.step_num / self.train_config.steps
+                            current_std = self.train_config.gaussian_std + progress * (self.train_config.gaussian_std_target - self.train_config.gaussian_std)
+                            print_acc(f"  current_std at step {self.step_num}: {current_std:.6f} (progress: {progress:.4f})")
                         print_acc(f"  min_denoising_steps: {min_noise_steps}")
                         print_acc(f"  max_denoising_steps: {max_noise_steps}")
                         print_acc(f"  num_train_timesteps: {self.train_config.num_train_timesteps}")

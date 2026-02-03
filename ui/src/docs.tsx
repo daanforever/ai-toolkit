@@ -316,6 +316,8 @@ const docs: { [key: string]: ConfigDoc } = {
         • <code>gaussian_mean</code> (default 0.5): Center of distribution. Lower values (0.0-0.5) = more noise/earlier timesteps, higher values (0.5-1.0) = less noise/later timesteps.
         <br />
         • <code>gaussian_std</code> (default 0.2): Spread of distribution. Smaller = narrower focus, larger = wider coverage.
+        <br />
+        • <code>gaussian_std_target</code> (optional, default None): Enable curriculum learning. When set, gaussian_std will linearly interpolate from initial value to this target value during training. Example: start with gaussian_std: 0.001 (narrow distribution, focused training) → end with gaussian_std_target: 0.3 (wide distribution, diverse timestep coverage).
       </>
     ),
   },
