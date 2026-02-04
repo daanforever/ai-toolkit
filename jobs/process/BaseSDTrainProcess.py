@@ -1366,8 +1366,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         timesteps_mean = sum(self._collected_timesteps[:num_samples]) / num_samples
                         
                         print_acc(f"\nStatistics ({num_samples} samples):")
-                        print_acc(f"  Indices: min={indices_min}, max={indices_max}, mean={indices_mean:.1f}")
-                        print_acc(f"  Timesteps: min={timesteps_min:.1f}, max={timesteps_max:.1f}, mean={timesteps_mean:.1f}")
+                        print_acc(f"  Indices: max={indices_max}, mean={indices_mean:.1f}, min={indices_min}")
+                        print_acc(f"  Timesteps: max={timesteps_max:.1f}, mean={timesteps_mean:.1f}, min={timesteps_min:.1f}")
                         print_acc(f"  Step: {self.step_num} ({self.step_num / self.train_config.steps * 100:.2f}%)")
                         print_acc(f"{'='*70}\n")
                         
