@@ -1330,10 +1330,23 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         print_acc(f"\n{'='*70}")
                         print_acc(f"TIMESTEP DISTRIBUTION DEBUG")
                         print_acc(f"{'='*70}")
+
+                        print_acc(f"Total scheduler timesteps length: {len(scheduler_timesteps)}")
+                        # print_acc(f"\nScheduler timesteps array (first 10): {scheduler_timesteps[:10]}")
+                        # print_acc(f"Scheduler timesteps array (last 10): {scheduler_timesteps[-10:]}")
+                        
+                        # print_acc(f"\nFirst 10 timestep_indices (generated indices):")
+                        # print_acc(f"{self._collected_indices[:10]}")
+                        print_acc(f"\nFirst 10 timesteps (actual values after indexing):")
+                        print_acc(f"{self._collected_timesteps[:10]}")
+
                         print_acc(f"Config:")
                         print_acc(f"  content_or_style: {content_or_style}")
                         print_acc(f"  noise_scheduler: {self.train_config.noise_scheduler}")
                         print_acc(f"  timestep_type: {self.train_config.timestep_type}")
+                        print_acc(f"  num_train_timesteps: {self.train_config.num_train_timesteps}")
+                        print_acc(f"  min_denoising_steps: {min_noise_steps}")
+                        print_acc(f"  max_denoising_steps: {max_noise_steps}")
                         print_acc(f"  gaussian_mean: {self.train_config.gaussian_mean}")
                         print_acc(f"  gaussian_std: {self.train_config.gaussian_std}")
                         print_acc(f"  gaussian_std_target: {self.train_config.gaussian_std_target}")
@@ -1341,19 +1354,6 @@ class BaseSDTrainProcess(BaseTrainProcess):
                             progress = self.step_num / self.train_config.steps
                             current_std = self.train_config.gaussian_std + progress * (self.train_config.gaussian_std_target - self.train_config.gaussian_std)
                             print_acc(f"  current_std at step {self.step_num}: {current_std:.6f} (progress: {progress:.4f})")
-                        print_acc(f"  min_denoising_steps: {min_noise_steps}")
-                        print_acc(f"  max_denoising_steps: {max_noise_steps}")
-                        print_acc(f"  num_train_timesteps: {self.train_config.num_train_timesteps}")
-                        
-                        print_acc(f"\nScheduler timesteps array (first 20): {scheduler_timesteps[:20]}")
-                        print_acc(f"Scheduler timesteps array (last 20): {scheduler_timesteps[-20:]}")
-                        print_acc(f"Total scheduler timesteps length: {len(scheduler_timesteps)}")
-                        
-                        print_acc(f"\nFirst 10 timestep_indices (generated indices):")
-                        print_acc(f"{self._collected_indices[:10]}")
-                        
-                        print_acc(f"\nFirst 10 timesteps (actual values after indexing):")
-                        print_acc(f"{self._collected_timesteps[:10]}")
                         
                         # Statistics
                         num_samples = self.train_config.timestep_debug_log
@@ -1365,9 +1365,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         timesteps_max = max(self._collected_timesteps[:num_samples])
                         timesteps_mean = sum(self._collected_timesteps[:num_samples]) / num_samples
                         
-                        print_acc(f"\nStatistics (first {num_samples} samples):")
+                        print_acc(f"\nStatistics ({num_samples} samples):")
                         print_acc(f"  Indices: min={indices_min}, max={indices_max}, mean={indices_mean:.1f}")
                         print_acc(f"  Timesteps: min={timesteps_min:.1f}, max={timesteps_max:.1f}, mean={timesteps_mean:.1f}")
+                        print_acc(f"  Step: {self.step_num} ({self.step_num / self.train_config.steps * 100:.2f}%)")
                         print_acc(f"{'='*70}\n")
                         
                         self._collected_indices = []
