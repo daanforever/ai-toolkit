@@ -18,8 +18,6 @@ class SequentialLRWrapper(torch.optim.lr_scheduler.SequentialLR):
 def _create_scheduler_with_warmup(
         scheduler_type: str,
         optimizer: torch.optim.Optimizer,
-        warmup_steps: int,
-        total_iters: int,
         **scheduler_kwargs
 ):
     """
@@ -28,28 +26,53 @@ def _create_scheduler_with_warmup(
     Args:
         scheduler_type: 'cosine' or 'cosine_with_restarts'
         optimizer: The optimizer to schedule
-        warmup_steps: Number of warmup steps (0 = no warmup)
-        total_iters: Total number of iterations (fallback if specific param not in kwargs)
-        scheduler_kwargs: Additional parameters for the main scheduler
+        scheduler_kwargs: Parameters for the scheduler. Can include:
+            - warmup_steps: Number of warmup steps (default: 0, no warmup)
+            - total_iters: TOTAL number of iterations INCLUDING warmup (default: 1000)
+            - T_0/T_max: Iterations for MAIN scheduler, overrides calculation from total_iters
+            - Other scheduler parameters (T_mult, eta_min, etc.)
+    
+    Semantics:
+        - total_iters: Total training iterations (warmup + main scheduler)
+        - T_0/T_max: Main scheduler iterations (if specified, total_iters is ignored)
+        - If only total_iters specified: main_iters = total_iters - warmup_steps
+        - If T_0/T_max specified: main_iters = T_0/T_max (total_iters ignored)
     
     Returns:
         A scheduler (SequentialLR if warmup_steps > 0, otherwise base scheduler)
     """
-    # Extract scheduler-specific parameters from kwargs to avoid duplication
+    # Extract warmup_steps (default: 0, no warmup)
+    warmup_steps = scheduler_kwargs.pop('warmup_steps', 0)
+    
+    # Extract total_iters (GENERAL total, including warmup)
+    total_iters = scheduler_kwargs.pop('total_iters', 1000)
+    
+    # Calculate main scheduler iterations
+    # T_0/T_max have priority and specify main scheduler iterations directly
     if scheduler_type == "cosine":
-        # For cosine scheduler, use T_max
         if 'T_max' in scheduler_kwargs:
-            # If T_max is explicitly specified, use it (ignore total_iters for main scheduler)
+            # T_max specifies main scheduler iterations (ignores total_iters)
             main_total_iters = scheduler_kwargs.pop('T_max')
         else:
-            main_total_iters = total_iters - warmup_steps if warmup_steps > 0 else total_iters
+            # Calculate from total_iters
+            main_total_iters = total_iters - warmup_steps
     elif scheduler_type == "cosine_with_restarts":
-        # For cosine_with_restarts scheduler, use T_0
         if 'T_0' in scheduler_kwargs:
-            # If T_0 is explicitly specified, use it (ignore total_iters for main scheduler)
+            # T_0 specifies main scheduler iterations (ignores total_iters)
             main_total_iters = scheduler_kwargs.pop('T_0')
         else:
-            main_total_iters = total_iters - warmup_steps if warmup_steps > 0 else total_iters
+            # Calculate from total_iters
+            main_total_iters = total_iters - warmup_steps
+    
+    # Validation: warn if configuration seems incorrect
+    if main_total_iters <= 0:
+        raise ValueError(
+            f"Main scheduler iterations must be positive, got {main_total_iters}. "
+            f"Check your total_iters ({total_iters}) and warmup_steps ({warmup_steps})."
+        )
+    if warmup_steps > 0 and warmup_steps >= total_iters:
+        print(f"WARNING: warmup_steps ({warmup_steps}) >= total_iters ({total_iters}). "
+              f"The main scheduler will have very few or no iterations.")
     
     if warmup_steps <= 0:
         # No warmup, create base scheduler directly
@@ -96,22 +119,14 @@ def get_lr_scheduler(
         **kwargs,
 ):
     if name == "cosine":
-        # Extract warmup_steps and total_iters
-        warmup_steps = kwargs.pop('warmup_steps', 0)
-        total_iters = kwargs.pop('total_iters', 1000)
-        # T_max remains in kwargs and will be handled in _create_scheduler_with_warmup
-        
+        # All parameters passed via kwargs, handled in _create_scheduler_with_warmup
         return _create_scheduler_with_warmup(
-            "cosine", optimizer, warmup_steps, total_iters, **kwargs
+            "cosine", optimizer, **kwargs
         )
     elif name == "cosine_with_restarts":
-        # Extract warmup_steps and total_iters
-        warmup_steps = kwargs.pop('warmup_steps', 0)
-        total_iters = kwargs.pop('total_iters', 1000)
-        # T_0 remains in kwargs and will be handled in _create_scheduler_with_warmup
-        
+        # All parameters passed via kwargs, handled in _create_scheduler_with_warmup
         return _create_scheduler_with_warmup(
-            "cosine_with_restarts", optimizer, warmup_steps, total_iters, **kwargs
+            "cosine_with_restarts", optimizer, **kwargs
         )
     elif name == "step":
 

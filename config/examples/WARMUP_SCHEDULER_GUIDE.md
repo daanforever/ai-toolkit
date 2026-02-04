@@ -20,7 +20,10 @@ When you specify `warmup_steps > 0`, the scheduler automatically creates a compo
 
 2. **Main Phase** (steps `warmup_steps` to `total_steps`):
    - Uses the specified scheduler (cosine or cosine_with_restarts)
-   - The `total_iters` for the main scheduler is automatically adjusted to `total_steps - warmup_steps`
+   - `total_iters` specifies the TOTAL number of training iterations (including warmup)
+   - `T_0`/`T_max` specify iterations for the MAIN scheduler phase (after warmup)
+   - If T_0/T_max is specified, it takes priority over calculated value from total_iters
+   - Main scheduler iterations = total_iters - warmup_steps (or T_0/T_max if specified)
 
 ### Learning Rate Progression
 
@@ -34,6 +37,52 @@ LR |
    +----------------------------> steps
    |<-warmup->|<-- cosine restarts -->
 ```
+
+## Parameter Semantics
+
+### Key concepts
+
+- **`total_iters`**: TOTAL training iterations (including warmup)
+- **`T_0`/`T_max`**: Main scheduler iterations (after warmup), overrides calculation from total_iters
+
+### Example: Training with 1000 total steps
+
+**Config 1: Using total_iters (automatic calculation)**
+
+```yaml
+train:
+  steps: 1000  # Will be used as total_iters by BaseSDTrainProcess
+  lr_scheduler: "cosine_with_restarts"
+  lr_scheduler_params:
+    warmup_steps: 100
+    # total_iters will be auto-set to 1000 by BaseSDTrainProcess
+    T_mult: 2
+```
+
+**Result:**
+- Steps 0-100: Linear warmup
+- Steps 100-1000: Cosine with restarts (900 iterations = 1000 - 100)
+- Total: 1000 steps ✓
+
+**Config 2: Using T_0 explicitly (overrides calculation)**
+
+```yaml
+train:
+  steps: 1000
+  lr_scheduler: "cosine_with_restarts"
+  lr_scheduler_params:
+    warmup_steps: 100
+    total_iters: 1000
+    T_0: 500  # Overrides default calculation (1000 - 100)
+    T_mult: 2
+```
+
+**Result:**
+- Steps 0-100: Linear warmup
+- Steps 100-600: Cosine with restarts (500 iterations from T_0)
+- Total: 600 steps (less than total_iters!)
+
+**Priority:** If both `T_0` and `total_iters` are specified, `T_0` takes priority and determines main scheduler length.
 
 ## Configuration Examples
 
@@ -166,7 +215,9 @@ warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
 # Main phase (example for cosine_with_restarts)
 main_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
     optimizer,
-    T_0=total_iters - warmup_steps,  # Adjusted for warmup
+    T_0=total_iters - warmup_steps,  # Calculated from total iterations
+    # Or explicitly specify main scheduler iterations:
+    # T_0=900,  # Direct specification (ignores total_iters calculation)
     T_mult=2,
     eta_min=1e-7
 )
