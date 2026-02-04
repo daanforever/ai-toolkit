@@ -88,7 +88,7 @@ def _create_scheduler_with_warmup(
     # Create warmup scheduler (linear from ~0 to 1.0)
     warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
         optimizer,
-        start_factor=0.01,   # 1/100 of the target LR
+        start_factor=0.1,   # 1/10 of the target LR
         end_factor=1.0,      # End at full LR
         total_iters=warmup_steps
     )
