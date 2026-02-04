@@ -3,6 +3,18 @@ from typing import Optional
 from diffusers.optimization import SchedulerType, TYPE_TO_SCHEDULER_FUNCTION, get_constant_schedule_with_warmup
 
 
+class SequentialLRWrapper(torch.optim.lr_scheduler.SequentialLR):
+    """
+    Wrapper for SequentialLR that ignores extra arguments to step().
+    
+    This is needed because the training code calls lr_scheduler.step(step_num),
+    but SequentialLR.step() doesn't accept any arguments.
+    """
+    def step(self, *args, **kwargs):
+        # Ignore all arguments and call parent step() without them
+        super().step()
+
+
 def _create_scheduler_with_warmup(
         scheduler_type: str,
         optimizer: torch.optim.Optimizer,
@@ -55,8 +67,8 @@ def _create_scheduler_with_warmup(
             optimizer, T_0=main_total_iters, **scheduler_kwargs
         )
     
-    # Combine schedulers using SequentialLR
-    combined_scheduler = torch.optim.lr_scheduler.SequentialLR(
+    # Combine schedulers using SequentialLRWrapper
+    combined_scheduler = SequentialLRWrapper(
         optimizer,
         schedulers=[warmup_scheduler, main_scheduler],
         milestones=[warmup_steps]
