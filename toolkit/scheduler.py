@@ -3,22 +3,94 @@ from typing import Optional
 from diffusers.optimization import SchedulerType, TYPE_TO_SCHEDULER_FUNCTION, get_constant_schedule_with_warmup
 
 
+def _create_scheduler_with_warmup(
+        scheduler_type: str,
+        optimizer: torch.optim.Optimizer,
+        warmup_steps: int,
+        total_iters: int,
+        **scheduler_kwargs
+):
+    """
+    Creates a scheduler with optional warmup period using SequentialLR.
+    
+    Args:
+        scheduler_type: 'cosine' or 'cosine_with_restarts'
+        optimizer: The optimizer to schedule
+        warmup_steps: Number of warmup steps (0 = no warmup)
+        total_iters: Total number of iterations
+        scheduler_kwargs: Additional parameters for the main scheduler
+    
+    Returns:
+        A scheduler (SequentialLR if warmup_steps > 0, otherwise base scheduler)
+    """
+    if warmup_steps <= 0:
+        # No warmup, create base scheduler directly
+        if scheduler_type == "cosine":
+            return torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=total_iters, **scheduler_kwargs
+            )
+        elif scheduler_type == "cosine_with_restarts":
+            return torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+                optimizer, T_0=total_iters, **scheduler_kwargs
+            )
+    
+    # Create warmup scheduler (linear from ~0 to 1.0)
+    warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+        optimizer,
+        start_factor=1e-10,  # Start almost at 0
+        end_factor=1.0,      # End at full LR
+        total_iters=warmup_steps
+    )
+    
+    # Adjust total_iters for main scheduler (subtract warmup steps)
+    main_total_iters = total_iters - warmup_steps
+    
+    # Create main scheduler
+    if scheduler_type == "cosine":
+        main_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=main_total_iters, **scheduler_kwargs
+        )
+    elif scheduler_type == "cosine_with_restarts":
+        main_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer, T_0=main_total_iters, **scheduler_kwargs
+        )
+    
+    # Combine schedulers using SequentialLR
+    combined_scheduler = torch.optim.lr_scheduler.SequentialLR(
+        optimizer,
+        schedulers=[warmup_scheduler, main_scheduler],
+        milestones=[warmup_steps]
+    )
+    
+    return combined_scheduler
+
+
 def get_lr_scheduler(
         name: Optional[str],
         optimizer: torch.optim.Optimizer,
         **kwargs,
 ):
     if name == "cosine":
-        if 'total_iters' in kwargs:
-            kwargs['T_max'] = kwargs.pop('total_iters')
-        return torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, **kwargs
+        # Extract warmup_steps if present
+        warmup_steps = kwargs.pop('warmup_steps', 0)
+        total_iters = kwargs.pop('total_iters', None)
+        
+        if total_iters is None:
+            total_iters = kwargs.pop('T_max', 1000)
+        
+        return _create_scheduler_with_warmup(
+            "cosine", optimizer, warmup_steps, total_iters, **kwargs
         )
     elif name == "cosine_with_restarts":
-        if 'total_iters' in kwargs:
-            kwargs['T_0'] = kwargs.pop('total_iters')
-        return torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-            optimizer, **kwargs
+        # Extract warmup_steps if present
+        warmup_steps = kwargs.pop('warmup_steps', 0)
+        total_iters = kwargs.pop('total_iters', None)
+        
+        if total_iters is None:
+            total_iters = kwargs.pop('T_0', 1000)
+        
+        return _create_scheduler_with_warmup(
+            "cosine_with_restarts", optimizer, warmup_steps, total_iters, **kwargs
         )
     elif name == "step":
 
