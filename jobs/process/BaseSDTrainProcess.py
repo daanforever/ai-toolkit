@@ -1369,8 +1369,6 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         print_acc(f"  Indices: min={indices_min}, max={indices_max}, mean={indices_mean:.1f}")
                         print_acc(f"  Timesteps: min={timesteps_min:.1f}, max={timesteps_max:.1f}, mean={timesteps_mean:.1f}")
                         print_acc(f"  Step: {self.step_num} ({self.step_num / self.train_config.steps * 100:.2f}%)")
-                        print_acc(f"  LR: {learning_rate:.1e}")
-
                         print_acc(f"{'='*70}\n")
                         
                         self._collected_indices = []
