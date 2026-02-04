@@ -1349,11 +1349,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         print_acc(f"Scheduler timesteps array (last 20): {scheduler_timesteps[-20:]}")
                         print_acc(f"Total scheduler timesteps length: {len(scheduler_timesteps)}")
                         
-                        print_acc(f"\nFirst {self.train_config.timestep_debug_log} timestep_indices (generated indices):")
-                        print_acc(f"{self._collected_indices[:self.train_config.timestep_debug_log]}")
+                        print_acc(f"\nFirst 10 timestep_indices (generated indices):")
+                        print_acc(f"{self._collected_indices[:10]}")
                         
-                        print_acc(f"\nFirst {self.train_config.timestep_debug_log} timesteps (actual values after indexing):")
-                        print_acc(f"{self._collected_timesteps[:self.train_config.timestep_debug_log]}")
+                        print_acc(f"\nFirst 10 timesteps (actual values after indexing):")
+                        print_acc(f"{self._collected_timesteps[:10]}")
                         
                         # Statistics
                         num_samples = self.train_config.timestep_debug_log
