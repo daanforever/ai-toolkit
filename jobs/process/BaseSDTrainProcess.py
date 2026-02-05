@@ -1283,12 +1283,12 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         timestep_indices,
                         0,
                         ntt,
-                        ntt - min_noise_steps,
-                        ntt - max_noise_steps
+                        ntt - max_noise_steps,
+                        ntt - min_noise_steps
                     )
                     timestep_indices = timestep_indices.long().clamp(
-                        min_noise_steps,
-                        max_noise_steps
+                        ntt - max_noise_steps,
+                        ntt - min_noise_steps
                     )
                     
                 elif content_or_style == 'balanced':
