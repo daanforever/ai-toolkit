@@ -1273,10 +1273,6 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         current_std = self.train_config.gaussian_std
                     
                     gaussian_samples = torch.randn((batch_size,), device=latents.device) * current_std + self.train_config.gaussian_mean
-                    # Clamp to (0, 1) range (open interval) to avoid division by zero
-                    # Use small epsilon to exclude exact 0 and 1
-                    eps = 1e-7
-                    gaussian_samples = torch.clamp(gaussian_samples, eps, 1.0 - eps)
                     # Scale to num_train_timesteps
                     timestep_indices = gaussian_samples * self.train_config.num_train_timesteps
                     
@@ -1335,8 +1331,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         # print_acc(f"\nScheduler timesteps array (first 10): {scheduler_timesteps[:10]}")
                         # print_acc(f"Scheduler timesteps array (last 10): {scheduler_timesteps[-10:]}")
                         
-                        # print_acc(f"\nFirst 10 timestep_indices (generated indices):")
-                        # print_acc(f"{self._collected_indices[:10]}")
+                        print_acc(f"\nFirst 10 timestep_indices (generated indices):")
+                        print_acc(f"{self._collected_indices[:10]}")
                         print_acc(f"\nFirst 10 timesteps (actual values after indexing):")
                         print_acc(f"{self._collected_timesteps[:10]}")
 
@@ -1351,9 +1347,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         print_acc(f"  gaussian_std: {self.train_config.gaussian_std}")
                         print_acc(f"  gaussian_std_target: {self.train_config.gaussian_std_target}")
                         if self.train_config.gaussian_std_target is not None:
-                            progress = self.step_num * 100 / self.train_config.steps
+                            progress = self.step_num / self.train_config.steps
                             current_std = self.train_config.gaussian_std + progress * (self.train_config.gaussian_std_target - self.train_config.gaussian_std)
-                            print_acc(f"  current_std at step {self.step_num}: {current_std:.6f} (progress: {progress:.1f}%)")
+                            percent = progress * 100.0
+                            print_acc(f"  current_std at step {self.step_num}: {current_std:.6f} (progress: {percent:.1f}%)")
                         
                         # Statistics
                         num_samples = self.train_config.timestep_debug_log
