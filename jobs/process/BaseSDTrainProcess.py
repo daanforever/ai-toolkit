@@ -1275,14 +1275,16 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     gaussian_samples = torch.randn((batch_size,), device=latents.device) * current_std + self.train_config.gaussian_mean
                     # Scale to num_train_timesteps
                     timestep_indices = gaussian_samples * self.train_config.num_train_timesteps
-                    
+
+                    ntt = self.train_config.num_train_timesteps - 1                    
+
                     # Map to min/max_noise_steps range (same as content/style)
                     timestep_indices = value_map(
                         timestep_indices,
                         0,
-                        self.train_config.num_train_timesteps - 1,
-                        min_noise_steps,
-                        max_noise_steps
+                        ntt,
+                        ntt - min_noise_steps,
+                        ntt - max_noise_steps
                     )
                     timestep_indices = timestep_indices.long().clamp(
                         min_noise_steps,
