@@ -1276,7 +1276,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     # Scale to num_train_timesteps
                     timestep_indices = gaussian_samples * self.train_config.num_train_timesteps
 
-                    ntt = self.train_config.num_train_timesteps - 1                    
+                    ntt = self.train_config.num_train_timesteps                    
 
                     # Map to min/max_noise_steps range (same as content/style)
                     timestep_indices = value_map(
