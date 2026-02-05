@@ -1366,7 +1366,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                             progress = self.step_num / self.train_config.steps
                             current_std = self.train_config.gaussian_std + progress * (self.train_config.gaussian_std_target - self.train_config.gaussian_std)
                             percent = progress * 100.0
-                            print_acc(f"  current_std: {current_std:.6f} (progress: {percent:.1f}%)")
+                            print_acc(f"  current_std: {current_std:.3f} (progress: {percent:.1f}%)")
                         print_acc(f"  Step: {self.step_num} ({self.step_num * 100 / self.train_config.steps:.1f}%)")
                         print_acc(f"{'='*70}\n")
                         
