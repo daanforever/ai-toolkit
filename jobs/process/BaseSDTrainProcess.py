@@ -1348,11 +1348,6 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         print_acc(f"  gaussian_mean: {self.train_config.gaussian_mean}")
                         print_acc(f"  gaussian_std: {self.train_config.gaussian_std}")
                         print_acc(f"  gaussian_std_target: {self.train_config.gaussian_std_target}")
-                        if self.train_config.gaussian_std_target is not None:
-                            progress = self.step_num / self.train_config.steps
-                            current_std = self.train_config.gaussian_std + progress * (self.train_config.gaussian_std_target - self.train_config.gaussian_std)
-                            percent = progress * 100.0
-                            print_acc(f"  current_std at step {self.step_num}: {current_std:.6f} (progress: {percent:.1f}%)")
                         
                         # Statistics
                         num_samples = self.train_config.timestep_debug_log
@@ -1367,6 +1362,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         print_acc(f"\nStatistics ({num_samples} samples):")
                         print_acc(f"  Indices: max={indices_max}, mean={indices_mean:.1f}, min={indices_min}")
                         print_acc(f"  Timesteps: max={timesteps_max:.1f}, mean={timesteps_mean:.1f}, min={timesteps_min:.1f}")
+                        if self.train_config.gaussian_std_target is not None:
+                            progress = self.step_num / self.train_config.steps
+                            current_std = self.train_config.gaussian_std + progress * (self.train_config.gaussian_std_target - self.train_config.gaussian_std)
+                            percent = progress * 100.0
+                            print_acc(f"  current_std: {current_std:.6f} (progress: {percent:.1f}%)")
                         print_acc(f"  Step: {self.step_num} ({self.step_num * 100 / self.train_config.steps:.1f}%)")
                         print_acc(f"{'='*70}\n")
                         
