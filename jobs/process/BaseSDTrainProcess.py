@@ -1272,7 +1272,18 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     else:
                         current_std = self.train_config.gaussian_std
                     
-                    gaussian_samples = torch.randn((batch_size,), device=latents.device) * current_std + self.train_config.gaussian_mean
+                    # 1. Generate raw samples from a normal distribution based on current mean and std
+                    raw_samples = torch.randn((batch_size,), device=latents.device) * current_std + self.train_config.gaussian_mean
+
+                    # 2. Apply "Ping-Pong" reflection logic to keep values within [0, 1] range without clipping.
+                    # This formula folds values outside the [0, 1] range back into it (e.g., -0.1 becomes 0.1, 1.1 becomes 0.9).
+                    # Logic breakdown:
+                    # - raw_samples % 2: Maps any real number into the [0, 2) interval.
+                    # - (... - 1): Shifts the range to [-1, 1).
+                    # - (...).abs(): Folds the negative half into positive, creating a triangle wave in [0, 1].
+                    # - 1 - (...): Inverts the result so that 'mean' 0 or 1 stays intuitive at the boundaries.
+                    gaussian_samples = 1 - (raw_samples % 2 - 1).abs()
+
                     # Scale to num_train_timesteps
                     timestep_indices = gaussian_samples * self.train_config.num_train_timesteps
 
