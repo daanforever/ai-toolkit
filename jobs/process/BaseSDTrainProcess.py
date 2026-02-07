@@ -1242,8 +1242,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
                     if content_or_style == 'content':
                         timestep_indices = (1 - orig_timesteps ** 3) * self.train_config.num_train_timesteps
+                        timestep_indices.sort(reverse=True)
                     elif content_or_style == 'style':
                         timestep_indices = orig_timesteps ** 3 * self.train_config.num_train_timesteps
+                        timestep_indices.sort()
 
                     timestep_indices = value_map(
                         timestep_indices,
