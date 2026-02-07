@@ -1242,22 +1242,21 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
                     if content_or_style == 'content':
                         timestep_indices = (1 - orig_timesteps) ** 3 * self.train_config.num_train_timesteps
-                        timestep_indices.sort()
                     elif content_or_style == 'style':
                         timestep_indices = orig_timesteps ** 3 * self.train_config.num_train_timesteps
-                        timestep_indices.sort(descending = True)
 
                     timestep_indices = value_map(
                         timestep_indices,
                         0,
                         self.train_config.num_train_timesteps - 1,
-                        min_noise_steps,
-                        max_noise_steps
+                        max_noise_steps,
+                        min_noise_steps
                     )
                     timestep_indices = timestep_indices.long().clamp(
                         min_noise_steps,
                         max_noise_steps
                     )
+                    timestep_indices.sort()
                     
                 elif content_or_style == 'gaussian':
                     # Gaussian (normal) distribution with configurable mean and std
