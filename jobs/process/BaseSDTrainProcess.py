@@ -1858,6 +1858,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     is_ssd=self.model_config.is_ssd,
                     is_vega=self.model_config.is_vega,
                     dropout=self.network_config.dropout,
+                    rank_dropout=self.network_config.rank_dropout,
+                    module_dropout=self.network_config.module_dropout,
                     use_text_encoder_1=self.model_config.use_text_encoder_1,
                     use_text_encoder_2=self.model_config.use_text_encoder_2,
                     use_bias=is_lorm,
