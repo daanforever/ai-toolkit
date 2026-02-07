@@ -1239,6 +1239,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     # for style, it is best to favor later timesteps
 
                     orig_timesteps = torch.rand((batch_size,), device=latents.device)
+                    ntt = self.train_config.num_train_timesteps
 
                     if content_or_style == 'content':
                         timestep_indices = (1 - orig_timesteps) ** 3 * self.train_config.num_train_timesteps
@@ -1248,14 +1249,16 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     timestep_indices = value_map(
                         timestep_indices,
                         0,
-                        self.train_config.num_train_timesteps - 1,
-                        max_noise_steps,
-                        min_noise_steps
+                        ntt,
+                        ntt - max_noise_steps,
+                        ntt - min_noise_steps
                     )
+
                     timestep_indices = timestep_indices.long().clamp(
-                        min_noise_steps,
-                        max_noise_steps
+                        ntt - max_noise_steps,
+                        ntt - min_noise_steps
                     )
+
                     timestep_indices.sort()
                     
                 elif content_or_style == 'gaussian':
@@ -1288,7 +1291,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     # Scale to num_train_timesteps
                     timestep_indices = gaussian_samples * self.train_config.num_train_timesteps
 
-                    ntt = self.train_config.num_train_timesteps                    
+                    ntt = self.train_config.num_train_timesteps
 
                     # Map to min/max_noise_steps range (same as content/style)
                     timestep_indices = value_map(
@@ -1298,10 +1301,13 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         ntt - max_noise_steps,
                         ntt - min_noise_steps
                     )
+
                     timestep_indices = timestep_indices.long().clamp(
                         ntt - max_noise_steps,
                         ntt - min_noise_steps
                     )
+
+                    timestep_indices.sort()
                     
                 elif content_or_style == 'balanced':
                     if min_noise_steps == max_noise_steps:
