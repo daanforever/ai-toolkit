@@ -2328,6 +2328,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 # torch.cuda.empty_cache()
                 # if optimizer has get_lrs method, then use it
                 learning_rate = 0.0
+                update_rms = 0.0  # Average weight update RMS (for monitoring optimizer step magnitude)
                 if not did_oom and loss_dict is not None:
                     if hasattr(optimizer, 'get_avg_learning_rate'):
                         learning_rate = optimizer.get_avg_learning_rate()
@@ -2341,8 +2342,14 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         )
                     else:
                         learning_rate = optimizer.param_groups[0]['lr']
+                    
+                    # Get average weight update RMS if optimizer supports it (e.g., Adafactor)
+                    if hasattr(optimizer, 'get_avg_update_rms'):
+                        update_rms = optimizer.get_avg_update_rms()
 
                     prog_bar_string = f"lr: {learning_rate:.1e}"
+                    if update_rms > 0:
+                        prog_bar_string += f" upd: {update_rms:.2e}"
                     for key, value in loss_dict.items():
                         prog_bar_string += f" {key}: {value:.3e}"
 
@@ -2402,6 +2409,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                         for key, value in loss_dict.items():
                                             self.writer.add_scalar(f"{key}", value, self.step_num)
                                         self.writer.add_scalar(f"lr", learning_rate, self.step_num)
+                                        # Log weight update RMS if available (shows optimizer step magnitude)
+                                        if update_rms > 0:
+                                            self.writer.add_scalar("train/update_rms", update_rms, self.step_num)
                                 if self.progress_bar is not None:
                                     self.progress_bar.unpause()
                         
@@ -2416,6 +2426,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                     'diff_guidance_norm': self.diff_guidance_norm,
                                 })
                                 self.diff_guidance_norm = None
+                            # Log weight update RMS if available (Adafactor optimizer statistic)
+                            if update_rms > 0:
+                                self.logger.log({
+                                    'train/update_rms': update_rms,
+                                })
                             if loss_dict is not None:
                                 for key, value in loss_dict.items():
                                     self.logger.log({
@@ -2433,6 +2448,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                     'diff_guidance_norm': self.diff_guidance_norm,
                                 })
                                 self.diff_guidance_norm = None
+                            # Log weight update RMS if available (Adafactor optimizer statistic)
+                            if update_rms > 0:
+                                self.logger.log({
+                                    'train/update_rms': update_rms,
+                                })
                             for key, value in loss_dict.items():
                                 self.logger.log({
                                     f'loss/{key}': value,
