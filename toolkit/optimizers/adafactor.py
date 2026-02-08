@@ -392,3 +392,40 @@ class Adafactor(torch.optim.Optimizer):
         if len(lrs) == 0:
             return 0.0
         return sum(lrs) / len(lrs)
+
+    def get_update_rms(self):
+        """
+        Get RMS (root mean square) of weight updates for each parameter group.
+        
+        Returns:
+            List[float]: RMS of weight updates for each parameter group.
+                        Returns 0.0 for groups that haven't been updated yet.
+        """
+        update_rms_list = []
+        for group in self.param_groups:
+            group_rms_sum = 0.0
+            group_count = 0
+            for p in group["params"]:
+                if p in self.state and "update_rms" in self.state[p]:
+                    group_rms_sum += self.state[p]["update_rms"]
+                    group_count += 1
+            if group_count > 0:
+                update_rms_list.append(group_rms_sum / group_count)
+            else:
+                update_rms_list.append(0.0)
+        return update_rms_list
+
+    def get_avg_update_rms(self):
+        """
+        Get average RMS of weight updates across all parameter groups.
+        
+        This metric represents the average magnitude of weight changes per optimization step.
+        Useful for monitoring training stability and convergence.
+        
+        Returns:
+            float: Average RMS of weight updates across all parameter groups.
+        """
+        update_rms_list = self.get_update_rms()
+        if len(update_rms_list) == 0:
+            return 0.0
+        return sum(update_rms_list) / len(update_rms_list)
