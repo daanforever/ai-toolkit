@@ -246,11 +246,20 @@ class Adafactor(torch.optim.Optimizer):
 
     # adafactor manages its own lr
     def get_learning_rates(self):
-        lrs = [
-            self._get_lr(group, self.state[group["params"][0]])
-            for group in self.param_groups
-            if group["params"][0].grad is not None
-        ]
+        lrs = []
+        for group in self.param_groups:
+            # Find first param with initialized state
+            lr = None
+            for param in group["params"]:
+                if param in self.state and len(self.state[param]) > 0:
+                    lr = self._get_lr(group, self.state[param])
+                    break
+            if lr is not None:
+                lrs.append(lr)
+            elif group["lr"] is not None:
+                # Fallback to group lr if state not initialized
+                lrs.append(group["lr"])
+        
         if len(lrs) == 0:
             lrs = self.base_lrs  # if called before stepping
         return lrs
@@ -376,4 +385,6 @@ class Adafactor(torch.optim.Optimizer):
         
     def get_avg_learning_rate(self):
         lrs = self.get_learning_rates()
+        if len(lrs) == 0:
+            return 0.0
         return sum(lrs) / len(lrs)
