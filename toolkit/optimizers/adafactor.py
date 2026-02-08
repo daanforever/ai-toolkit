@@ -213,7 +213,11 @@ class Adafactor(torch.optim.Optimizer):
         param_scale = 1.0
         if param_group["scale_parameter"]:
             param_scale = max(param_group["eps"][1], param_state["RMS"])
-        return param_scale * rel_step_sz
+        lr = param_scale * rel_step_sz
+        # Ensure learning rate doesn't exceed max_lr when using relative_step
+        if param_group["relative_step"]:
+            lr = min(lr, param_group["max_lr"])
+        return lr
 
     @staticmethod
     def _get_options(param_group, param_shape):
