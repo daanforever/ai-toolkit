@@ -373,3 +373,7 @@ class Adafactor(torch.optim.Optimizer):
                     copy_stochastic(p, p_data_fp32)
 
         return loss
+        
+    def get_avg_learning_rate(self):
+        lrs = self.get_learning_rates()
+        return sum(lrs) / len(lrs)
