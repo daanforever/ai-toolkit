@@ -381,6 +381,9 @@ class Adafactor(torch.optim.Optimizer):
 
                 p_data_fp32.add_(-update)
 
+                # Store update RMS for monitoring
+                state["update_rms"] = self._rms(update).item()
+
                 if p.dtype != torch.float32 and self.stochastic_rounding:
                     # apply stochastic rounding
                     copy_stochastic(p, p_data_fp32)
