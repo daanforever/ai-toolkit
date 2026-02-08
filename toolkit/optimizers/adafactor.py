@@ -40,6 +40,12 @@ class Adafactor(torch.optim.Optimizer):
             If True, time-dependent learning rate is computed instead of external learning rate
         warmup_init (`bool`, *optional*, defaults to `False`):
             Time-dependent learning rate computation depends on whether warm-up initialization is being used
+        min_lr (`float`, *optional*, defaults to `1e-6`):
+            Minimum learning rate multiplier for warmup phase when `warmup_init=True` and `relative_step=True`.
+            Controls the linear growth rate: `lr = min_lr * step` during warmup.
+        max_lr (`float`, *optional*, defaults to `1e-2`):
+            Maximum learning rate cap for relative step mode when `relative_step=True`.
+            Acts as upper bound for `min_step` when `warmup_init=False` or when warmup phase completes.
 
     This implementation handles low-precision (FP16, bfloat) values, but we have not thoroughly tested.
 
@@ -106,6 +112,8 @@ class Adafactor(torch.optim.Optimizer):
         scale_parameter=True,
         relative_step=True,
         warmup_init=False,
+        min_lr=1e-6,
+        max_lr=1e-2,
         do_paramiter_swapping=False,
         paramiter_swapping_factor=0.1,
         stochastic_accumulation=True,
@@ -129,6 +137,8 @@ class Adafactor(torch.optim.Optimizer):
             "scale_parameter": scale_parameter,
             "relative_step": relative_step,
             "warmup_init": warmup_init,
+            "min_lr": min_lr,
+            "max_lr": max_lr,
         }
         super().__init__(params, defaults)
         
@@ -195,8 +205,10 @@ class Adafactor(torch.optim.Optimizer):
     def _get_lr(param_group, param_state):
         rel_step_sz = param_group["lr"]
         if param_group["relative_step"]:
-            min_step = 1e-6 * \
-                param_state["step"] if param_group["warmup_init"] else 1e-2
+            if param_group["warmup_init"]:
+                min_step = param_group["min_lr"] * param_state["step"]
+            else:
+                min_step = param_group["max_lr"]
             rel_step_sz = min(min_step, 1.0 / math.sqrt(param_state["step"]))
         param_scale = 1.0
         if param_group["scale_parameter"]:
