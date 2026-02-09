@@ -1276,17 +1276,30 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     else:
                         current_std = self.train_config.gaussian_std
                     
-                    # 1. Generate raw samples from a normal distribution based on current mean and std
-                    raw_samples = torch.randn((batch_size,), device=latents.device) * current_std + self.train_config.gaussian_mean
+                    def truncated_normal_samples(batch_size, mu, sigma, device, low=0.0, high=1.0):
+                        # Calculate CDF values for the boundaries
+                        # Using torch.special.ndtr (normal cumulative distribution function)
+                        alpha = (low - mu) / sigma
+                        beta = (high - mu) / sigma
+                        cdf_low = torch.special.ndtr(alpha)
+                        cdf_high = torch.special.ndtr(beta)
 
-                    # 2. Apply "Ping-Pong" reflection logic to keep values within [0, 1] range without clipping.
-                    # This formula folds values outside the [0, 1] range back into it (e.g., -0.1 becomes 0.1, 1.1 becomes 0.9).
-                    # Logic breakdown:
-                    # - raw_samples % 2: Maps any real number into the [0, 2) interval.
-                    # - (... - 1): Shifts the range to [-1, 1).
-                    # - (...).abs(): Folds the negative half into positive, creating a triangle wave in [0, 1].
-                    # - 1 - (...): Inverts the result so that 'mean' 0 or 1 stays intuitive at the boundaries.
-                    gaussian_samples = 1 - (raw_samples % 2 - 1).abs()
+                        # Generate uniform distribution between cdf_low and cdf_high
+                        u = torch.rand((batch_size,), device=device)
+                        v = cdf_low + u * (cdf_high - cdf_low)
+                        # Clamp to avoid infinities for very small sigmas
+                        v = v.clamp(1e-7, 1 - 1e-7)
+
+                        # Apply inverse function (Quantile function / Inverse CDF)
+                        samples = mu + sigma * torch.special.ndtri(v)
+                        return samples
+
+                    gaussian_samples = truncated_normal_samples(
+                        batch_size,
+                        self.train_config.gaussian_mean,
+                        current_std,
+                        latents.device
+                    )
 
                     # Scale to num_train_timesteps
                     timestep_indices = gaussian_samples * self.train_config.num_train_timesteps
