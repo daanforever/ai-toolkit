@@ -1277,21 +1277,31 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         current_std = self.train_config.gaussian_std
                     
                     def truncated_normal_samples(batch_size, mu, sigma, device, low=0.0, high=1.0):
-                        # Calculate CDF values for the boundaries
-                        # Using torch.special.ndtr (normal cumulative distribution function)
+                        # Convert mu and sigma to tensors to ensure all operations are handled by PyTorch
+                        # and to avoid TypeErrors with torch.special functions
+                        mu = torch.as_tensor(mu, device=device, dtype=torch.float32)
+                        sigma = torch.as_tensor(sigma, device=device, dtype=torch.float32)
+
+                        # Standardize the boundaries (calculate z-scores)
                         alpha = (low - mu) / sigma
                         beta = (high - mu) / sigma
+
+                        # Calculate Cumulative Distribution Function (CDF) values for the boundaries
                         cdf_low = torch.special.ndtr(alpha)
                         cdf_high = torch.special.ndtr(beta)
 
-                        # Generate uniform distribution between cdf_low and cdf_high
+                        # Generate uniform random samples in the [0, 1] range
                         u = torch.rand((batch_size,), device=device)
+
+                        # Linearly interpolate between the boundary CDF values
                         v = cdf_low + u * (cdf_high - cdf_low)
-                        # Clamp to avoid infinities for very small sigmas
+
+                        # Clamp values to avoid numerical instability (infinities) when calling ndtri
                         v = v.clamp(1e-7, 1 - 1e-7)
 
-                        # Apply inverse function (Quantile function / Inverse CDF)
+                        # Apply the Inverse CDF (Quantile function) to transform samples to the truncated normal distribution
                         samples = mu + sigma * torch.special.ndtri(v)
+                        
                         return samples
 
                     gaussian_samples = truncated_normal_samples(
