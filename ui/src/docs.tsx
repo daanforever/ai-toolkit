@@ -318,6 +318,8 @@ const docs: { [key: string]: ConfigDoc } = {
         • <code>gaussian_std</code> (default 0.2): Spread of distribution. Smaller = narrower focus, larger = wider coverage.
         <br />
         • <code>gaussian_std_target</code> (optional, default None): Enable curriculum learning. When set, gaussian_std will linearly interpolate from initial value to this target value during training. Example: start with gaussian_std: 0.001 (narrow distribution, focused training) → end with gaussian_std_target: 0.3 (wide distribution, diverse timestep coverage).
+        <br />
+        • <code>timestep_bias_exponent</code> (default 3.0): Controls the cubic bias exponent for content/style timestep distribution. Higher values create stronger bias toward edges (early timesteps for content, late timesteps for style). Lower values create more uniform distribution.
       </>
     ),
   },

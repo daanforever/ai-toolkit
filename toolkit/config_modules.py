@@ -358,6 +358,7 @@ class TrainConfig:
         self.gaussian_mean: float = kwargs.get('gaussian_mean', 0.5)
         self.gaussian_std: float = kwargs.get('gaussian_std', 0.2)
         self.gaussian_std_target: float = kwargs.get('gaussian_std_target', None)
+        self.timestep_bias_exponent: float = kwargs.get('timestep_bias_exponent', 3.0)
         self.timestep_debug_log: int = kwargs.get('timestep_debug_log', 0)
         self.steps: int = kwargs.get('steps', 1000)
         self.lr = kwargs.get('lr', 1e-6)

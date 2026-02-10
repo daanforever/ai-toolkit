@@ -1242,9 +1242,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     ntt = self.train_config.num_train_timesteps
 
                     if content_or_style == 'content':
-                        timestep_indices = (1 - orig_timesteps) ** 3 * self.train_config.num_train_timesteps
+                        timestep_indices = (1 - orig_timesteps) ** self.train_config.timestep_bias_exponent * self.train_config.num_train_timesteps
                     elif content_or_style == 'style':
-                        timestep_indices = orig_timesteps ** 3 * self.train_config.num_train_timesteps
+                        timestep_indices = orig_timesteps ** self.train_config.timestep_bias_exponent * self.train_config.num_train_timesteps
 
                     timestep_indices = value_map(
                         timestep_indices,
