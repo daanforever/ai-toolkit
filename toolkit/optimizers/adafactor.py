@@ -114,8 +114,8 @@ class Adafactor(torch.optim.Optimizer):
         warmup_init=False,
         min_lr=1e-6,
         max_lr=1e-2,
-        do_paramiter_swapping=False,
-        paramiter_swapping_factor=0.1,
+        do_parameter_swapping=False,
+        parameter_swapping_factor=0.1,
         stochastic_accumulation=True,
         stochastic_rounding=True,
     ):
@@ -143,7 +143,7 @@ class Adafactor(torch.optim.Optimizer):
         super().__init__(params, defaults)
         
         self.base_lrs: List[float] = [
-            lr for group in self.param_groups
+            group['lr'] for group in self.param_groups
         ]
 
         self.is_stochastic_rounding_accumulation = False
@@ -158,48 +158,47 @@ class Adafactor(torch.optim.Optimizer):
                             stochastic_grad_accummulation
                         )
     
-        self.do_paramiter_swapping = do_paramiter_swapping
-        self.paramiter_swapping_factor = paramiter_swapping_factor
-        self._total_paramiter_size = 0
-        # count total paramiters
+        self.do_parameter_swapping = do_parameter_swapping
+        self.parameter_swapping_factor = parameter_swapping_factor
+        self._total_parameter_size = 0
+        # count total parameters
         for group in self.param_groups:
             for param in group['params']:
-                self._total_paramiter_size += torch.numel(param)
-        # pretty print total paramiters with comma seperation
-        print(f"Total training paramiters: {self._total_paramiter_size:,}")
+                self._total_parameter_size += torch.numel(param)
+        # pretty print total parameters with comma separation
+        print(f"Total training parameters: {self._total_parameter_size:,}")
         
-        # needs to be enabled to count paramiters
-        if self.do_paramiter_swapping:
-            self.enable_paramiter_swapping(self.paramiter_swapping_factor)
+        # needs to be enabled to count parameters
+        if self.do_parameter_swapping:
+            self.enable_parameter_swapping(self.parameter_swapping_factor)
         
     
-    def enable_paramiter_swapping(self, paramiter_swapping_factor=0.1):
-        self.do_paramiter_swapping = True
-        self.paramiter_swapping_factor = paramiter_swapping_factor
+    def enable_parameter_swapping(self, parameter_swapping_factor=0.1):
+        self.do_parameter_swapping = True
+        self.parameter_swapping_factor = parameter_swapping_factor
         # call it an initial time
-        self.swap_paramiters()
+        self.swap_parameters()
                     
-    def swap_paramiters(self):
+    def swap_parameters(self):
         all_params = []
-        # deactivate all paramiters
+        # deactivate all parameters
         for group in self.param_groups:
             for param in group['params']:
                 param.requires_grad_(False)
                 # remove any grad
                 param.grad = None
                 all_params.append(param)
-        # shuffle all paramiters
+        # shuffle all parameters
         random.shuffle(all_params)
         
-        # keep activating paramiters until we are going to go over the target paramiters
-        target_paramiters = int(self._total_paramiter_size * self.paramiter_swapping_factor)
-        total_paramiters = 0
+        # keep activating parameters until we are going to go over the target parameters
+        target_parameters = max(1, int(self._total_parameter_size * self.parameter_swapping_factor))
+        total_parameters = 0
         for param in all_params:
-            total_paramiters += torch.numel(param)
-            if total_paramiters >= target_paramiters:
+            param.requires_grad_(True)
+            total_parameters += torch.numel(param)
+            if total_parameters >= target_parameters:
                 break
-            else:
-                param.requires_grad_(True)
 
     @staticmethod
     def _get_lr(param_group, param_state):
@@ -313,6 +312,7 @@ class Adafactor(torch.optim.Optimizer):
                     if factored:
                         state["exp_avg_sq_row"] = torch.zeros(
                             grad_shape[:-1]).to(grad)
+                        # For 2D tensors, grad_shape[:-2] is empty tuple, which is correct for column stats
                         state["exp_avg_sq_col"] = torch.zeros(
                             grad_shape[:-2] + grad_shape[-1:]).to(grad)
                     else:
@@ -331,8 +331,9 @@ class Adafactor(torch.optim.Optimizer):
                         state["exp_avg_sq"] = state["exp_avg_sq"].to(grad)
 
                 p_data_fp32 = p
+                is_quantized = isinstance(p_data_fp32, QBytesTensor)
                 
-                if isinstance(p_data_fp32, QBytesTensor):
+                if is_quantized:
                     p_data_fp32 = p_data_fp32.dequantize()
                 if p.dtype != torch.float32:
                     p_data_fp32 = p_data_fp32.clone().float()
@@ -384,7 +385,7 @@ class Adafactor(torch.optim.Optimizer):
                 # Store update RMS for monitoring
                 state["update_rms"] = self._rms(update).item()
 
-                if p.dtype != torch.float32 and self.stochastic_rounding:
+                if (p.dtype != torch.float32 or is_quantized) and self.stochastic_rounding:
                     # apply stochastic rounding
                     copy_stochastic(p, p_data_fp32)
 
