@@ -18,6 +18,7 @@ from accelerate import init_empty_weights
 from toolkit.accelerator import unwrap_model
 from optimum.quanto import freeze
 from toolkit.util.quantize import quantize, get_qtype, quantize_model
+from toolkit.util.device import safe_module_to_device
 from toolkit.memory_management import MemoryManager
 from safetensors.torch import load_file
 from PIL import Image
@@ -571,7 +572,7 @@ class LTX2Model(BaseModel):
         extra: dict,
     ):
         if self.model.device == torch.device("cpu"):
-            self.model.to(self.device_torch)
+            safe_module_to_device(self.model, self.device_torch)
 
         # handle control image
         if gen_config.ctrl_img is not None:
@@ -772,8 +773,8 @@ class LTX2Model(BaseModel):
     ):
         with torch.no_grad():
             if self.model.device == torch.device("cpu"):
-                self.model.to(self.device_torch)
-                
+                safe_module_to_device(self.model, self.device_torch)
+
             # We only encode and store the minimum prompt tokens, but need them padded to 1024 for LTX2
             text_embeddings = self.pad_embeds(text_embeddings)
 

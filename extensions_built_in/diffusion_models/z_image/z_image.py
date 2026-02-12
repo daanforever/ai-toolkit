@@ -15,6 +15,7 @@ from toolkit.samplers.custom_flowmatch_sampler import (
 from toolkit.accelerator import unwrap_model
 from optimum.quanto import freeze
 from toolkit.util.quantize import quantize, get_qtype, quantize_model
+from toolkit.util.device import safe_module_to_device
 from toolkit.memory_management import MemoryManager
 from safetensors.torch import load_file
 
@@ -354,8 +355,7 @@ class ZImageModel(BaseModel):
         **kwargs,
     ):
         if next(self.model.parameters()).device != self.device_torch:
-            with torch.no_grad():
-                self.model.to(self.device_torch)
+            safe_module_to_device(self.model, self.device_torch)
 
         latent_model_input = latent_model_input.unsqueeze(2)
         latent_model_input_list = list(latent_model_input.unbind(dim=0))
