@@ -353,7 +353,9 @@ class ZImageModel(BaseModel):
         text_embeddings: PromptEmbeds,
         **kwargs,
     ):
-        self.model.to(self.device_torch)
+        if next(self.model.parameters()).device != self.device_torch:
+            with torch.no_grad():
+                self.model.to(self.device_torch)
 
         latent_model_input = latent_model_input.unsqueeze(2)
         latent_model_input_list = list(latent_model_input.unbind(dim=0))
