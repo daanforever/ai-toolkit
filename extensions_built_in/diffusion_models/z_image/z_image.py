@@ -354,7 +354,7 @@ class ZImageModel(BaseModel):
         text_embeddings: PromptEmbeds,
         **kwargs,
     ):
-        if next(self.model.parameters()).device != self.device_torch:
+        if self.low_vram and next(self.model.parameters()).device != self.device_torch:
             safe_module_to_device(self.model, self.device_torch)
 
         latent_model_input = latent_model_input.unsqueeze(2)

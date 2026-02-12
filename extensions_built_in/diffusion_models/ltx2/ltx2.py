@@ -571,7 +571,7 @@ class LTX2Model(BaseModel):
         generator: torch.Generator,
         extra: dict,
     ):
-        if self.model.device == torch.device("cpu"):
+        if self.low_vram and self.model.device == torch.device("cpu"):
             safe_module_to_device(self.model, self.device_torch)
 
         # handle control image
@@ -772,7 +772,7 @@ class LTX2Model(BaseModel):
         **kwargs,
     ):
         with torch.no_grad():
-            if self.model.device == torch.device("cpu"):
+            if self.low_vram and self.model.device == torch.device("cpu"):
                 safe_module_to_device(self.model, self.device_torch)
 
             # We only encode and store the minimum prompt tokens, but need them padded to 1024 for LTX2

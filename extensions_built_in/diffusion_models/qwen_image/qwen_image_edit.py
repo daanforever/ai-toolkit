@@ -90,7 +90,8 @@ class QwenImageEditModel(QwenImageModel):
         generator: torch.Generator,
         extra: dict,
     ):
-        safe_module_to_device(self.model, self.device_torch, self.torch_dtype)
+        if self.model_config.low_vram:
+            safe_module_to_device(self.model, self.device_torch, self.torch_dtype)
         sc = self.get_bucket_divisibility()
         gen_config.width = int(gen_config.width // sc * sc)
         gen_config.height = int(gen_config.height // sc * sc)

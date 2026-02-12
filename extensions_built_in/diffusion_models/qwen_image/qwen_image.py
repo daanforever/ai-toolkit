@@ -263,7 +263,8 @@ class QwenImageModel(BaseModel):
                 control_img = control_img.resize(
                     (gen_config.width, gen_config.height), Image.BILINEAR
                 )
-        safe_module_to_device(self.model, self.device_torch)
+        if self.model_config.low_vram:
+            safe_module_to_device(self.model, self.device_torch)
 
         # flush for low vram if we are doing that
         flush_between_steps = self.model_config.low_vram
@@ -306,7 +307,8 @@ class QwenImageModel(BaseModel):
         text_embeddings: PromptEmbeds,
         **kwargs,
     ):
-        safe_module_to_device(self.model, self.device_torch)
+        if self.model_config.low_vram:
+            safe_module_to_device(self.model, self.device_torch)
         batch_size, num_channels_latents, height, width = latent_model_input.shape
 
         ps = self.transformer.config.patch_size

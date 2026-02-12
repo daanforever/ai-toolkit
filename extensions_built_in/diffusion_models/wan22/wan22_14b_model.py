@@ -140,15 +140,14 @@ class DualWanTransformer3DModel(torch.nn.Module):
                     torch.cuda.empty_cache()
                 self._active_transformer_name = t_name
 
-        if self.transformer.device != hidden_states.device:
-            if self.low_vram:
-                # move other transformer to cpu
-                other_tname = (
-                    "transformer_1" if t_name == "transformer_2" else "transformer_2"
-                )
-                safe_module_to_device(
-                    getattr(self, other_tname), torch.device("cpu")
-                )
+        if self.low_vram and self.transformer.device != hidden_states.device:
+            # move other transformer to cpu
+            other_tname = (
+                "transformer_1" if t_name == "transformer_2" else "transformer_2"
+            )
+            safe_module_to_device(
+                getattr(self, other_tname), torch.device("cpu")
+            )
 
             safe_module_to_device(self.transformer, hidden_states.device)
 
