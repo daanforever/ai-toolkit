@@ -601,6 +601,16 @@ export default function SimpleJob({
                       }}
                       placeholder="eg. 500, 375 (leave empty to disable)"
                     />
+                    <NumberInput
+                      label="Fixed Cycle Weight Sigma (optional)"
+                      className="pt-2"
+                      docKey="train.fixed_cycle_weight_sigma"
+                      value={jobConfig.config.process[0].train.fixed_cycle_weight_sigma || 372.8}
+                      onChange={value => setJobConfig(value, 'config.process[0].train.fixed_cycle_weight_sigma')}
+                      placeholder="eg. 372.8"
+                      min={0}
+                      step={0.1}
+                    />
                   </>
                 )}
               </div>

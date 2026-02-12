@@ -351,6 +351,14 @@ const docs: { [key: string]: ConfigDoc } = {
       </>
     ),
   },
+  'train.fixed_cycle_weight_sigma': {
+    title: 'Fixed Cycle Weight Sigma',
+    description: (
+      <>
+        Used when <code>content_or_style</code> is <code>fixed_cycle</code> and <code>fixed_cycle_weight_peak_timesteps</code> is set. Standard deviation (sigma) for the Gaussian distribution used to weight loss around the peak timesteps. Controls the width of the Gaussian peaks — larger values create wider, flatter distributions, smaller values create sharper peaks. Default: <code>372.8</code>.
+      </>
+    ),
+  },
   'train.do_differential_guidance': {
     title: 'Differential Guidance',
     description: (

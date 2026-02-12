@@ -366,6 +366,7 @@ class TrainConfig:
         self.fixed_cycle_timesteps: Optional[List[float]] = _fc if (_fc is not None and len(_fc) > 0) else _default_fixed_cycle
         self.fixed_cycle_seed: Optional[int] = kwargs.get('fixed_cycle_seed', None)
         self.fixed_cycle_weight_peak_timesteps: Optional[List[float]] = kwargs.get('fixed_cycle_weight_peak_timesteps', [500, 375])
+        self.fixed_cycle_weight_sigma: float = kwargs.get('fixed_cycle_weight_sigma', 372.8)
         self.steps: int = kwargs.get('steps', 1000)
         self.lr = kwargs.get('lr', 1e-6)
         self.unet_lr = kwargs.get('unet_lr', self.lr)

@@ -798,7 +798,7 @@ class SDTrainer(BaseSDTrainProcess):
             elif self.train_config.content_or_style == 'fixed_cycle' and self.train_config.fixed_cycle_weight_peak_timesteps:
                 # fixed_cycle: weight loss by Gaussian peaks at fixed_cycle_weight_peak_timesteps (e.g. 500, 375), mean-normalized
                 peaks = self.train_config.fixed_cycle_weight_peak_timesteps
-                sigma = 80.0
+                sigma = self.train_config.fixed_cycle_weight_sigma
                 peaks_t = torch.tensor(peaks, device=timesteps.device, dtype=timesteps.dtype)
                 diff = timesteps.unsqueeze(1).float() - peaks_t.unsqueeze(0)
                 weight_per_timestep = torch.exp(-(diff / sigma) ** 2).max(dim=1)[0]
