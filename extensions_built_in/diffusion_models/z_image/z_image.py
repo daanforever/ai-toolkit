@@ -300,8 +300,11 @@ class ZImageModel(BaseModel):
         generator: torch.Generator,
         extra: dict,
     ):
+
         self.model.to(self.device_torch, dtype=self.torch_dtype)
-        self.model.to(self.device_torch)
+        # Duplication of to(self.device_torch, dtype=self.torch_dtype)
+        # is not necessary because the model is already on the correct device and dtype
+        # self.model.to(self.device_torch)
 
         sc = self.get_bucket_divisibility()
         gen_config.width = int(gen_config.width // sc * sc)

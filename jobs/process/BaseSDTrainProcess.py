@@ -4,6 +4,7 @@ import inspect
 import json
 import random
 import shutil
+import time
 from collections import OrderedDict
 import os
 import re
@@ -472,14 +473,29 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
             for item in items_to_remove:
                 print_acc(f"Removing old save: {item}")
-                if os.path.isdir(item):
-                    shutil.rmtree(item)
-                else:
-                    os.remove(item)
-                # see if a yaml file with same name exists
-                yaml_file = os.path.splitext(item)[0] + ".yaml"
-                if os.path.exists(yaml_file):
-                    os.remove(yaml_file)
+                try:
+                    if os.path.isdir(item):
+                        shutil.rmtree(item)
+                    else:
+                        os.remove(item)
+                    # see if a yaml file with same name exists
+                    yaml_file = os.path.splitext(item)[0] + ".yaml"
+                    if os.path.exists(yaml_file):
+                        os.remove(yaml_file)
+                except PermissionError as e:
+                    print_acc(f"Could not remove {item}: {e}. Skipping (file may be in use).")
+                    try:
+                        time.sleep(2)
+                        if os.path.isdir(item):
+                            shutil.rmtree(item)
+                        else:
+                            os.remove(item)
+                        yaml_file = os.path.splitext(item)[0] + ".yaml"
+                        if os.path.exists(yaml_file):
+                            os.remove(yaml_file)
+                        print_acc(f"Retry succeeded: removed {item}")
+                    except PermissionError:
+                        print_acc(f"Retry failed for {item}. Leaving file in place.")
             if combined_items:
                 latest_item = combined_items[-1]
         return latest_item
