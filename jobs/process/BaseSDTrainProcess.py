@@ -1348,6 +1348,30 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
                     timestep_indices.sort()
                     
+                elif content_or_style == 'fixed_cycle':
+                    # Deterministic cycle over fixed timestep values (for Turbo LoRA reproducibility)
+                    timestep_list = self.train_config.fixed_cycle_timesteps
+                    if not timestep_list:
+                        raise ValueError("content_or_style is 'fixed_cycle' but fixed_cycle_timesteps is empty")
+                    resolved = getattr(self, '_fixed_cycle_resolved_timesteps', None)
+                    if resolved is None:
+                        list_copy = list(timestep_list)
+                        if self.train_config.fixed_cycle_seed is not None:
+                            random.Random(self.train_config.fixed_cycle_seed).shuffle(list_copy)
+                        st = self.sd.noise_scheduler.timesteps
+                        resolved = []
+                        for v in list_copy:
+                            v_t = torch.tensor(v, device=st.device, dtype=st.dtype)
+                            idx = (torch.abs(st - v_t)).argmin().item()
+                            resolved.append(st[idx].item())
+                        self._fixed_cycle_resolved_timesteps = resolved
+                    idx_cycle = self.step_num % len(resolved)
+                    t_val = resolved[idx_cycle]
+                    st = self.sd.noise_scheduler.timesteps
+                    timesteps = torch.full(
+                        (batch_size,), t_val, device=latents.device, dtype=st.dtype
+                    )
+                    
                 elif content_or_style == 'balanced':
                     if min_noise_steps == max_noise_steps:
                         timestep_indices = torch.ones((batch_size,), device=self.device_torch) * min_noise_steps
@@ -1369,14 +1393,19 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 else:
                     raise ValueError(f"Unknown content_or_style {content_or_style}")
             with self.timer('convert_timestep_indices_to_timesteps'):
-                # convert the timestep_indices to a timestep
-                timesteps = self.sd.noise_scheduler.timesteps[timestep_indices.long()]
+                # convert the timestep_indices to a timestep (fixed_cycle already set timesteps above)
+                if content_or_style != 'fixed_cycle':
+                    timesteps = self.sd.noise_scheduler.timesteps[timestep_indices.long()]
                 
                 # Debug logging for timestep distribution
                 if self.train_config.timestep_debug_log > 0:
-                    # Always collect data
-                    self._collected_indices.extend(timestep_indices.cpu().tolist())
-                    self._collected_timesteps.extend(timesteps.cpu().tolist())
+                    # Always collect data (fixed_cycle has no timestep_indices, use cycle index)
+                    if content_or_style == 'fixed_cycle':
+                        self._collected_indices.append(self.step_num % len(self._fixed_cycle_resolved_timesteps))
+                        self._collected_timesteps.extend(timesteps.cpu().tolist())
+                    else:
+                        self._collected_indices.extend(timestep_indices.cpu().tolist())
+                        self._collected_timesteps.extend(timesteps.cpu().tolist())
                     
                     # Log when we have enough samples
                     if len(self._collected_indices) >= self.train_config.timestep_debug_log:

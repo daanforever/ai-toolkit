@@ -346,7 +346,7 @@ class DecoratorConfig:
         self.num_tokens: str = kwargs.get('num_tokens', 4)
 
 
-ContentOrStyleType = Literal['balanced', 'style', 'content', 'gaussian']
+ContentOrStyleType = Literal['balanced', 'style', 'content', 'gaussian', 'fixed_cycle']
 LossTarget = Literal['noise', 'source', 'unaugmented', 'differential_noise']
 
 
@@ -360,6 +360,12 @@ class TrainConfig:
         self.gaussian_std_target: float = kwargs.get('gaussian_std_target', None)
         self.timestep_bias_exponent: float = kwargs.get('timestep_bias_exponent', 3.0)
         self.timestep_debug_log: int = kwargs.get('timestep_debug_log', 0)
+        # fixed_cycle: deterministic cycle over fixed timestep values (for Turbo LoRA reproducibility)
+        _default_fixed_cycle = [999, 875, 750, 625, 500, 375, 250, 125]
+        _fc = kwargs.get('fixed_cycle_timesteps', _default_fixed_cycle)
+        self.fixed_cycle_timesteps: Optional[List[float]] = _fc if (_fc is not None and len(_fc) > 0) else _default_fixed_cycle
+        self.fixed_cycle_seed: Optional[int] = kwargs.get('fixed_cycle_seed', None)
+        self.fixed_cycle_weight_peak_timesteps: Optional[List[float]] = kwargs.get('fixed_cycle_weight_peak_timesteps', [500, 375])
         self.steps: int = kwargs.get('steps', 1000)
         self.lr = kwargs.get('lr', 1e-6)
         self.unet_lr = kwargs.get('unet_lr', self.lr)
