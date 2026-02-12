@@ -539,6 +539,7 @@ export default function SimpleJob({
                     { value: 'content', label: 'High Noise' },
                     { value: 'style', label: 'Low Noise' },
                     { value: 'gaussian', label: 'Gaussian (Normal)' },
+                    { value: 'fixed_cycle', label: 'Fixed Cycle' },
                   ]}
                 />
                 <SelectInput
@@ -553,6 +554,55 @@ export default function SimpleJob({
                     { value: 'stepped', label: 'Stepped Recovery' },
                   ]}
                 />
+                {jobConfig.config.process[0].train.content_or_style === 'fixed_cycle' && (
+                  <>
+                    <TextInput
+                      label="Fixed Cycle Timesteps"
+                      className="pt-2"
+                      docKey="train.fixed_cycle_timesteps"
+                      value={
+                        jobConfig.config.process[0].train.fixed_cycle_timesteps
+                          ? jobConfig.config.process[0].train.fixed_cycle_timesteps.join(', ')
+                          : '999, 875, 750, 625, 500, 375, 250, 125'
+                      }
+                      onChange={value => {
+                        const arr = value
+                          .split(',')
+                          .map(s => parseFloat(s.trim()))
+                          .filter(n => !isNaN(n));
+                        setJobConfig(arr, 'config.process[0].train.fixed_cycle_timesteps');
+                      }}
+                      placeholder="eg. 999, 875, 750, 625, 500, 375, 250, 125"
+                    />
+                    <NumberInput
+                      label="Fixed Cycle Seed (optional)"
+                      className="pt-2"
+                      docKey="train.fixed_cycle_seed"
+                      value={jobConfig.config.process[0].train.fixed_cycle_seed || ''}
+                      onChange={value => setJobConfig(value ? parseInt(value as string) : null, 'config.process[0].train.fixed_cycle_seed')}
+                      placeholder="eg. 42 (leave empty for no shuffle)"
+                      min={0}
+                    />
+                    <TextInput
+                      label="Fixed Cycle Weight Peak Timesteps (optional)"
+                      className="pt-2"
+                      docKey="train.fixed_cycle_weight_peak_timesteps"
+                      value={
+                        jobConfig.config.process[0].train.fixed_cycle_weight_peak_timesteps
+                          ? jobConfig.config.process[0].train.fixed_cycle_weight_peak_timesteps.join(', ')
+                          : '500, 375'
+                      }
+                      onChange={value => {
+                        const arr = value
+                          .split(',')
+                          .map(s => parseFloat(s.trim()))
+                          .filter(n => !isNaN(n));
+                        setJobConfig(arr.length > 0 ? arr : null, 'config.process[0].train.fixed_cycle_weight_peak_timesteps');
+                      }}
+                      placeholder="eg. 500, 375 (leave empty to disable)"
+                    />
+                  </>
+                )}
               </div>
               <div>
                 <FormGroup label="EMA (Exponential Moving Average)">

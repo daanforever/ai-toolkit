@@ -147,6 +147,9 @@ export interface TrainConfig {
   loss_type: 'mse' | 'mae' | 'wavelet' | 'stepped';
   do_differential_guidance?: boolean;
   differential_guidance_scale?: number;
+  fixed_cycle_timesteps?: number[];
+  fixed_cycle_seed?: number | null;
+  fixed_cycle_weight_peak_timesteps?: number[] | null;
 }
 
 export interface QuantizeKwargsConfig {
