@@ -314,7 +314,9 @@ class ZImageModel(BaseModel):
             transformer=unwrap_model(transformer_for_sampling),
         )
 
-        if self._sampling_transformer is None:
+        if self._sampling_transformer is not None:
+            pipeline = pipeline.to("cpu")
+        else:
             pipeline = pipeline.to(self.device_torch)
 
         return pipeline
