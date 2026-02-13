@@ -677,6 +677,10 @@ class ModelConfig:
         # 20 different model variants
         self.extras_name_or_path = kwargs.get("extras_name_or_path", self.name_or_path)
         
+        # for models that support it (e.g., zimage), a separate model path for sampling/inference
+        # training uses name_or_path, sampling uses sampling_name_or_path if set
+        self.sampling_name_or_path: Optional[str] = kwargs.get("sampling_name_or_path", None)
+        
         # path to an accuracy recovery adapter, either local or remote
         self.accuracy_recovery_adapter = kwargs.get("accuracy_recovery_adapter", None)
         

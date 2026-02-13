@@ -203,6 +203,27 @@ class ZImageModel(BaseModel):
 
         flush()
 
+        # Load sampling transformer if a separate sampling_name_or_path is specified
+        self._sampling_transformer = None
+        self._active_transformer_name = "training"
+        if self.model_config.sampling_name_or_path is not None and self.model_config.sampling_name_or_path != model_path:
+            self.print_and_status_update("Loading sampling transformer")
+            sampling_model_path = self.model_config.sampling_name_or_path
+            sampling_transformer_path = sampling_model_path
+            sampling_transformer_subfolder = "transformer"
+            
+            if os.path.exists(sampling_model_path):
+                sampling_transformer_subfolder = None
+                sampling_transformer_path = os.path.join(sampling_model_path, "transformer")
+            
+            sampling_transformer = ZImageTransformer2DModel.from_pretrained(
+                sampling_transformer_path, subfolder=sampling_transformer_subfolder, torch_dtype=dtype
+            )
+            # Always keep sampling transformer on CPU
+            sampling_transformer.to("cpu")
+            self._sampling_transformer = sampling_transformer
+            flush()
+
         self.print_and_status_update("Text Encoder")
         tokenizer = AutoTokenizer.from_pretrained(
             base_model_path, subfolder="tokenizer", torch_dtype=dtype
@@ -280,12 +301,23 @@ class ZImageModel(BaseModel):
     def get_generation_pipeline(self):
         scheduler = ZImageModel.get_train_scheduler()
 
+        # Determine which transformer to use for sampling
+        transformer_for_sampling = self.transformer
+        if self._sampling_transformer is not None:
+            # Swap: move training transformer to CPU, sampling transformer to GPU
+            if self._active_transformer_name == "training":
+                safe_module_to_device(self.model, torch.device("cpu"))
+                safe_module_to_device(self._sampling_transformer, self.device_torch)
+                torch.cuda.empty_cache()
+                self._active_transformer_name = "sampling"
+            transformer_for_sampling = self._sampling_transformer
+
         pipeline: ZImagePipeline = ZImagePipeline(
             scheduler=scheduler,
             text_encoder=unwrap_model(self.text_encoder[0]),
             tokenizer=self.tokenizer[0],
             vae=unwrap_model(self.vae),
-            transformer=unwrap_model(self.transformer),
+            transformer=unwrap_model(transformer_for_sampling),
         )
 
         pipeline = pipeline.to(self.device_torch)
@@ -302,7 +334,12 @@ class ZImageModel(BaseModel):
         extra: dict,
     ):
 
-        self.model.to(self.device_torch, dtype=self.torch_dtype)
+        # If using sampling transformer, ensure it's on device; otherwise move training transformer
+        if self._sampling_transformer is not None:
+            # Pipeline already has sampling transformer on GPU from get_generation_pipeline
+            pipeline.transformer.to(self.device_torch, dtype=self.torch_dtype)
+        else:
+            self.model.to(self.device_torch, dtype=self.torch_dtype)
         # Duplication of to(self.device_torch, dtype=self.torch_dtype)
         # is not necessary because the model is already on the correct device and dtype
         # self.model.to(self.device_torch)
@@ -354,6 +391,13 @@ class ZImageModel(BaseModel):
         text_embeddings: PromptEmbeds,
         **kwargs,
     ):
+        # Swap back to training transformer if sampling transformer was active
+        if self._sampling_transformer is not None and self._active_transformer_name == "sampling":
+            safe_module_to_device(self._sampling_transformer, torch.device("cpu"))
+            safe_module_to_device(self.model, self.device_torch)
+            torch.cuda.empty_cache()
+            self._active_transformer_name = "training"
+        
         if self.low_vram and next(self.model.parameters()).device != self.device_torch:
             safe_module_to_device(self.model, self.device_torch)
 
