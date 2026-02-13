@@ -1,3 +1,4 @@
+import gc
 import os
 from typing import List, Optional
 
@@ -307,6 +308,8 @@ class ZImageModel(BaseModel):
             # Swap: move training transformer to CPU, sampling transformer to GPU
             if self._active_transformer_name == "training":
                 safe_module_to_device(self.model, torch.device("cpu"))
+                gc.collect()
+                torch.cuda.empty_cache()
                 safe_module_to_device(self._sampling_transformer, self.device_torch)
                 torch.cuda.empty_cache()
                 self._active_transformer_name = "sampling"
