@@ -130,6 +130,7 @@ def quantize_model(
     base_model: "BaseModel",
     model_to_quantize: torch.nn.Module,
     use_accuracy_recovery: bool = True,
+    adapter_attr_name: str = "accuracy_recovery_adapter",
 ):
     from toolkit.dequantize import patch_dequantization_on_save
 
@@ -260,7 +261,7 @@ def quantize_model(
         network.eval()
         network.is_active = True
         network.can_merge_in = False
-        base_model.accuracy_recovery_adapter = network
+        setattr(base_model, adapter_attr_name, network)
 
         # quantize it
         lora_exclude_modules = []

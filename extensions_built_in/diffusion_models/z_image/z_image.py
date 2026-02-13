@@ -221,7 +221,7 @@ class ZImageModel(BaseModel):
             
             if self.model_config.quantize:
                 self.print_and_status_update("Quantizing sampling transformer")
-                quantize_model(self, sampling_transformer, use_accuracy_recovery=False)
+                quantize_model(self, sampling_transformer)
                 flush()
             
             # Always keep sampling transformer on CPU
