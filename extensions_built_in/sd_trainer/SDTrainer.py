@@ -2023,14 +2023,14 @@ class SDTrainer(BaseSDTrainProcess):
                                 preservation_embeds = concat_prompt_embeds(
                                     [blank_embeds] * noisy_latents.shape[0]
                                 )
-                            preservation_pred = self.predict_noise(
-                                noisy_latents=noisy_latents.to(self.device_torch, dtype=dtype),
-                                timesteps=timesteps,
-                                conditional_embeds=preservation_embeds.to(self.device_torch, dtype=dtype),
-                                unconditional_embeds=unconditional_embeds,
-                                batch=batch,
-                                **pred_kwargs
-                            )
+                        preservation_pred = self.predict_noise(
+                            noisy_latents=noisy_latents.to(self.device_torch, dtype=dtype),
+                            timesteps=timesteps,
+                            conditional_embeds=preservation_embeds.to(self.device_torch, dtype=dtype),
+                            unconditional_embeds=unconditional_embeds,
+                            batch=batch,
+                            **pred_kwargs
+                        )
                         multiplier = self.train_config.diff_output_preservation_multiplier if self.train_config.diff_output_preservation else self.train_config.blank_prompt_preservation_multiplier
                         preservation_loss = torch.nn.functional.mse_loss(preservation_pred, prior_pred) * multiplier
                         

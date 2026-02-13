@@ -32,6 +32,8 @@ class Adafactor(torch.optim.Optimizer):
             Coefficient used to compute running averages of square
         beta1 (`float`, *optional*):
             Coefficient used for computing running averages of gradient
+            (first moment, like in Adam). If not None, enables momentum.
+            Suggested values: 0.9 (default), 0.95 or 0.99 for smoother updates.
         weight_decay (`float`, *optional*, defaults to 0.0):
             Weight decay (L2 penalty)
         scale_parameter (`bool`, *optional*, defaults to `True`):
