@@ -218,6 +218,12 @@ class ZImageModel(BaseModel):
             sampling_transformer = ZImageTransformer2DModel.from_pretrained(
                 sampling_transformer_path, subfolder=sampling_transformer_subfolder, torch_dtype=dtype
             )
+            
+            if self.model_config.quantize:
+                self.print_and_status_update("Quantizing sampling transformer")
+                quantize_model(self, sampling_transformer, use_accuracy_recovery=False)
+                flush()
+            
             # Always keep sampling transformer on CPU
             sampling_transformer.to("cpu")
             self._sampling_transformer = sampling_transformer
