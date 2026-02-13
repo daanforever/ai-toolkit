@@ -1978,7 +1978,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
                 # Create sampling network if sampling_transformer is specified and LoRA is used
                 if hasattr(self.sd, '_sampling_transformer') and self.sd._sampling_transformer is not None:
-                    self.print_acc("Creating sampling network for _sampling_transformer")
+                    print_acc("Creating sampling network for _sampling_transformer")
                     sampling_network = NetworkClass(
                         text_encoder=text_encoder,
                         unet=self.sd._sampling_transformer,
