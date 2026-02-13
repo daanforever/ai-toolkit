@@ -328,10 +328,11 @@ class ZImageModel(BaseModel):
         extra: dict,
     ):
 
-        self.model.to(self.device_torch, dtype=self.torch_dtype)
-        # Duplication of to(self.device_torch, dtype=self.torch_dtype)
-        # is not necessary because the model is already on the correct device and dtype
-        # self.model.to(self.device_torch)
+        if self._sampling_transformer is not None:
+            self.model.to("cpu")
+            self._sampling_transformer.to(self.device_torch, dtype=self.torch_dtype)
+        else:
+            self.model.to(self.device_torch, dtype=self.torch_dtype)
 
         sc = self.get_bucket_divisibility()
         gen_config.width = int(gen_config.width // sc * sc)
