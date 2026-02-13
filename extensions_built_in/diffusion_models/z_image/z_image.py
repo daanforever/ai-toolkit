@@ -476,6 +476,41 @@ class ZImageModel(BaseModel):
         with open(meta_path, "w") as f:
             yaml.dump(meta, f)
 
+    def generate_images(
+        self,
+        image_configs: List[GenerateImageConfig],
+        sampler=None,
+    ):
+        """
+        Override generate_images to handle LoRA on sampling transformer.
+        When using _sampling_transformer with LoRA, temporarily swap self.network
+        to _sampling_network (which has LoRA applied to _sampling_transformer)
+        for the duration of generation.
+        """
+        saved_network = None
+        try:
+            # If using sampling transformer with LoRA, sync weights and swap network
+            if (
+                hasattr(self, '_sampling_transformer') 
+                and self._sampling_transformer is not None
+                and hasattr(self, '_sampling_network')
+                and self._sampling_network is not None
+                and hasattr(self, 'network')
+                and self.network is not None
+            ):
+                # Sync weights from training network to sampling network
+                self._sampling_network.load_state_dict(self.network.state_dict())
+                # Save current network and swap to sampling network
+                saved_network = self.network
+                self.network = self._sampling_network
+            
+            # Call parent's generate_images with possibly swapped network
+            return super().generate_images(image_configs, sampler)
+        finally:
+            # Restore original network
+            if saved_network is not None:
+                self.network = saved_network
+
     def get_loss_target(self, *args, **kwargs):
         noise = kwargs.get("noise")
         batch = kwargs.get("batch")

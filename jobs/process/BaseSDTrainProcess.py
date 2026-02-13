@@ -1976,6 +1976,61 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 self.network.prepare_grad_etc(text_encoder, unet)
                 flush()
 
+                # Create sampling network if sampling_transformer is specified and LoRA is used
+                if hasattr(self.sd, '_sampling_transformer') and self.sd._sampling_transformer is not None:
+                    self.print_acc("Creating sampling network for _sampling_transformer")
+                    sampling_network = NetworkClass(
+                        text_encoder=text_encoder,
+                        unet=self.sd._sampling_transformer,
+                        lora_dim=self.network_config.linear,
+                        multiplier=1.0,
+                        alpha=self.network_config.linear_alpha,
+                        train_unet=self.train_config.train_unet,
+                        train_text_encoder=self.train_config.train_text_encoder,
+                        conv_lora_dim=self.network_config.conv,
+                        conv_alpha=self.network_config.conv_alpha,
+                        is_sdxl=self.model_config.is_xl or self.model_config.is_ssd,
+                        is_v2=self.model_config.is_v2,
+                        is_v3=self.model_config.is_v3,
+                        is_pixart=self.model_config.is_pixart,
+                        is_auraflow=self.model_config.is_auraflow,
+                        is_flux=self.model_config.is_flux,
+                        is_lumina2=self.model_config.is_lumina2,
+                        is_ssd=self.model_config.is_ssd,
+                        is_vega=self.model_config.is_vega,
+                        dropout=self.network_config.dropout,
+                        rank_dropout=self.network_config.rank_dropout,
+                        module_dropout=self.network_config.module_dropout,
+                        use_text_encoder_1=self.model_config.use_text_encoder_1,
+                        use_text_encoder_2=self.model_config.use_text_encoder_2,
+                        use_bias=is_lorm,
+                        is_lorm=is_lorm,
+                        network_config=self.network_config,
+                        network_type=self.network_config.type,
+                        transformer_only=self.network_config.transformer_only,
+                        is_transformer=self.sd.is_transformer,
+                        base_model=self.sd,
+                        **network_kwargs
+                    )
+                    
+                    sampling_network.force_to(self.device_torch, dtype=torch.float32)
+                    sampling_network._update_torch_multiplier()
+                    
+                    sampling_network.apply_to(
+                        text_encoder,
+                        self.sd._sampling_transformer,
+                        self.train_config.train_text_encoder,
+                        self.train_config.train_unet
+                    )
+                    
+                    # Set can_merge_in same as main network (False if quantized/layer_offloading)
+                    if self.model_config.quantize or self.model_config.layer_offloading:
+                        sampling_network.can_merge_in = False
+                    
+                    # Store sampling network on model for use during generation
+                    self.sd._sampling_network = sampling_network
+                    flush()
+
                 # LyCORIS doesnt have default_lr
                 config = {
                     'text_encoder_lr': self.train_config.lr,
