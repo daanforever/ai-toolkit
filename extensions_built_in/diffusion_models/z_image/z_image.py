@@ -314,11 +314,7 @@ class ZImageModel(BaseModel):
             transformer=unwrap_model(transformer_for_sampling),
         )
 
-        if self._sampling_transformer is not None:
-            # Move only text_encoder and vae to GPU; keep sampling transformer on CPU
-            pipeline.text_encoder.to(self.device_torch)
-            pipeline.vae.to(self.device_torch)
-        else:
+        if self._sampling_transformer is None:
             pipeline = pipeline.to(self.device_torch)
 
         return pipeline
