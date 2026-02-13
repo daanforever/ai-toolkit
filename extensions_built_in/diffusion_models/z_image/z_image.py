@@ -314,7 +314,7 @@ class ZImageModel(BaseModel):
             transformer=unwrap_model(transformer_for_sampling),
         )
 
-        pipeline = pipeline.to(self.device_torch)
+        # pipeline = pipeline.to(self.device_torch)
 
         return pipeline
 
