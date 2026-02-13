@@ -1,4 +1,3 @@
-import gc
 import os
 from typing import List, Optional
 
@@ -206,7 +205,6 @@ class ZImageModel(BaseModel):
 
         # Load sampling transformer if a separate sampling_name_or_path is specified
         self._sampling_transformer = None
-        self._active_transformer_name = "training"
         if self.model_config.sampling_name_or_path is not None and self.model_config.sampling_name_or_path != model_path:
             self.print_and_status_update("Loading sampling transformer")
             sampling_model_path = self.model_config.sampling_name_or_path
@@ -305,15 +303,7 @@ class ZImageModel(BaseModel):
         # Determine which transformer to use for sampling
         transformer_for_sampling = self.transformer
         if self._sampling_transformer is not None:
-            # Swap: move training transformer to CPU, sampling transformer to GPU
-            if self._active_transformer_name == "training":
-                safe_module_to_device(self.model, torch.device("cpu"))
-                torch.cuda.synchronize()
-                gc.collect()
-                torch.cuda.empty_cache()
-                safe_module_to_device(self._sampling_transformer, self.device_torch)
-                torch.cuda.empty_cache()
-                self._active_transformer_name = "sampling"
+            # Use sampling transformer, keep it on CPU (for testing / avoid OOM)
             transformer_for_sampling = self._sampling_transformer
 
         pipeline: ZImagePipeline = ZImagePipeline(
@@ -325,6 +315,9 @@ class ZImageModel(BaseModel):
         )
 
         pipeline = pipeline.to(self.device_torch)
+        # Keep sampling transformer on CPU (pipeline.to(device) would move it to GPU otherwise)
+        if self._sampling_transformer is not None:
+            pipeline.transformer.to("cpu")
 
         return pipeline
 
@@ -338,10 +331,10 @@ class ZImageModel(BaseModel):
         extra: dict,
     ):
 
-        # If using sampling transformer, ensure it's on device; otherwise move training transformer
+        # If using sampling transformer, it is kept on CPU (for testing); otherwise move training transformer to device
         if self._sampling_transformer is not None:
-            # Pipeline already has sampling transformer on GPU from get_generation_pipeline
-            pipeline.transformer.to(self.device_torch, dtype=self.torch_dtype)
+            # Sampling transformer stays on CPU - do not move to GPU
+            pass
         else:
             self.model.to(self.device_torch, dtype=self.torch_dtype)
         # Duplication of to(self.device_torch, dtype=self.torch_dtype)
@@ -395,16 +388,6 @@ class ZImageModel(BaseModel):
         text_embeddings: PromptEmbeds,
         **kwargs,
     ):
-        # Swap back to training transformer if sampling transformer was active
-        if self._sampling_transformer is not None and self._active_transformer_name == "sampling":
-            safe_module_to_device(self._sampling_transformer, torch.device("cpu"))
-            torch.cuda.synchronize()
-            gc.collect()
-            torch.cuda.empty_cache()
-            safe_module_to_device(self.model, self.device_torch)
-            torch.cuda.empty_cache()
-            self._active_transformer_name = "training"
-        
         if self.low_vram and next(self.model.parameters()).device != self.device_torch:
             safe_module_to_device(self.model, self.device_torch)
 
