@@ -261,7 +261,7 @@ def quantize_model(
         network.eval()
         network.is_active = True
         network.can_merge_in = False
-        setattr(base_model, adapter_attr_name, network)
+        base_model.accuracy_recovery_adapter = network
 
         # quantize it
         lora_exclude_modules = []
