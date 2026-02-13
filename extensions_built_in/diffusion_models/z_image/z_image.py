@@ -314,10 +314,7 @@ class ZImageModel(BaseModel):
             transformer=unwrap_model(transformer_for_sampling),
         )
 
-        if self._sampling_transformer is not None:
-            pipeline = pipeline.to("cpu")
-        else:
-            pipeline = pipeline.to(self.device_torch)
+        pipeline = pipeline.to(self.device_torch)
 
         return pipeline
 
@@ -331,12 +328,7 @@ class ZImageModel(BaseModel):
         extra: dict,
     ):
 
-        # If using sampling transformer, it is kept on CPU (for testing); otherwise move training transformer to device
-        if self._sampling_transformer is not None:
-            # Sampling transformer stays on CPU - do not move to GPU
-            pass
-        else:
-            self.model.to(self.device_torch, dtype=self.torch_dtype)
+        self.model.to(self.device_torch, dtype=self.torch_dtype)
         # Duplication of to(self.device_torch, dtype=self.torch_dtype)
         # is not necessary because the model is already on the correct device and dtype
         # self.model.to(self.device_torch)
