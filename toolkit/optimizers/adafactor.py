@@ -481,6 +481,28 @@ class Adafactor(torch.optim.Optimizer):
                 update_rms_list.append(0.0)
         return update_rms_list
 
+    def get_update_rms_max(self):
+        """
+        Get running max of update RMS for each parameter group.
+
+        Returns:
+            List[float]: Per-group average of update_rms_max (one value per group).
+                         Returns 0.0 for groups that have no update_rms_max in state yet.
+        """
+        update_rms_max_list = []
+        for group in self.param_groups:
+            group_rms_max_sum = 0.0
+            group_count = 0
+            for p in group["params"]:
+                if p in self.state and "update_rms_max" in self.state[p]:
+                    group_rms_max_sum += self.state[p]["update_rms_max"]
+                    group_count += 1
+            if group_count > 0:
+                update_rms_max_list.append(group_rms_max_sum / group_count)
+            else:
+                update_rms_max_list.append(0.0)
+        return update_rms_max_list
+
     def get_avg_update_rms(self):
         """
         Get average RMS of weight updates across all parameter groups.
@@ -498,15 +520,16 @@ class Adafactor(torch.optim.Optimizer):
 
     def get_avg_update_rms_max(self):
         """
-        Get maximum RMS of weight updates across all parameter groups.
+        Get average of running max of update RMS across all parameter groups.
 
-        This metric represents the largest magnitude of weight changes among groups per step.
-        Useful for monitoring peak update magnitudes and building graphs.
+        Returns the mean of per-group averages of update_rms_max (the decayed running max
+        used for activity normalization). Use together with get_avg_update_rms() to
+        monitor the normalization scale and compare update magnitude to its recent max.
 
         Returns:
-            float: Maximum RMS of weight updates across all parameter groups.
+            float: Average of update_rms_max across all parameter groups.
         """
-        update_rms_list = self.get_update_rms()
-        if len(update_rms_list) == 0:
+        update_rms_max_list = self.get_update_rms_max()
+        if len(update_rms_max_list) == 0:
             return 0.0
-        return max(update_rms_list)
+        return sum(update_rms_max_list) / len(update_rms_max_list)
