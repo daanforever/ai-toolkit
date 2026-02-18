@@ -30,6 +30,10 @@ class Adafactor(torch.optim.Optimizer):
             Threshold of root mean square of final gradient update
         decay_rate (`float`, *optional*, defaults to -0.8):
             Coefficient used to compute running averages of square
+        rms_max_decay_rate (`float`, *optional*, defaults to `0.97`):
+            Decay rate for running max of update RMS used in activity normalization.
+            Applied each step: ``update_rms_max = max(update_rms_max * rms_max_decay_rate, update_rms)``.
+            Allows the normalization scale to decrease over time so lr can recover from plateaus.
         beta1 (`float`, *optional*):
             Coefficient used for computing running averages of gradient
             (first moment, like in Adam). If not None, enables momentum.
@@ -109,6 +113,7 @@ class Adafactor(torch.optim.Optimizer):
         eps=(1e-30, 1e-3),
         clip_threshold=1.0,
         decay_rate=-0.8,
+        rms_max_decay_rate=0.97,
         beta1=None,
         weight_decay=0.0,
         scale_parameter=True,
@@ -134,6 +139,7 @@ class Adafactor(torch.optim.Optimizer):
             "eps": eps,
             "clip_threshold": clip_threshold,
             "decay_rate": decay_rate,
+            "rms_max_decay_rate": rms_max_decay_rate,
             "beta1": beta1,
             "weight_decay": weight_decay,
             "scale_parameter": scale_parameter,
@@ -144,9 +150,10 @@ class Adafactor(torch.optim.Optimizer):
         }
         super().__init__(params, defaults)
         
-        # Store LR limits and external lr so they can be reapplied after load_state_dict (restart with new config).
+        # Store LR limits, rms_max_decay_rate and external lr so they can be reapplied after load_state_dict (restart with new config).
         self._min_lr = min_lr
         self._max_lr = max_lr
+        self._rms_max_decay_rate = rms_max_decay_rate
         self._lr = lr
 
         self.base_lrs: List[float] = [
@@ -181,10 +188,11 @@ class Adafactor(torch.optim.Optimizer):
 
     def load_state_dict(self, state_dict):
         super().load_state_dict(state_dict)
-        # Apply current run's min_lr/max_lr/lr so changed config is used after restart.
+        # Apply current run's min_lr/max_lr/rms_max_decay_rate/lr so changed config is used after restart.
         for group in self.param_groups:
             group["min_lr"] = self._min_lr
             group["max_lr"] = self._max_lr
+            group["rms_max_decay_rate"] = self._rms_max_decay_rate
             if self._lr is not None:
                 group["lr"] = self._lr
 
@@ -434,8 +442,9 @@ class Adafactor(torch.optim.Optimizer):
 
                 # Store update RMS for monitoring and running max for activity normalization
                 state["update_rms"] = self._rms(update).item()
+                current_max = state.get("update_rms_max", 0.0)
                 state["update_rms_max"] = max(
-                    state.get("update_rms_max", 0.0), state["update_rms"]
+                    current_max * group["rms_max_decay_rate"], state["update_rms"]
                 )
 
                 if (p.dtype != torch.float32 or is_quantized) and self.stochastic_rounding:
