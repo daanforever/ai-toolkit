@@ -486,3 +486,18 @@ class Adafactor(torch.optim.Optimizer):
         if len(update_rms_list) == 0:
             return 0.0
         return sum(update_rms_list) / len(update_rms_list)
+
+    def get_avg_update_rms_max(self):
+        """
+        Get maximum RMS of weight updates across all parameter groups.
+
+        This metric represents the largest magnitude of weight changes among groups per step.
+        Useful for monitoring peak update magnitudes and building graphs.
+
+        Returns:
+            float: Maximum RMS of weight updates across all parameter groups.
+        """
+        update_rms_list = self.get_update_rms()
+        if len(update_rms_list) == 0:
+            return 0.0
+        return max(update_rms_list)
