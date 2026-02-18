@@ -248,9 +248,12 @@ class Adafactor(torch.optim.Optimizer):
             # Activity = prev_update_rms normalized to (0, 1] via running max.
             # Large updates → activity near 1 → lr near max_lr; small → activity near 0 → lr near min_lr.
 
-            param_scale = min(
-                1.0,
-                param_scale / (param_group.get("param_rms_max", 0.0) + eps0),
+            # Normalize param_scale to (0, 1] by group's param_rms_max; floor at eps1 so small weights
+            # (e.g. LoRA near zero) still get a minimum effective LR (~eps1 relative to 1.0) and can
+            # escape flat regions instead of stalling when param_rms_max grows much larger than their RMS.
+            param_scale = max(
+                eps1,
+                min(1.0, param_scale / (param_group.get("param_rms_max", 0.0) + eps0)),
             )
 
             prev_update_rms = param_state.get("update_rms", 0.0)
