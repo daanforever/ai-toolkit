@@ -237,7 +237,7 @@ class Adafactor(torch.optim.Optimizer):
         min_lr = param_group["min_lr"]
         max_lr = param_group["max_lr"]
         ref = min_lr  # when prev_update_rms == ref, activity = 0.5 (mid-range)
-        activity = prev_update_rms / (prev_update_rms + ref)  # in [0, 1)
+        activity = prev_update_rms / (prev_update_rms + ref + param_group["eps"][0])  # in [0, 1)
         lr = (1 - activity) * base_lr + activity * max_lr
         # Apply adaptive LR smoothing and clamp to [min_lr, max_lr].
         smooth_lr = self._smooth_lr(param_group, param_state, lr)
@@ -253,10 +253,7 @@ class Adafactor(torch.optim.Optimizer):
         previous_smoothed_lr = param_state.get("lr_smooth", raw_lr)
         smoothing_scale = (max_lr - min_lr) / 10.0
         lr_delta = raw_lr - previous_smoothed_lr
-        denominator = abs(lr_delta) + smoothing_scale
-        if denominator == 0:
-            param_state["lr_smooth"] = raw_lr
-            return raw_lr
+        denominator = abs(lr_delta) + smoothing_scale + param_group["eps"][0]
         blend_weight = abs(lr_delta) / denominator
         smoothed_lr = (1 - blend_weight) * raw_lr + blend_weight * previous_smoothed_lr
         param_state["lr_smooth"] = smoothed_lr
