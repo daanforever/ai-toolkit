@@ -144,9 +144,10 @@ class Adafactor(torch.optim.Optimizer):
         }
         super().__init__(params, defaults)
         
-        # Store LR limits so they can be reapplied after load_state_dict (restart with new config).
+        # Store LR limits and external lr so they can be reapplied after load_state_dict (restart with new config).
         self._min_lr = min_lr
         self._max_lr = max_lr
+        self._lr = lr
 
         self.base_lrs: List[float] = [
             group['lr'] for group in self.param_groups
@@ -180,10 +181,12 @@ class Adafactor(torch.optim.Optimizer):
 
     def load_state_dict(self, state_dict):
         super().load_state_dict(state_dict)
-        # Apply current run's min_lr/max_lr so changed config is used after restart.
+        # Apply current run's min_lr/max_lr/lr so changed config is used after restart.
         for group in self.param_groups:
             group["min_lr"] = self._min_lr
             group["max_lr"] = self._max_lr
+            if self._lr is not None:
+                group["lr"] = self._lr
 
     def enable_parameter_swapping(self, parameter_swapping_factor=0.1):
         self.do_parameter_swapping = True
