@@ -215,8 +215,7 @@ class Adafactor(torch.optim.Optimizer):
             if total_parameters >= target_parameters:
                 break
 
-    @staticmethod
-    def _get_lr(param_group, param_state):
+    def _get_lr(self, param_group, param_state):
         rel_step_sz = param_group["lr"]
         if param_group["relative_step"]:
             if param_group["warmup_init"]:
@@ -240,8 +239,28 @@ class Adafactor(torch.optim.Optimizer):
         ref = min_lr  # when prev_update_rms == ref, activity = 0.5 (mid-range)
         activity = prev_update_rms / (prev_update_rms + ref)  # in [0, 1)
         lr = (1 - activity) * base_lr + activity * max_lr
-        lr = max(min_lr, min(lr, max_lr))
+        # Apply adaptive LR smoothing and clamp to [min_lr, max_lr].
+        smooth_lr = self._smooth_lr(param_group, param_state, lr)
+        lr = max(min_lr, min(smooth_lr, max_lr))
         return lr
+
+    def _smooth_lr(self, param_group, param_state, raw_lr):
+        # Raw lr jumps step-to-step due to update_rms. We smooth adaptively: larger
+        # |lr_delta| -> higher blend_weight on previous value -> smoother change.
+        # Scale from (max_lr - min_lr) / 10 with no extra hyperparameters.
+        min_lr = param_group["min_lr"]
+        max_lr = param_group["max_lr"]
+        previous_smoothed_lr = param_state.get("lr_smooth", raw_lr)
+        smoothing_scale = (max_lr - min_lr) / 10.0
+        lr_delta = raw_lr - previous_smoothed_lr
+        denominator = abs(lr_delta) + smoothing_scale
+        if denominator == 0:
+            param_state["lr_smooth"] = raw_lr
+            return raw_lr
+        blend_weight = abs(lr_delta) / denominator
+        smoothed_lr = (1 - blend_weight) * raw_lr + blend_weight * previous_smoothed_lr
+        param_state["lr_smooth"] = smoothed_lr
+        return smoothed_lr
 
     @staticmethod
     def _get_options(param_group, param_shape):
