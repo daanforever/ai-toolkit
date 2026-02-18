@@ -227,9 +227,20 @@ class Adafactor(torch.optim.Optimizer):
         param_scale = 1.0
         if param_group["scale_parameter"]:
             param_scale = max(param_group["eps"][1], param_state["RMS"])
-        lr = param_scale * rel_step_sz
-        # Ensure learning rate is between min_lr and max_lr
-        lr = max(param_group["min_lr"], min(lr, param_group["max_lr"]))
+        base_lr = param_scale * rel_step_sz
+        # Blend base_lr with max_lr using "activity" from previous step's update magnitude.
+        # Motivation: small RMS can mean either (a) start of training (small weights) or
+        # (b) plateau (converged to small-magnitude solution). We use prev_update_rms to
+        # distinguish: large updates → active learning → push lr toward max_lr; small
+        # updates → plateau → keep lr close to base_lr (often min_lr). On the first
+        # step update_rms is absent → activity=0 → lr stays at base_lr (clamped).
+        prev_update_rms = param_state.get("update_rms", 0.0)
+        min_lr = param_group["min_lr"]
+        max_lr = param_group["max_lr"]
+        ref = min_lr  # when prev_update_rms == ref, activity = 0.5 (mid-range)
+        activity = prev_update_rms / (prev_update_rms + ref)  # in [0, 1)
+        lr = (1 - activity) * base_lr + activity * max_lr
+        lr = max(min_lr, min(lr, max_lr))
         return lr
 
     @staticmethod
