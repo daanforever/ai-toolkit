@@ -260,11 +260,15 @@ class Adafactor(torch.optim.Optimizer):
             update_rms_max = param_state.get("update_rms_max", 0.0)
 
             activity = prev_update_rms / (update_rms_max + eps0)  # in [0, 1]
+
             if min_lr == 0:
                 new_lr = max(max_lr/10, activity * max_lr)  # floor eps0 to avoid exact zero
             else:
                 new_lr = (1.0 - activity) * min_lr + activity * max_lr
-            new_lr = new_lr * param_scale
+
+            # param_scale influence: weaker at high activity, stronger at low activity
+            effective_scale = (1.0 - activity) * param_scale + activity * 1.0
+            new_lr = new_lr * effective_scale
 
         else:
             new_lr = param_scale * rel_step_sz  # external schedule, scaled by param RMS
