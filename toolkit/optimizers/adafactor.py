@@ -274,13 +274,12 @@ class Adafactor(torch.optim.Optimizer):
             new_lr = param_scale * rel_step_sz  # external schedule, scaled by param RMS
 
         # Smooth step-to-step changes and clamp to [min_lr, max_lr].
-        # smooth_lr = self._smooth_lr(param_group, param_state, new_lr)
-        # new_lr = max(min_lr, min(smooth_lr, max_lr))
-        new_lr = max(min_lr, min(new_lr, max_lr))
+        smooth_lr = self._smooth_lr(param_group, param_state, new_lr)
+        new_lr = max(min_lr, min(smooth_lr, max_lr))
         if min_lr == 0:
             new_lr = max(eps0, new_lr)  # re-apply floor after smoothing
 
-        # param_state["lr_previous"] = new_lr  # used by _smooth_lr next step
+        param_state["lr_previous"] = new_lr  # used by _smooth_lr next step
         return new_lr
 
     def _smooth_lr(self, param_group, param_state, raw_lr):
