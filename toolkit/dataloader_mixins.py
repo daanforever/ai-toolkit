@@ -1969,9 +1969,6 @@ class TextEmbeddingFileItemDTOMixin:
         if self.prompt_embeds is None:
             # load it from disk
             self.prompt_embeds = PromptEmbeds.load(self.get_text_embedding_path())
-            if getattr(self, '_current_epoch_num', 0) > 0 and getattr(self.dataset_config, 'shuffle_tokens', False):
-                self.prompt_embeds.shuffle_sequence()
-                print_acc(f"Cached text embedding tokens shuffled (epoch {getattr(self, '_current_epoch_num', 0)})")
 
 class TextEmbeddingCachingMixin:
     def __init__(self: 'AiToolkitDataset', **kwargs):
