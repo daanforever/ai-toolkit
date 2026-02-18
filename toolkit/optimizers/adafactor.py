@@ -288,7 +288,7 @@ class Adafactor(torch.optim.Optimizer):
         min_lr = param_group["min_lr"]
         max_lr = param_group["max_lr"]
         lr_previous = param_state.get("lr_previous", raw_lr)
-        smoothing_scale = (max_lr - min_lr) / 10.0
+        smoothing_scale = (max_lr - min_lr) / 100.0
         lr_delta = raw_lr - lr_previous
         denominator = abs(lr_delta) + smoothing_scale + param_group["eps"][0]
         blend_weight = abs(lr_delta) / denominator
