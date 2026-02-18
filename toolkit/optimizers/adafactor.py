@@ -33,6 +33,8 @@ class Adafactor(torch.optim.Optimizer):
         rms_max_decay_rate (`float`, *optional*, defaults to `0.97`):
             Decay rate for running max of update RMS used in activity normalization.
             Applied each step: ``update_rms_max = max(update_rms_max * rms_max_decay_rate, update_rms)``.
+            Also used for group-level running max of parameter RMS (param_rms_max) when scale_parameter=True,
+            to normalize per-parameter scale to (0, 1] within the group (useful for LoRA).
             Allows the normalization scale to decrease over time so lr can recover from plateaus.
         beta1 (`float`, *optional*):
             Coefficient used for computing running averages of gradient
@@ -140,6 +142,7 @@ class Adafactor(torch.optim.Optimizer):
             "clip_threshold": clip_threshold,
             "decay_rate": decay_rate,
             "rms_max_decay_rate": rms_max_decay_rate,
+            "param_rms_max": 0.0,
             "beta1": beta1,
             "weight_decay": weight_decay,
             "scale_parameter": scale_parameter,
@@ -193,6 +196,7 @@ class Adafactor(torch.optim.Optimizer):
             group["min_lr"] = self._min_lr
             group["max_lr"] = self._max_lr
             group["rms_max_decay_rate"] = self._rms_max_decay_rate
+            group["param_rms_max"] = group.get("param_rms_max", 0.0)
             if self._lr is not None:
                 group["lr"] = self._lr
 
@@ -226,12 +230,13 @@ class Adafactor(torch.optim.Optimizer):
     def _get_lr(self, param_group, param_state):
         rel_step_sz = param_group["lr"]  # external lr when relative_step=False
         eps0 = param_group["eps"][0]
+        eps1 = param_group["eps"][1]
         min_lr = param_group["min_lr"]
         max_lr = param_group["max_lr"]
         param_scale = 1.0
 
         if param_group["scale_parameter"]:
-            param_scale = max(param_group["eps"][1], param_state["RMS"])
+            param_scale = max(eps1, param_state["RMS"])
 
         if param_group["relative_step"]:
             # TODO: add warmup_init
@@ -242,6 +247,12 @@ class Adafactor(torch.optim.Optimizer):
 
             # Activity = prev_update_rms normalized to (0, 1] via running max.
             # Large updates → activity near 1 → lr near max_lr; small → activity near 0 → lr near min_lr.
+
+            param_scale = min(
+                1.0,
+                param_scale / (param_group.get("param_rms_max", 0.0) + eps0),
+            )
+
             prev_update_rms = param_state.get("update_rms", 0.0)
             update_rms_max = param_state.get("update_rms_max", 0.0)
 
@@ -250,6 +261,7 @@ class Adafactor(torch.optim.Optimizer):
                 new_lr = max(max_lr/10, activity * max_lr)  # floor eps0 to avoid exact zero
             else:
                 new_lr = (1.0 - activity) * min_lr + activity * max_lr
+            new_lr = new_lr * param_scale
 
         else:
             new_lr = param_scale * rel_step_sz  # external schedule, scaled by param RMS
@@ -450,6 +462,22 @@ class Adafactor(torch.optim.Optimizer):
                 if (p.dtype != torch.float32 or is_quantized) and self.stochastic_rounding:
                     # apply stochastic rounding
                     copy_stochastic(p, p_data_fp32)
+
+            rms_tensors = []
+            device = None
+            for p in group["params"]:
+                if p in self.state and "RMS" in self.state[p]:
+                    rms = self.state[p]["RMS"]
+                    t = torch.as_tensor(rms, device=p.device)
+                    if device is None:
+                        device = t.device
+                    rms_tensors.append(t.to(device))
+            if rms_tensors:
+                group_rms_max = torch.max(torch.stack(rms_tensors)).item()
+                group["param_rms_max"] = max(
+                    group["param_rms_max"] * group["rms_max_decay_rate"],
+                    group_rms_max,
+                )
 
         return loss
         
