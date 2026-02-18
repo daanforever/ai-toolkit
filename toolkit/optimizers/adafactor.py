@@ -216,47 +216,56 @@ class Adafactor(torch.optim.Optimizer):
                 break
 
     def _get_lr(self, param_group, param_state):
-        rel_step_sz = param_group["lr"]
-        if param_group["relative_step"]:
-            if param_group["warmup_init"]:
-                min_step = param_group["min_lr"] * param_state["step"]
-            else:
-                min_step = param_group["max_lr"]
-            rel_step_sz = min(min_step, 1.0 / math.sqrt(param_state["step"]))
+        rel_step_sz = param_group["lr"]  # external lr when relative_step=False
+        eps0 = param_group["eps"][0]
+        min_lr = param_group["min_lr"]
+        max_lr = param_group["max_lr"]
         param_scale = 1.0
+
         if param_group["scale_parameter"]:
             param_scale = max(param_group["eps"][1], param_state["RMS"])
-        base_lr = param_scale * rel_step_sz
-        # Blend base_lr with max_lr using "activity" from previous step's update magnitude.
-        # Motivation: small RMS can mean either (a) start of training (small weights) or
-        # (b) plateau (converged to small-magnitude solution). We use prev_update_rms to
-        # distinguish: large updates → active learning → push lr toward max_lr; small
-        # updates → plateau → keep lr close to base_lr (often min_lr). On the first
-        # step update_rms is absent → activity=0 → lr stays at base_lr (clamped).
-        prev_update_rms = param_state.get("update_rms", 0.0)
-        min_lr = param_group["min_lr"]
-        max_lr = param_group["max_lr"]
-        ref = min_lr  # when prev_update_rms == ref, activity = 0.5 (mid-range)
-        activity = prev_update_rms / (prev_update_rms + ref + param_group["eps"][0])  # in [0, 1)
-        lr = (1 - activity) * base_lr + activity * max_lr
-        # Apply adaptive LR smoothing and clamp to [min_lr, max_lr].
-        smooth_lr = self._smooth_lr(param_group, param_state, lr)
-        lr = max(min_lr, min(smooth_lr, max_lr))
-        return lr
+
+        if param_group["relative_step"]:
+            # TODO: add warmup_init
+            # if param_group["warmup_init"]:
+            #     min_step = param_group["min_lr"] * param_state["step"]
+            # else:
+            #     min_step = param_group["max_lr"]
+
+            # Activity = prev_update_rms normalized to (0, 1] via running max.
+            # Large updates → activity near 1 → lr near max_lr; small → activity near 0 → lr near min_lr.
+            prev_update_rms = param_state.get("update_rms", 0.0)
+            update_rms_max = param_state.get("update_rms_max", 0.0)
+
+            activity = prev_update_rms / (update_rms_max + eps0)  # in [0, 1]
+            if min_lr == 0:
+                new_lr = max(eps0, activity * max_lr)  # floor eps0 to avoid exact zero
+            else:
+                new_lr = (1.0 - activity) * min_lr + activity * max_lr
+
+        else:
+            new_lr = param_scale * rel_step_sz  # external schedule, scaled by param RMS
+
+        # Smooth step-to-step changes and clamp to [min_lr, max_lr].
+        smooth_lr = self._smooth_lr(param_group, param_state, new_lr)
+        new_lr = max(min_lr, min(smooth_lr, max_lr))
+        if min_lr == 0:
+            new_lr = max(eps0, new_lr)  # re-apply floor after smoothing
+
+        param_state["lr_previous"] = new_lr  # used by _smooth_lr next step
+        return new_lr
 
     def _smooth_lr(self, param_group, param_state, raw_lr):
-        # Raw lr jumps step-to-step due to update_rms. We smooth adaptively: larger
-        # |lr_delta| -> higher blend_weight on previous value -> smoother change.
-        # Scale from (max_lr - min_lr) / 10 with no extra hyperparameters.
+        # Blend raw_lr with previous step's final lr to reduce step-to-step jumps.
+        # Larger |raw_lr - lr_previous| → more weight on lr_previous → smoother.
         min_lr = param_group["min_lr"]
         max_lr = param_group["max_lr"]
-        previous_smoothed_lr = param_state.get("lr_smooth", raw_lr)
+        lr_previous = param_state.get("lr_previous", raw_lr)
         smoothing_scale = (max_lr - min_lr) / 10.0
-        lr_delta = raw_lr - previous_smoothed_lr
+        lr_delta = raw_lr - lr_previous
         denominator = abs(lr_delta) + smoothing_scale + param_group["eps"][0]
         blend_weight = abs(lr_delta) / denominator
-        smoothed_lr = (1 - blend_weight) * raw_lr + blend_weight * previous_smoothed_lr
-        param_state["lr_smooth"] = smoothed_lr
+        smoothed_lr = (1 - blend_weight) * raw_lr + blend_weight * lr_previous
         return smoothed_lr
 
     @staticmethod
@@ -423,8 +432,11 @@ class Adafactor(torch.optim.Optimizer):
 
                 p_data_fp32.add_(-update)
 
-                # Store update RMS for monitoring
+                # Store update RMS for monitoring and running max for activity normalization
                 state["update_rms"] = self._rms(update).item()
+                state["update_rms_max"] = max(
+                    state.get("update_rms_max", 0.0), state["update_rms"]
+                )
 
                 if (p.dtype != torch.float32 or is_quantized) and self.stochastic_rounding:
                     # apply stochastic rounding
