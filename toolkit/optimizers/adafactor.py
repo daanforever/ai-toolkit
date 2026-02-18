@@ -247,7 +247,7 @@ class Adafactor(torch.optim.Optimizer):
 
             activity = prev_update_rms / (update_rms_max + eps0)  # in [0, 1]
             if min_lr == 0:
-                new_lr = max(eps0, activity * max_lr)  # floor eps0 to avoid exact zero
+                new_lr = max(max_lr/10, activity * max_lr)  # floor eps0 to avoid exact zero
             else:
                 new_lr = (1.0 - activity) * min_lr + activity * max_lr
 
