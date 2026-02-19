@@ -256,12 +256,6 @@ class Adafactor(torch.optim.Optimizer):
             param_scale = max(eps1, rms_val)
 
         if param_group["relative_step"]:
-            # TODO: add warmup_init
-            # if param_group["warmup_init"]:
-            #     min_step = param_group["min_lr"] * param_state["step"]
-            # else:
-            #     min_step = param_group["max_lr"]
-
             # Activity = prev_update_rms normalized to (0, 1] via running max.
             # Large updates → activity near 1 → lr near max_lr; small → activity near 0 → lr near min_lr.
 
@@ -293,6 +287,15 @@ class Adafactor(torch.optim.Optimizer):
             # param_scale influence: weaker at high activity, stronger at low activity
             effective_scale = (1.0 - activity) * param_scale + activity * 1.0
             new_lr = new_lr * effective_scale
+
+            if param_group.get("warmup_init", False):
+                warmup_target = new_lr
+                current = lr_previous
+                gap = warmup_target - current
+                if gap > 0:
+                    warmup_step = ( prev_update_rms + eps0 ) / max_lr
+                    step_actual = min(warmup_step, gap)
+                    new_lr = current + step_actual
 
         else:
             new_lr = param_scale * rel_step_sz  # external schedule, scaled by param RMS
