@@ -7,10 +7,50 @@ from tqdm import tqdm
 import random
 
 from toolkit.train_tools import get_torch_dtype
+from toolkit.print import print_acc
+from toolkit.util.debug import is_debug_enabled
 import itertools
 
 if TYPE_CHECKING:
     from toolkit.config_modules import SliderTargetConfig
+
+
+def get_segment_boundaries_from_prompt(tokenizer, prompt: Union[str, List[str]], seq_len: int) -> List[int]:
+    """
+    Compute segment boundaries (phrase boundaries at commas) in token space.
+    Returns list of segment end indices: segment i = [boundaries[i] : boundaries[i+1]].
+    Uses the same tokenizer as the pipeline; boundaries are valid only if pipeline uses no extra preprocessing.
+    """
+    caption = prompt[0] if isinstance(prompt, list) else prompt
+    caption = str(caption)
+    enc = tokenizer(caption, return_tensors="pt", add_special_tokens=True)
+    input_ids = enc["input_ids"][0]
+    if hasattr(input_ids, "tolist"):
+        input_ids = input_ids.tolist()
+    else:
+        input_ids = list(input_ids)
+    n_tokens = len(input_ids)
+
+    comma_ids = set()
+    for s in [",", ", ", " ,"]:
+        ids = tokenizer.encode(s, add_special_tokens=False)
+        comma_ids.update(ids if isinstance(ids, list) else ids.tolist())
+
+    positions = [i for i, tid in enumerate(input_ids) if tid in comma_ids]
+    end = min(seq_len, n_tokens)
+    after_comma = sorted(set(p + 1 for p in positions))
+    boundaries = [0] + [b for b in after_comma if 0 < b < end] + [end]
+    if boundaries[-1] != end:
+        boundaries.append(end)
+
+    if is_debug_enabled():
+        print_acc(f"[Segment boundaries] comma_ids={sorted(comma_ids)}")
+        print_acc(f"[Segment boundaries] comma_positions_count={len(positions)}")
+        print_acc(f"[Segment boundaries] segment_boundaries={boundaries}")
+        if len(positions) == 0:
+            print_acc("Segment boundaries: no comma tokens found in caption (tokenizer may merge commas); using single segment.")
+
+    return boundaries
 
 
 class ACTION_TYPES_SLIDER:
@@ -23,7 +63,7 @@ class PromptEmbeds:
     # pooled_embeds: Union[torch.Tensor, None]
     # attention_mask: Union[torch.Tensor, List[torch.Tensor], None]
 
-    def __init__(self, args: Union[Tuple[torch.Tensor], List[torch.Tensor], torch.Tensor], attention_mask=None) -> None:
+    def __init__(self, args: Union[Tuple[torch.Tensor], List[torch.Tensor], torch.Tensor], attention_mask=None, segment_boundaries=None) -> None:
         if isinstance(args, list) or isinstance(args, tuple):
             # xl
             self.text_embeds = args[0]
@@ -34,6 +74,7 @@ class PromptEmbeds:
             self.pooled_embeds = None
 
         self.attention_mask = attention_mask
+        self.segment_boundaries = segment_boundaries
 
     def to(self, *args, **kwargs):
         if isinstance(self.text_embeds, list) or isinstance(self.text_embeds, tuple):
@@ -82,6 +123,7 @@ class PromptEmbeds:
                 prompt_embeds.attention_mask = [t.clone() for t in self.attention_mask]
             else:
                 prompt_embeds.attention_mask = self.attention_mask.clone()
+        prompt_embeds.segment_boundaries = list(self.segment_boundaries) if self.segment_boundaries else None
         return prompt_embeds
 
     def expand_to_batch(self, batch_size):
@@ -115,37 +157,56 @@ class PromptEmbeds:
         return pe
 
     def shuffle_sequence(self) -> None:
-        """Shuffle token order along sequence dimension (dim=1), keeping first token fixed. In-place. No-op if seq_len <= 1."""
-        def make_perm(seq_len: int, device: torch.device) -> torch.Tensor:
-            if seq_len <= 1:
-                return torch.arange(seq_len, device=device, dtype=torch.long)
-            return torch.cat([
-                torch.zeros(1, device=device, dtype=torch.long),
-                1 + torch.randperm(seq_len - 1, device=device, dtype=torch.long),
-            ])
+        """Shuffle by whole segments (phrase boundaries). First segment fixed, rest randomly reordered. In-place. No-op if no segment boundaries."""
+        boundaries = getattr(self, "segment_boundaries", None)
+        if boundaries is None or len(boundaries) < 2:
+            print_acc("Cannot shuffle cached text embeddings: no segment boundaries (old cache or unsupported model).")
+            return
+        if len(boundaries) == 2:
+            print_acc("Cached text embeddings: 1 segment, no shuffle.")
+            return
+
+        n_segments = len(boundaries) - 1
+        segment_order = [0] + list(range(1, n_segments))
+        random.shuffle(segment_order[1:])
+
+        def apply_segment_perm(t: torch.Tensor) -> torch.Tensor:
+            if t.dim() < 2 or t.shape[1] <= 1:
+                return t
+            seq_len = t.shape[1]
+            device = t.device
+            perm = torch.zeros(seq_len, dtype=torch.long, device=device)
+            for new_seg_idx in range(n_segments):
+                old_seg_idx = segment_order[new_seg_idx]
+                start_new = boundaries[new_seg_idx]
+                end_new = min(boundaries[new_seg_idx + 1], seq_len)
+                start_old = boundaries[old_seg_idx]
+                for i in range(start_new, end_new):
+                    offset = i - start_new
+                    perm[i] = start_old + offset
+            return t[:, perm, ...].contiguous()
+
         if isinstance(self.text_embeds, list) or isinstance(self.text_embeds, tuple):
             te_list = list(self.text_embeds)
             attn_list = list(self.attention_mask) if self.attention_mask is not None and isinstance(self.attention_mask, (list, tuple)) else None
             attn_is_tuple = isinstance(self.attention_mask, tuple) if self.attention_mask is not None else False
             for i, t in enumerate(te_list):
-                if t.dim() >= 2 and t.shape[1] > 1:
-                    perm = make_perm(t.shape[1], t.device)
-                    te_list[i] = t[:, perm, ...].contiguous()
-                    if attn_list is not None and i < len(attn_list):
-                        attn = attn_list[i]
-                        if attn.dim() >= 2 and attn.shape[1] > 1:
-                            attn_list[i] = attn[:, perm, ...].contiguous()
-                    elif self.attention_mask is not None and not isinstance(self.attention_mask, (list, tuple)) and i == 0:
-                        self.attention_mask = self.attention_mask[:, perm, ...].contiguous()
+                if t.dim() >= 2:
+                    te_list[i] = apply_segment_perm(t)
+                    if attn_list is not None and i < len(attn_list) and attn_list[i] is not None and attn_list[i].dim() >= 2:
+                        attn_list[i] = apply_segment_perm(attn_list[i])
             self.text_embeds = tuple(te_list) if isinstance(self.text_embeds, tuple) else te_list
             if attn_list is not None:
                 self.attention_mask = tuple(attn_list) if attn_is_tuple else attn_list
         else:
-            if self.text_embeds.dim() >= 2 and self.text_embeds.shape[1] > 1:
-                perm = make_perm(self.text_embeds.shape[1], self.text_embeds.device)
-                self.text_embeds = self.text_embeds[:, perm, ...].contiguous()
-                if self.attention_mask is not None and self.attention_mask.dim() >= 2 and self.attention_mask.shape[1] > 1:
-                    self.attention_mask = self.attention_mask[:, perm, ...].contiguous()
+            self.text_embeds = apply_segment_perm(self.text_embeds)
+            if self.attention_mask is not None and self.attention_mask.dim() >= 2:
+                self.attention_mask = apply_segment_perm(self.attention_mask)
+
+        print_acc(f"Shuffled {n_segments} segments in cached text embeddings.")
+        if is_debug_enabled():
+            segment_lengths = [boundaries[i + 1] - boundaries[i] for i in range(n_segments)]
+            print_acc(f"[Segment shuffle] segment_boundaries={boundaries}, segment_lengths={segment_lengths}")
 
     def save(self, path: str):
         """
@@ -168,6 +229,8 @@ class PromptEmbeds:
                     state_dict[f"attention_mask_{i}"] = attn.cpu()
             else:
                 state_dict["attention_mask"] = pe.attention_mask.cpu()
+        if getattr(pe, "segment_boundaries", None) is not None and len(pe.segment_boundaries) > 0:
+            state_dict["segment_boundaries"] = torch.tensor(pe.segment_boundaries, dtype=torch.long)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         save_file(state_dict, path)
     
@@ -206,6 +269,7 @@ class PromptEmbeds:
                 pe.attention_mask = attention_mask[0]
             else:
                 pe.attention_mask = attention_mask
+        pe.segment_boundaries = state_dict["segment_boundaries"].tolist() if "segment_boundaries" in state_dict else None
         return pe
 
 

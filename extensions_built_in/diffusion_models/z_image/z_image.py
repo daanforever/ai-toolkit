@@ -9,7 +9,7 @@ from toolkit.config_modules import GenerateImageConfig, ModelConfig, NetworkConf
 from toolkit.lora_special import LoRASpecialNetwork
 from toolkit.models.base_model import BaseModel
 from toolkit.basic import flush
-from toolkit.prompt_utils import PromptEmbeds
+from toolkit.prompt_utils import PromptEmbeds, get_segment_boundaries_from_prompt
 from toolkit.samplers.custom_flowmatch_sampler import (
     CustomFlowMatchEulerDiscreteScheduler,
 )
@@ -524,7 +524,12 @@ class ZImageModel(BaseModel):
                     t = torch.cat([t, pad], dim=0)
                 padded.append(t)
             prompt_embeds = torch.stack(padded, dim=0)
-        pe = PromptEmbeds([prompt_embeds, None])
+        caption = prompt[0] if isinstance(prompt, list) else prompt
+        seq_len = prompt_embeds.shape[1] if prompt_embeds.dim() == 3 else prompt_embeds.shape[0]
+        segment_boundaries = get_segment_boundaries_from_prompt(
+            self.tokenizer[0], caption, seq_len
+        )
+        pe = PromptEmbeds([prompt_embeds, None], segment_boundaries=segment_boundaries)
         return pe
 
     def get_model_has_grad(self):
