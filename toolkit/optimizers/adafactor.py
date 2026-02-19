@@ -293,7 +293,7 @@ class Adafactor(torch.optim.Optimizer):
                 current = lr_previous
                 gap = warmup_target - current
                 if gap > 0:
-                    warmup_step = ( min_lr * ( prev_update_rms / (update_rms_max + eps0) ) + eps0 ) / max_lr
+                    warmup_step = update_rms_max - prev_update_rms + eps0
                     step_actual = min(warmup_step, gap)
                     new_lr = current + step_actual
 
