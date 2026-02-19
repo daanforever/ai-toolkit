@@ -206,6 +206,13 @@ class Adafactor(torch.optim.Optimizer):
             group["param_rms_max"] = group.get("param_rms_max", 0.0)
             if self._lr is not None:
                 group["lr"] = self._lr
+        # Normalize state from old checkpoints: update_rms_max/update_rms must be tensors for step().
+        for group in self.param_groups:
+            for param in group["params"]:
+                state = self.state[param]
+                for key in ("update_rms_max", "update_rms"):
+                    if key in state and not isinstance(state[key], torch.Tensor):
+                        state[key] = torch.tensor(state[key], device=param.device, dtype=torch.float32)
 
     def enable_parameter_swapping(self, parameter_swapping_factor=0.1):
         self.do_parameter_swapping = True
@@ -508,6 +515,8 @@ class Adafactor(torch.optim.Optimizer):
                 current_max = state.get("update_rms_max")
                 if current_max is None:
                     current_max = torch.tensor(0.0, device=update.device, dtype=update.dtype)
+                elif not isinstance(current_max, torch.Tensor):
+                    current_max = torch.tensor(current_max, device=update.device, dtype=update.dtype)
                 state["update_rms_max"] = torch.maximum(
                     current_max * group["rms_max_decay_rate"], state["update_rms"]
                 )
