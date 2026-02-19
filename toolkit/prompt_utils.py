@@ -44,11 +44,11 @@ def get_segment_boundaries_from_prompt(tokenizer, prompt: Union[str, List[str]],
         boundaries.append(end)
 
     if is_debug_enabled():
-        print_acc(f"[Segment boundaries] comma_ids={sorted(comma_ids)}")
-        print_acc(f"[Segment boundaries] comma_positions_count={len(positions)}")
-        print_acc(f"[Segment boundaries] segment_boundaries={boundaries}")
+        print_acc(f"\n[Segment boundaries] comma_ids={sorted(comma_ids)}")
+        print_acc(f"\n[Segment boundaries] comma_positions_count={len(positions)}")
+        print_acc(f"\n[Segment boundaries] segment_boundaries={boundaries}")
         if len(positions) == 0:
-            print_acc("Segment boundaries: no comma tokens found in caption (tokenizer may merge commas); using single segment.")
+            print_acc("\nSegment boundaries: no comma tokens found in caption (tokenizer may merge commas); using single segment.")
 
     return boundaries
 
@@ -160,10 +160,10 @@ class PromptEmbeds:
         """Shuffle by whole segments (phrase boundaries). First segment fixed, rest randomly reordered. In-place. No-op if no segment boundaries."""
         boundaries = getattr(self, "segment_boundaries", None)
         if boundaries is None or len(boundaries) < 2:
-            print_acc("Cannot shuffle cached text embeddings: no segment boundaries (old cache or unsupported model).")
+            print_acc("\nCannot shuffle cached text embeddings: no segment boundaries (old cache or unsupported model).")
             return
         if len(boundaries) == 2:
-            print_acc("Cached text embeddings: 1 segment, no shuffle.")
+            print_acc("\nCached text embeddings: 1 segment, no shuffle.")
             return
 
         n_segments = len(boundaries) - 1
@@ -203,10 +203,10 @@ class PromptEmbeds:
             if self.attention_mask is not None and self.attention_mask.dim() >= 2:
                 self.attention_mask = apply_segment_perm(self.attention_mask)
 
-        print_acc(f"Shuffled {n_segments} segments in cached text embeddings.")
+        print_acc(f"\nShuffled {n_segments} segments in cached text embeddings.")
         if is_debug_enabled():
             segment_lengths = [boundaries[i + 1] - boundaries[i] for i in range(n_segments)]
-            print_acc(f"[Segment shuffle] segment_boundaries={boundaries}, segment_lengths={segment_lengths}")
+            print_acc(f"\n[Segment shuffle] segment_boundaries={boundaries}, segment_lengths={segment_lengths}")
 
     def save(self, path: str):
         """
