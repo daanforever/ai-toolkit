@@ -278,8 +278,12 @@ class Adafactor(torch.optim.Optimizer):
             prev_update_rms = prev_update_rms.item() if isinstance(prev_update_rms, torch.Tensor) else prev_update_rms
             update_rms_max = param_state.get("update_rms_max", 0.0)
             update_rms_max = update_rms_max.item() if isinstance(update_rms_max, torch.Tensor) else update_rms_max
+            lr_previous = param_state.get("lr_previous", 0.0)
+            lr_previous = lr_previous.item() if isinstance(lr_previous, torch.Tensor) else lr_previous
 
-            activity = min(1.0, prev_update_rms / (update_rms_max + eps0))  # in [0, 1]
+            part1 = min(1.0, prev_update_rms / (update_rms_max + eps0)) / 2
+            part2 = max(0, 1 - abs(lr_previous - prev_update_rms) / (lr_previous + eps0)) / 2
+            activity = part1 + part2 # in [0, 1]
 
             if min_lr == 0:
                 new_lr = max(max_lr/10, activity * max_lr)  # floor eps0 to avoid exact zero
