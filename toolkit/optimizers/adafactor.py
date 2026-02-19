@@ -54,6 +54,9 @@ class Adafactor(torch.optim.Optimizer):
         max_lr (`float`, *optional*, defaults to `1e-2`):
             Maximum learning rate cap for relative step mode when `relative_step=True`.
             Acts as upper bound for `min_step` when `warmup_init=False` or when warmup phase completes.
+        lr_smoothing_rate (`float`, *optional*, defaults to `100.0`):
+            Divisor for the smoothing scale in step-to-step learning rate smoothing in `_smooth_lr`.
+            Larger values yield stronger smoothing (smaller step-to-step LR changes).
 
     This implementation handles low-precision (FP16, bfloat) values, but we have not thoroughly tested.
 
@@ -123,6 +126,7 @@ class Adafactor(torch.optim.Optimizer):
         warmup_init=False,
         min_lr=1e-6,
         max_lr=1e-4,
+        lr_smoothing_rate=100.0,
         do_parameter_swapping=False,
         parameter_swapping_factor=0.1,
         stochastic_accumulation=True,
@@ -150,12 +154,14 @@ class Adafactor(torch.optim.Optimizer):
             "warmup_init": warmup_init,
             "min_lr": min_lr,
             "max_lr": max_lr,
+            "lr_smoothing_rate": lr_smoothing_rate,
         }
         super().__init__(params, defaults)
         
-        # Store LR limits, rms_max_decay_rate and external lr so they can be reapplied after load_state_dict (restart with new config).
+        # Store LR limits, lr_smoothing_rate, rms_max_decay_rate and external lr so they can be reapplied after load_state_dict (restart with new config).
         self._min_lr = min_lr
         self._max_lr = max_lr
+        self._lr_smoothing_rate = lr_smoothing_rate
         self._rms_max_decay_rate = rms_max_decay_rate
         self._lr = lr
 
@@ -191,10 +197,11 @@ class Adafactor(torch.optim.Optimizer):
 
     def load_state_dict(self, state_dict):
         super().load_state_dict(state_dict)
-        # Apply current run's min_lr/max_lr/rms_max_decay_rate/lr so changed config is used after restart.
+        # Apply current run's min_lr/max_lr/lr_smoothing_rate/rms_max_decay_rate/lr so changed config is used after restart.
         for group in self.param_groups:
             group["min_lr"] = self._min_lr
             group["max_lr"] = self._max_lr
+            group["lr_smoothing_rate"] = self._lr_smoothing_rate
             group["rms_max_decay_rate"] = self._rms_max_decay_rate
             group["param_rms_max"] = group.get("param_rms_max", 0.0)
             if self._lr is not None:
@@ -287,8 +294,9 @@ class Adafactor(torch.optim.Optimizer):
         # Larger |raw_lr - lr_previous| → more weight on lr_previous → smoother.
         min_lr = param_group["min_lr"]
         max_lr = param_group["max_lr"]
+        lr_smoothing_rate = param_group["lr_smoothing_rate"]
         lr_previous = param_state.get("lr_previous", raw_lr)
-        smoothing_scale = (max_lr - min_lr) / 100.0
+        smoothing_scale = (max_lr - min_lr) / lr_smoothing_rate
         lr_delta = raw_lr - lr_previous
         denominator = abs(lr_delta) + smoothing_scale + param_group["eps"][0]
         blend_weight = abs(lr_delta) / denominator
