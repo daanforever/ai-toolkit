@@ -2541,6 +2541,12 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 if isinstance(batch, DataLoaderBatchDTO):
                     with self.timer('batch_cleanup'):
                         batch.cleanup()
+                        # clear in-dataset embedding cache so embeddings are reloaded on next use
+                        for dl in [dataloader, dataloader_reg]:
+                            if dl is not None:
+                                for dataset in get_dataloader_datasets(dl):
+                                    if hasattr(dataset, 'clear_cached_embeddings_memory'):
+                                        dataset.clear_cached_embeddings_memory()
 
                 # don't do on first step
                 if self.step_num != self.start_step:

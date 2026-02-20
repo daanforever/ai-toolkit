@@ -1982,7 +1982,7 @@ class TextEmbeddingFileItemDTOMixin:
             return
         if self.prompt_embeds is None:
             K = getattr(self.dataset_config, '_effective_shuffle_cache_variants', 1)
-            variant_index = random.randint(0, K - 1) if K > 1 else 0
+            variant_index = getattr(self, '_current_epoch_num', 0) % K if K > 1 else 0
             self.prompt_embeds = PromptEmbeds.load(self.get_text_embedding_path(), variant_index=variant_index)
 
 class TextEmbeddingCachingMixin:

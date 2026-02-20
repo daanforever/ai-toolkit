@@ -451,6 +451,15 @@ class DataLoaderBatchDTO:
         del self.audio_pred
         del self.first_frame_latents
         del self.audio_latents
+        self.prompt_embeds = None
+        self.control_tensor_list = None
+        self.clip_image_tensor = None
+        self.clip_image_embeds = None
+        self.clip_image_embeds_unconditional = None
+        self.mask_tensor = None
+        self.unaugmented_tensor = None
+        self.unconditional_tensor = None
+        self.unconditional_latents = None
         for file_item in self.file_items:
             file_item.cleanup()
 
