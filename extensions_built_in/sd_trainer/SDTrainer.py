@@ -344,13 +344,13 @@ class SDTrainer(BaseSDTrainProcess):
 
                 # unload the text encoder
                 if self.is_caching_text_embeddings:
-                    with memory_debug(print_acc, "UNLOAD TEXT ENCODER"):
+                    with memory_debug(print_acc, "UNLOAD TEXT ENCODER", kind="all"):
                         unload_text_encoder(self.sd)
                         flush()
                 else:
                     # todo once every model is tested to work, unload properly. Though, this will all be merged into one thing.
                     # keep legacy usage for now. 
-                    with memory_debug(print_acc, "UNLOAD TEXT ENCODER"):
+                    with memory_debug(print_acc, "UNLOAD TEXT ENCODER", kind="all"):
                         self.sd.text_encoder_to("cpu")
                         flush()
         

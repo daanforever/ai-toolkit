@@ -1,11 +1,31 @@
 """
 Debug utilities. memory_debug context manager measures GPU/RAM around a block;
-enabled via set_debug_config(config) with config.debug. Extensible to RAM later.
+enabled via set_debug_config(config) with config.debug.
 """
 import contextlib
+import sys
 from typing import Callable
 
 import torch
+
+# --- RAM snapshot (Windows only; Unix/macOS not implemented yet) ---
+if sys.platform == "win32":
+    import ctypes
+    from ctypes import wintypes
+
+    class _ProcessMemoryCounters(ctypes.Structure):
+        _fields_ = [
+            ("cb", wintypes.DWORD),
+            ("PageFaultCount", wintypes.DWORD),
+            ("PeakWorkingSetSize", ctypes.c_size_t),
+            ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t),
+            ("PeakPagefileUsage", ctypes.c_size_t),
+        ]
 
 _debug_config = None
 
@@ -50,6 +70,42 @@ def _format_cuda_diff(label: str, before: tuple, after: tuple) -> list:
     ]
 
 
+def _ram_snapshot_mb() -> float | None:
+    """
+    Return current process RSS (Working Set) in MB, or None if unavailable.
+    Implemented only on Windows via GetProcessMemoryInfo (psapi).
+    Unix/macOS: not implemented yet, returns None.
+    """
+    if sys.platform != "win32":
+        # Unix/macOS support not implemented yet
+        return None
+    try:
+        GetCurrentProcess = ctypes.windll.kernel32.GetCurrentProcess
+        GetCurrentProcess.argtypes = []
+        GetCurrentProcess.restype = wintypes.HANDLE
+        GetProcessMemoryInfo = ctypes.windll.psapi.GetProcessMemoryInfo
+        GetProcessMemoryInfo.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(_ProcessMemoryCounters),
+            wintypes.DWORD,
+        ]
+        GetProcessMemoryInfo.restype = wintypes.BOOL
+        handle = GetCurrentProcess()
+        pmc = _ProcessMemoryCounters()
+        pmc.cb = ctypes.sizeof(_ProcessMemoryCounters)
+        if not GetProcessMemoryInfo(handle, ctypes.byref(pmc), pmc.cb):
+            return None
+        return pmc.WorkingSetSize / (2**20)
+    except (AttributeError, OSError):
+        return None
+
+
+def _format_ram_diff(label: str, before_mb: float, after_mb: float) -> str:
+    delta = before_mb - after_mb
+    delta_str = f"(freed {delta:.1f} MB)" if delta >= 0 else f"(+{-delta:.1f} MB)"
+    return f"[DEBUG {label}] RAM RSS: {before_mb:.1f} MB -> {after_mb:.1f} MB {delta_str}"
+
+
 @contextlib.contextmanager
 def memory_debug(
     print_fn: Callable[[str], None],
@@ -59,22 +115,46 @@ def memory_debug(
     """
     Context manager: measure memory around the block and log if debug is enabled.
     enabled is read from the config set via set_debug_config(); no need to pass it.
-    kind="cuda" measures CUDA allocated/max; other kinds (e.g. "ram") are stubs for now.
+    kind="cuda": CUDA allocated/max only.
+    kind="ram": process RSS (Windows only; on other platforms logs "not supported").
+    kind="all": both CUDA (if available) and RAM.
     """
-    if kind != "cuda":
+    if kind == "cuda":
+        if not _is_enabled_for_cuda():
+            yield
+            return
+        before_cuda = _cuda_snapshot_mb()
+        before_ram = None
+    elif kind == "ram":
+        if not is_debug_enabled():
+            yield
+            return
+        before_cuda = None
+        before_ram = _ram_snapshot_mb()
+    elif kind == "all":
+        if not is_debug_enabled():
+            yield
+            return
+        before_cuda = _cuda_snapshot_mb() if torch.cuda.is_available() else None
+        before_ram = _ram_snapshot_mb()
+    else:
         yield
         return
-    if not _is_enabled_for_cuda():
-        yield
-        return
-    before = _cuda_snapshot_mb()
+
     try:
         yield
     finally:
-        torch.cuda.synchronize()
-        after = _cuda_snapshot_mb()
-        for line in _format_cuda_diff(label, before, after):
-            print_fn(line)
+        if before_cuda is not None:
+            torch.cuda.synchronize()
+            after_cuda = _cuda_snapshot_mb()
+            for line in _format_cuda_diff(label, before_cuda, after_cuda):
+                print_fn(line)
+        if kind in ("ram", "all"):
+            after_ram = _ram_snapshot_mb()
+            if after_ram is not None and before_ram is not None:
+                print_fn(_format_ram_diff(label, before_ram, after_ram))
+            else:
+                print_fn(f"[DEBUG {label}] RAM: not supported on this platform yet")
 
 
 def cuda_memory_debug(print_fn: Callable[[str], None], label: str):
