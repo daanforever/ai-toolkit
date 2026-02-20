@@ -385,8 +385,10 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
             dataset_config: 'DatasetConfig',
             batch_size=1,
             sd: 'StableDiffusion' = None,
+            train_config=None,
     ):
         self.dataset_config = dataset_config
+        self.train_config = train_config
         # update bucket divisibility
         self.dataset_config.bucket_tolerance = sd.get_bucket_divisibility()
         self.is_video = dataset_config.num_frames > 1
@@ -624,6 +626,7 @@ def get_dataloader_from_datasets(
         dataset_options,
         batch_size=1,
         sd: 'StableDiffusion' = None,
+        train_config=None,
 ) -> DataLoader:
     if dataset_options is None or len(dataset_options) == 0:
         return None
@@ -646,7 +649,7 @@ def get_dataloader_from_datasets(
     for config in dataset_config_list:
 
         if config.type == 'image':
-            dataset = AiToolkitDataset(config, batch_size=batch_size, sd=sd)
+            dataset = AiToolkitDataset(config, batch_size=batch_size, sd=sd, train_config=train_config)
             datasets.append(dataset)
             if config.buckets:
                 has_buckets = True

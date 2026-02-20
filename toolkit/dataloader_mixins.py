@@ -42,6 +42,19 @@ if TYPE_CHECKING:
 
 accelerator = get_accelerator()
 
+
+def _shuffle_caption_by_commas(caption: str) -> str:
+    """Shuffle caption segments by commas: first segment fixed, rest randomly reordered. Used for K>1 cache variants."""
+    token_list = caption.split(',')
+    token_list = [x.strip() for x in token_list]
+    token_list = [x for x in token_list if x]
+    if len(token_list) > 1:
+        rest = token_list[1:]
+        random.shuffle(rest)
+        token_list = [token_list[0]] + rest
+    return ', '.join(token_list)
+
+
 # def get_associated_caption_from_img_path(img_path):
 # https://demo.albumentations.ai/
 class Augments:
@@ -1935,6 +1948,7 @@ class TextEmbeddingFileItemDTOMixin:
             ("caption", self.caption),
             ("text_embedding_space_version", self.text_embedding_space_version),
             ("text_embedding_version", self.text_embedding_version),
+            ("shuffle_cache_variants", getattr(self.dataset_config, '_effective_shuffle_cache_variants', 1)),
         ])
         # if we have a control image, cache the path
         if self.encode_control_in_text_embeddings and self.control_path is not None:
@@ -1967,8 +1981,9 @@ class TextEmbeddingFileItemDTOMixin:
         if not self.is_text_embedding_cached:
             return
         if self.prompt_embeds is None:
-            # load it from disk
-            self.prompt_embeds = PromptEmbeds.load(self.get_text_embedding_path())
+            K = getattr(self.dataset_config, '_effective_shuffle_cache_variants', 1)
+            variant_index = random.randint(0, K - 1) if K > 1 else 0
+            self.prompt_embeds = PromptEmbeds.load(self.get_text_embedding_path(), variant_index=variant_index)
 
 class TextEmbeddingCachingMixin:
     def __init__(self: 'AiToolkitDataset', **kwargs):
@@ -1980,11 +1995,9 @@ class TextEmbeddingCachingMixin:
 
     def set_epoch_num(self: 'AiToolkitDataset', epoch_num: int) -> None:
         self._epoch_num = epoch_num
-        if epoch_num > 0 and self.is_caching_text_embeddings and self.dataset_config.shuffle_tokens:
+        if epoch_num > 0 and self.is_caching_text_embeddings and getattr(self.dataset_config, '_effective_shuffle_cache_variants', 1) > 1:
             for file_item in self.file_list:
-                if getattr(file_item, 'prompt_embeds', None) is not None:
-                    file_item.prompt_embeds.shuffle_sequence()
-            print_acc(f"\nCached text embedding tokens shuffled (epoch {epoch_num})\n")
+                file_item.cleanup_text_embedding()
 
     def clear_cached_embeddings_memory(self: 'AiToolkitDataset') -> None:
         for file_item in self.file_list:
@@ -1994,7 +2007,18 @@ class TextEmbeddingCachingMixin:
         with accelerator.main_process_first():
             print_acc(f"Caching text_embeddings for {self.dataset_path}")
             print_acc(" - Saving text embeddings to disk")
-            
+            train_config = getattr(self, 'train_config', None)
+            if train_config is not None:
+                steps = train_config.steps
+                dataset_items = len(self)
+                K = max(1, int(steps / dataset_items))
+            else:
+                K = 1
+
+            if K > 1 and not self.dataset_config.shuffle_tokens:
+                K = 1
+            self.dataset_config._effective_shuffle_cache_variants = K
+
             did_move = False
 
             # use tqdm to show progress
@@ -2017,9 +2041,9 @@ class TextEmbeddingCachingMixin:
                         control_path_list = file_item.control_path
                         if not isinstance(file_item.control_path, list):
                             control_path_list = [control_path_list]
-                        for i in range(len(control_path_list)):
+                        for ii in range(len(control_path_list)):
                             try:
-                                img = Image.open(control_path_list[i]).convert("RGB")
+                                img = Image.open(control_path_list[ii]).convert("RGB")
                                 img = exif_transpose(img)
                                 # convert to 0 to 1 tensor
                                 img = (
@@ -2030,7 +2054,7 @@ class TextEmbeddingCachingMixin:
                                 ctrl_img_list.append(img)
                             except Exception as e:
                                 print_acc(f"Error: {e}")
-                                print_acc(f"Error loading control image: {control_path_list[i]}")
+                                print_acc(f"Error loading control image: {control_path_list[ii]}")
                         
                         if len(ctrl_img_list) == 0:
                             ctrl_img = None
@@ -2038,12 +2062,35 @@ class TextEmbeddingCachingMixin:
                             ctrl_img = ctrl_img_list[0]
                         else:
                             ctrl_img = ctrl_img_list
-                        prompt_embeds: PromptEmbeds = self.sd.encode_prompt(file_item.caption, control_images=ctrl_img)
+                        if K == 1:
+                            prompt_embeds: PromptEmbeds = self.sd.encode_prompt(file_item.caption, control_images=ctrl_img)
+                            prompt_embeds.save(text_embedding_path)
+                            del prompt_embeds
+                        else:
+                            embeds_list = []
+                            embeds_list.append(self.sd.encode_prompt(file_item.caption, control_images=ctrl_img))
+                            for _ in range(K - 1):
+                                caption_shuffled = _shuffle_caption_by_commas(file_item.caption)
+                                embeds_list.append(self.sd.encode_prompt(caption_shuffled, control_images=ctrl_img))
+                            PromptEmbeds.save_multi(text_embedding_path, embeds_list)
+                            for pe in embeds_list:
+                                del pe
+                            embeds_list.clear()
                     else:
-                        prompt_embeds: PromptEmbeds = self.sd.encode_prompt(file_item.caption)
-                    # save it
-                    prompt_embeds.save(text_embedding_path)
-                    del prompt_embeds
+                        if K == 1:
+                            prompt_embeds: PromptEmbeds = self.sd.encode_prompt(file_item.caption)
+                            prompt_embeds.save(text_embedding_path)
+                            del prompt_embeds
+                        else:
+                            embeds_list = []
+                            embeds_list.append(self.sd.encode_prompt(file_item.caption))
+                            for _ in range(K - 1):
+                                caption_shuffled = _shuffle_caption_by_commas(file_item.caption)
+                                embeds_list.append(self.sd.encode_prompt(caption_shuffled))
+                            PromptEmbeds.save_multi(text_embedding_path, embeds_list)
+                            for pe in embeds_list:
+                                del pe
+                            embeds_list.clear()
                 file_item.is_text_embedding_cached = True
                 i += 1
             # restore device state

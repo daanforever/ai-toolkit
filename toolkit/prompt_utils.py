@@ -156,58 +156,6 @@ class PromptEmbeds:
                 pe.attention_mask = pe.attention_mask.expand(batch_size, -1)
         return pe
 
-    def shuffle_sequence(self) -> None:
-        """Shuffle by whole segments (phrase boundaries). First segment fixed, rest randomly reordered. In-place. No-op if no segment boundaries."""
-        boundaries = getattr(self, "segment_boundaries", None)
-        if boundaries is None or len(boundaries) < 2:
-            print_acc("\nCannot shuffle cached text embeddings: no segment boundaries (old cache or unsupported model).")
-            return
-        if len(boundaries) == 2:
-            print_acc("\nCached text embeddings: 1 segment, no shuffle.")
-            return
-
-        n_segments = len(boundaries) - 1
-        segment_order = [0] + list(range(1, n_segments))
-        random.shuffle(segment_order[1:])
-
-        def apply_segment_perm(t: torch.Tensor) -> torch.Tensor:
-            if t.dim() < 2 or t.shape[1] <= 1:
-                return t
-            seq_len = t.shape[1]
-            device = t.device
-            perm = torch.zeros(seq_len, dtype=torch.long, device=device)
-            for new_seg_idx in range(n_segments):
-                old_seg_idx = segment_order[new_seg_idx]
-                start_new = boundaries[new_seg_idx]
-                end_new = min(boundaries[new_seg_idx + 1], seq_len)
-                start_old = boundaries[old_seg_idx]
-                for i in range(start_new, end_new):
-                    offset = i - start_new
-                    perm[i] = start_old + offset
-            return t[:, perm, ...].contiguous()
-
-        if isinstance(self.text_embeds, list) or isinstance(self.text_embeds, tuple):
-            te_list = list(self.text_embeds)
-            attn_list = list(self.attention_mask) if self.attention_mask is not None and isinstance(self.attention_mask, (list, tuple)) else None
-            attn_is_tuple = isinstance(self.attention_mask, tuple) if self.attention_mask is not None else False
-            for i, t in enumerate(te_list):
-                if t.dim() >= 2:
-                    te_list[i] = apply_segment_perm(t)
-                    if attn_list is not None and i < len(attn_list) and attn_list[i] is not None and attn_list[i].dim() >= 2:
-                        attn_list[i] = apply_segment_perm(attn_list[i])
-            self.text_embeds = tuple(te_list) if isinstance(self.text_embeds, tuple) else te_list
-            if attn_list is not None:
-                self.attention_mask = tuple(attn_list) if attn_is_tuple else attn_list
-        else:
-            self.text_embeds = apply_segment_perm(self.text_embeds)
-            if self.attention_mask is not None and self.attention_mask.dim() >= 2:
-                self.attention_mask = apply_segment_perm(self.attention_mask)
-
-        print_acc(f"\nShuffled {n_segments} segments in cached text embeddings.")
-        if is_debug_enabled():
-            segment_lengths = [boundaries[i + 1] - boundaries[i] for i in range(n_segments)]
-            print_acc(f"\n[Segment shuffle] segment_boundaries={boundaries}, segment_lengths={segment_lengths}")
-
     def save(self, path: str):
         """
         Save the prompt embeds to a file.
@@ -233,15 +181,47 @@ class PromptEmbeds:
             state_dict["segment_boundaries"] = torch.tensor(pe.segment_boundaries, dtype=torch.long)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         save_file(state_dict, path)
-    
+
     @classmethod
-    def load(cls, path: str) -> 'PromptEmbeds':
+    def save_multi(cls, path: str, embeds_list: List['PromptEmbeds']) -> None:
+        """Save multiple PromptEmbeds variants to one file (keys v0_*, v1_*, ..., num_variants)."""
+        state_dict = {}
+        for vi, pe in enumerate(embeds_list):
+            pe = pe.clone()
+            prefix = f"v{vi}_"
+            if isinstance(pe.text_embeds, list) or isinstance(pe.text_embeds, tuple):
+                for i, text_embed in enumerate(pe.text_embeds):
+                    state_dict[f"{prefix}text_embed_{i}"] = text_embed.cpu()
+            else:
+                state_dict[f"{prefix}text_embed"] = pe.text_embeds.cpu()
+            if pe.pooled_embeds is not None:
+                state_dict[f"{prefix}pooled_embed"] = pe.pooled_embeds.cpu()
+            if pe.attention_mask is not None:
+                if isinstance(pe.attention_mask, list) or isinstance(pe.attention_mask, tuple):
+                    for i, attn in enumerate(pe.attention_mask):
+                        state_dict[f"{prefix}attention_mask_{i}"] = attn.cpu()
+                else:
+                    state_dict[f"{prefix}attention_mask"] = pe.attention_mask.cpu()
+            if getattr(pe, "segment_boundaries", None) is not None and len(pe.segment_boundaries) > 0:
+                state_dict[f"{prefix}segment_boundaries"] = torch.tensor(pe.segment_boundaries, dtype=torch.long)
+        state_dict["num_variants"] = torch.tensor([len(embeds_list)], dtype=torch.long)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        save_file(state_dict, path)
+
+    @classmethod
+    def load(cls, path: str, variant_index: int = 0) -> 'PromptEmbeds':
         """
         Load the prompt embeds from a file.
         :param path: The path to load the prompt embeds from.
+        :param variant_index: For multi-variant files (v0_*, v1_*, ...), load this variant. Ignored for single-variant format.
         :return: An instance of PromptEmbeds.
         """
         state_dict = load_file(path, device='cpu')
+        if "num_variants" in state_dict or any(k.startswith("v0_") for k in state_dict.keys()):
+            num_variants = state_dict["num_variants"].item() if "num_variants" in state_dict else 1
+            variant_index = min(variant_index, max(0, num_variants - 1))
+            prefix = f"v{variant_index}_"
+            state_dict = {k[len(prefix):]: v for k, v in state_dict.items() if k.startswith(prefix)}
         text_embeds = []
         pooled_embeds = None
         attention_mask = []
