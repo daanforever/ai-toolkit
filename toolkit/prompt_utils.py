@@ -7,50 +7,10 @@ from tqdm import tqdm
 import random
 
 from toolkit.train_tools import get_torch_dtype
-from toolkit.print import print_acc
-from toolkit.util.debug import is_debug_enabled
 import itertools
 
 if TYPE_CHECKING:
     from toolkit.config_modules import SliderTargetConfig
-
-
-def get_segment_boundaries_from_prompt(tokenizer, prompt: Union[str, List[str]], seq_len: int) -> List[int]:
-    """
-    Compute segment boundaries (phrase boundaries at commas) in token space.
-    Returns list of segment end indices: segment i = [boundaries[i] : boundaries[i+1]].
-    Uses the same tokenizer as the pipeline; boundaries are valid only if pipeline uses no extra preprocessing.
-    """
-    caption = prompt[0] if isinstance(prompt, list) else prompt
-    caption = str(caption)
-    enc = tokenizer(caption, return_tensors="pt", add_special_tokens=True)
-    input_ids = enc["input_ids"][0]
-    if hasattr(input_ids, "tolist"):
-        input_ids = input_ids.tolist()
-    else:
-        input_ids = list(input_ids)
-    n_tokens = len(input_ids)
-
-    comma_ids = set()
-    for s in [",", ", ", " ,"]:
-        ids = tokenizer.encode(s, add_special_tokens=False)
-        comma_ids.update(ids if isinstance(ids, list) else ids.tolist())
-
-    positions = [i for i, tid in enumerate(input_ids) if tid in comma_ids]
-    end = min(seq_len, n_tokens)
-    after_comma = sorted(set(p + 1 for p in positions))
-    boundaries = [0] + [b for b in after_comma if 0 < b < end] + [end]
-    if boundaries[-1] != end:
-        boundaries.append(end)
-
-    if is_debug_enabled():
-        print_acc(f"\n[Segment boundaries] comma_ids={sorted(comma_ids)}")
-        print_acc(f"\n[Segment boundaries] comma_positions_count={len(positions)}")
-        print_acc(f"\n[Segment boundaries] segment_boundaries={boundaries}")
-        if len(positions) == 0:
-            print_acc("\nSegment boundaries: no comma tokens found in caption (tokenizer may merge commas); using single segment.")
-
-    return boundaries
 
 
 class ACTION_TYPES_SLIDER:
@@ -63,7 +23,7 @@ class PromptEmbeds:
     # pooled_embeds: Union[torch.Tensor, None]
     # attention_mask: Union[torch.Tensor, List[torch.Tensor], None]
 
-    def __init__(self, args: Union[Tuple[torch.Tensor], List[torch.Tensor], torch.Tensor], attention_mask=None, segment_boundaries=None) -> None:
+    def __init__(self, args: Union[Tuple[torch.Tensor], List[torch.Tensor], torch.Tensor], attention_mask=None) -> None:
         if isinstance(args, list) or isinstance(args, tuple):
             # xl
             self.text_embeds = args[0]
@@ -74,7 +34,6 @@ class PromptEmbeds:
             self.pooled_embeds = None
 
         self.attention_mask = attention_mask
-        self.segment_boundaries = segment_boundaries
 
     def to(self, *args, **kwargs):
         if isinstance(self.text_embeds, list) or isinstance(self.text_embeds, tuple):
@@ -123,7 +82,6 @@ class PromptEmbeds:
                 prompt_embeds.attention_mask = [t.clone() for t in self.attention_mask]
             else:
                 prompt_embeds.attention_mask = self.attention_mask.clone()
-        prompt_embeds.segment_boundaries = list(self.segment_boundaries) if self.segment_boundaries else None
         return prompt_embeds
 
     def expand_to_batch(self, batch_size):
@@ -177,8 +135,6 @@ class PromptEmbeds:
                     state_dict[f"attention_mask_{i}"] = attn.cpu()
             else:
                 state_dict["attention_mask"] = pe.attention_mask.cpu()
-        if getattr(pe, "segment_boundaries", None) is not None and len(pe.segment_boundaries) > 0:
-            state_dict["segment_boundaries"] = torch.tensor(pe.segment_boundaries, dtype=torch.long)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         save_file(state_dict, path)
 
@@ -202,8 +158,6 @@ class PromptEmbeds:
                         state_dict[f"{prefix}attention_mask_{i}"] = attn.cpu()
                 else:
                     state_dict[f"{prefix}attention_mask"] = pe.attention_mask.cpu()
-            if getattr(pe, "segment_boundaries", None) is not None and len(pe.segment_boundaries) > 0:
-                state_dict[f"{prefix}segment_boundaries"] = torch.tensor(pe.segment_boundaries, dtype=torch.long)
         state_dict["num_variants"] = torch.tensor([len(embeds_list)], dtype=torch.long)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         save_file(state_dict, path)
@@ -249,7 +203,6 @@ class PromptEmbeds:
                 pe.attention_mask = attention_mask[0]
             else:
                 pe.attention_mask = attention_mask
-        pe.segment_boundaries = state_dict["segment_boundaries"].tolist() if "segment_boundaries" in state_dict else None
         return pe
 
 
