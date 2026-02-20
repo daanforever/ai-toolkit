@@ -2505,6 +2505,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 learning_rate = 0.0
                 update_rms = 0.0  # Average weight update RMS (for monitoring optimizer step magnitude)
                 update_rms_max = 0.0  # Max RMS across param groups (for graphs)
+                param_rms = 0.0  # Average parameter RMS across groups (Adafactor)
                 if not did_oom and loss_dict is not None:
                     if hasattr(optimizer, 'get_avg_learning_rate'):
                         learning_rate = optimizer.get_avg_learning_rate()
@@ -2524,6 +2525,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         update_rms = optimizer.get_avg_update_rms()
                     if hasattr(optimizer, 'get_avg_update_rms_max'):
                         update_rms_max = optimizer.get_avg_update_rms_max()
+                    if hasattr(optimizer, 'get_avg_rms'):
+                        param_rms = optimizer.get_avg_rms()
 
                     prog_bar_string = f"lr: {learning_rate:.1e}"
                     if update_rms > 0:
@@ -2607,6 +2610,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                             self.writer.add_scalar("train/update_rms", update_rms, self.step_num)
                                         if update_rms_max > 0:
                                             self.writer.add_scalar("train/update_rms_max", update_rms_max, self.step_num)
+                                        if param_rms > 0:
+                                            self.writer.add_scalar("train/param_rms", param_rms, self.step_num)
                                 if self.progress_bar is not None:
                                     self.progress_bar.unpause()
                         
@@ -2629,6 +2634,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
                             if update_rms_max > 0:
                                 self.logger.log({
                                     'train/update_rms_max': update_rms_max,
+                                })
+                            if param_rms > 0:
+                                self.logger.log({
+                                    'train/param_rms': param_rms,
                                 })
                             if loss_dict is not None:
                                 for key, value in loss_dict.items():
@@ -2655,6 +2664,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
                             if update_rms_max > 0:
                                 self.logger.log({
                                     'train/update_rms_max': update_rms_max,
+                                })
+                            if param_rms > 0:
+                                self.logger.log({
+                                    'train/param_rms': param_rms,
                                 })
                             for key, value in loss_dict.items():
                                 self.logger.log({

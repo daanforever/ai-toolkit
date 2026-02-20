@@ -574,6 +574,26 @@ class Adafactor(torch.optim.Optimizer):
             out.append(v if v is not None else 0.0)
         return out
 
+    def get_rms(self):
+        """
+        Get RMS (root mean square) of parameters for each parameter group.
+        Per-group value is mean over params in group via tensor reduction (_get_group_scalars).
+
+        Returns:
+            List[float]: One value per group; 0.0 for groups that haven't been updated yet.
+        """
+        out = []
+        for group in self.param_groups:
+            v = self._get_group_scalars(group, "RMS", default=0.0, reduction='mean')
+            out.append(v if v is not None else 0.0)
+        return out
+
+    def get_avg_rms(self):
+        """
+        Average RMS of parameters across all parameter groups (unified tensor reduction).
+        """
+        return self._scalars_per_group_to_avg(self.get_rms())
+
     def get_avg_update_rms(self):
         """
         Average RMS of weight updates across all parameter groups (unified tensor reduction).
