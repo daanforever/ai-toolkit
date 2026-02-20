@@ -2418,6 +2418,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                 dataloader_iterator = iter(dataloader)
                                 trigger_dataloader_setup_epoch(dataloader)
                                 self.epoch_num += 1
+                                print_acc(f"New epoch {self.epoch_num}")
                                 for dataset in get_dataloader_datasets(dataloader):
                                     dataset.set_epoch_num(self.epoch_num)
                                     clear_embeddings_cache = not getattr(dataset.dataset_config, 'cache_text_embeddings', False)
