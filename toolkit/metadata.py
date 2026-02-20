@@ -1,9 +1,11 @@
 import json
+import os
+import tempfile
 from collections import OrderedDict
-from io import BytesIO
 
 import safetensors
 from safetensors import safe_open
+from safetensors.torch import save_file
 
 from info import software_meta
 from toolkit.train_tools import addnet_hash_legacy
@@ -36,15 +38,30 @@ def add_model_hash_to_meta(state_dict, meta: OrderedDict) -> OrderedDict:
     # sd_models.model_hash(), only retain the training metadata for purposes of
     # calculating the hash, as they are meant to be immutable
     metadata = {k: v for k, v in meta.items() if k.startswith("ss_")}
+    # safetensors accepts only Dict[str, str]
+    metadata_for_file = {
+        k: v if isinstance(v, str) else json.dumps(v)
+        for k, v in metadata.items()
+    }
 
-    bytes = safetensors.torch.save(state_dict, metadata)
-    b = BytesIO(bytes)
-
-    model_hash = addnet_hash_safetensors(b)
-    legacy_hash = addnet_hash_legacy(b)
-    meta["sshs_model_hash"] = model_hash
-    meta["sshs_legacy_hash"] = legacy_hash
-    return meta
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".safetensors", delete=False) as f:
+            temp_path = f.name
+        save_file(state_dict, temp_path, metadata=metadata_for_file)
+        with open(temp_path, "rb") as f:
+            model_hash = addnet_hash_safetensors(f)
+            f.seek(0)
+            legacy_hash = addnet_hash_legacy(f)
+        meta["sshs_model_hash"] = model_hash
+        meta["sshs_legacy_hash"] = legacy_hash
+        return meta
+    finally:
+        if temp_path is not None:
+            try:
+                os.unlink(temp_path)
+            except OSError as e:
+                print(f"Warning: could not remove temporary file {temp_path}: {e}")
 
 
 def add_base_model_info_to_meta(
