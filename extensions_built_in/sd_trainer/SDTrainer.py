@@ -382,6 +382,12 @@ class SDTrainer(BaseSDTrainProcess):
                 except:
                     pass
 
+        # caption_dropout with cached text embeddings: pass empty prompt embeds to datasets
+        if self.cached_blank_embeds is not None and self.is_caching_text_embeddings and self.data_loader is not None:
+            empty_cpu = self.cached_blank_embeds.clone().detach().to('cpu')
+            for dataset in get_dataloader_datasets(self.data_loader):
+                if getattr(dataset.dataset_config, 'caption_dropout_rate', 0) > 0:
+                    dataset.empty_prompt_embeds = empty_cpu
 
     def process_output_for_turbo(self, pred, noisy_latents, timesteps, noise, batch):
         # to process turbo learning, we make one big step from our current timestep to the end

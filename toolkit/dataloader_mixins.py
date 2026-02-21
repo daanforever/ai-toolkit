@@ -34,6 +34,7 @@ from toolkit.prompt_utils import PromptEmbeds
 from torchvision.transforms import functional as TF
 
 from toolkit.train_tools import get_torch_dtype
+from toolkit.util.debug import is_debug_enabled
 
 if TYPE_CHECKING:
     from toolkit.data_loader import AiToolkitDataset
@@ -1980,10 +1981,20 @@ class TextEmbeddingFileItemDTOMixin:
     def load_prompt_embedding(self, device=None):
         if not self.is_text_embedding_cached:
             return
-        if self.prompt_embeds is None:
-            K = getattr(self.dataset_config, '_effective_shuffle_cache_variants', 1)
-            variant_index = getattr(self, '_current_epoch_num', 0) % K if K > 1 else 0
-            self.prompt_embeds = PromptEmbeds.load(self.get_text_embedding_path(), variant_index=variant_index)
+        if self.prompt_embeds is not None:
+            return
+        rate = getattr(self.dataset_config, 'caption_dropout_rate', 0)
+        if rate > 0:
+            ref = getattr(self, '_dataset_ref', None)
+            empty = getattr(ref, 'empty_prompt_embeds', None) if ref is not None else None
+            if empty is not None and random.random() < rate:
+                self.prompt_embeds = empty
+                if is_debug_enabled():
+                    print_acc(f"\ncaption_dropout: using empty prompt embeds for {self.path}")
+                return
+        K = getattr(self.dataset_config, '_effective_shuffle_cache_variants', 1)
+        variant_index = getattr(self, '_current_epoch_num', 0) % K if K > 1 else 0
+        self.prompt_embeds = PromptEmbeds.load(self.get_text_embedding_path(), variant_index=variant_index)
 
 class TextEmbeddingCachingMixin:
     def __init__(self: 'AiToolkitDataset', **kwargs):
@@ -1992,6 +2003,7 @@ class TextEmbeddingCachingMixin:
             super().__init__(**kwargs)
         self.is_caching_text_embeddings = self.dataset_config.cache_text_embeddings
         self._epoch_num: int = 0
+        self.empty_prompt_embeds = None
 
     def set_epoch_num(self: 'AiToolkitDataset', epoch_num: int) -> None:
         self._epoch_num = epoch_num
