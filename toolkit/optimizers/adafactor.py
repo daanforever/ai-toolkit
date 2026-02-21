@@ -41,7 +41,8 @@ class Adafactor(torch.optim.Optimizer):
             (first moment, like in Adam). If not None, enables momentum.
             Suggested values: 0.9 (default), 0.95 or 0.99 for smoother updates.
         weight_decay (`float`, *optional*, defaults to 0.0):
-            Weight decay (L2 penalty)
+            Weight decay. If `scale_parameter=True`: applied as fraction per step, ``p *= (1 - weight_decay)``.
+            If `scale_parameter=False`: L2-style, coefficient ``weight_decay * lr``.
         scale_parameter (`bool`, *optional*, defaults to `True`):
             If True, learning rate is scaled by root mean square
         relative_step (`bool`, *optional*, defaults to `True`):
@@ -512,8 +513,8 @@ class Adafactor(torch.optim.Optimizer):
                     update = exp_avg
 
                 if group["weight_decay"] != 0:
-                    p_data_fp32.add_(
-                        p_data_fp32, alpha=(-group["weight_decay"] * lr))
+                    wd_alpha = (-group["weight_decay"]) if group["scale_parameter"] else (-group["weight_decay"] * lr)
+                    p_data_fp32.add_(p_data_fp32, alpha=wd_alpha)
 
                 p_data_fp32.add_(-update)
 
