@@ -110,7 +110,7 @@ def _format_ram_diff(label: str, before_mb: float, after_mb: float) -> str:
 def memory_debug(
     print_fn: Callable[[str], None],
     label: str,
-    kind: str = "cuda",
+    kind: str = "all",
 ):
     """
     Context manager: measure memory around the block and log if debug is enabled.
