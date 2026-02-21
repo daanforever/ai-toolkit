@@ -57,8 +57,8 @@ def _shuffle_caption_by_commas(caption: str) -> str:
     return ', '.join(token_list)
 
 
-def _get_unique_caption_permutations(caption: str) -> List[str]:
-    """All unique permutations of caption by comma segments: first segment fixed, rest reordered. Original first. Deduped."""
+def _get_unique_caption_permutations(caption: str, max_permutations: int = 256) -> List[str]:
+    """Up to max_permutations unique permutations of caption by comma segments: first segment fixed, rest reordered. Original first. Memory-safe."""
     token_list = caption.split(',')
     token_list = [x.strip() for x in token_list]
     token_list = [x for x in token_list if x]
@@ -67,11 +67,16 @@ def _get_unique_caption_permutations(caption: str) -> List[str]:
     first = token_list[0]
     rest = token_list[1:]
     original = ', '.join(token_list)
-    strings = list(dict.fromkeys(', '.join([first] + list(perm)) for perm in itertools.permutations(rest)))
-    if strings[0] != original:
-        strings.remove(original)
-        strings.insert(0, original)
-    return strings
+    result = [original]
+    seen = {original}
+    for perm in itertools.islice(itertools.permutations(rest), max_permutations * 2):
+        s = ', '.join([first] + list(perm))
+        if s not in seen:
+            seen.add(s)
+            result.append(s)
+            if len(result) >= max_permutations:
+                break
+    return result
 
 
 # def get_associated_caption_from_img_path(img_path):
@@ -2112,7 +2117,7 @@ class TextEmbeddingCachingMixin:
                             prompt_embeds.save(text_embedding_path)
                             del prompt_embeds
                         else:
-                            unique_captions = _get_unique_caption_permutations(file_item.caption)
+                            unique_captions = _get_unique_caption_permutations(file_item.caption, max_permutations=K)
                             captions_to_encode = unique_captions[:K]
                             embeds_list = []
                             for caption_text in captions_to_encode:
