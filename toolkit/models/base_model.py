@@ -685,7 +685,7 @@ class BaseModel:
                 self._sampling_transformer.to("cpu")
                 self.model.to(self.device_torch, dtype=self.torch_dtype)
                 if is_debug_enabled():
-                    print_acc("Unloaded sampling transformer to CPU")
+                    print_acc("\nUnloaded sampling transformer to CPU")
             # Ensure CUDA work is finished so VRAM is actually released before next use
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
