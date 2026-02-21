@@ -1987,7 +1987,7 @@ class TextEmbeddingFileItemDTOMixin:
         if rate > 0:
             ref = getattr(self, '_dataset_ref', None)
             empty = getattr(ref, 'empty_prompt_embeds', None) if ref is not None else None
-            if empty is not None and random.random() < rate:
+            if empty is not None and torch.rand(1).item() < rate:
                 self.prompt_embeds = empty
                 if is_debug_enabled():
                     print_acc(f"\ncaption_dropout: using empty prompt embeds for {self.path}")
