@@ -1,6 +1,7 @@
 import base64
 import glob
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -54,6 +55,23 @@ def _shuffle_caption_by_commas(caption: str) -> str:
         random.shuffle(rest)
         token_list = [token_list[0]] + rest
     return ', '.join(token_list)
+
+
+def _get_unique_caption_permutations(caption: str) -> List[str]:
+    """All unique permutations of caption by comma segments: first segment fixed, rest reordered. Original first. Deduped."""
+    token_list = caption.split(',')
+    token_list = [x.strip() for x in token_list]
+    token_list = [x for x in token_list if x]
+    if len(token_list) <= 1:
+        return [caption]
+    first = token_list[0]
+    rest = token_list[1:]
+    original = ', '.join(token_list)
+    strings = list(dict.fromkeys(', '.join([first] + list(perm)) for perm in itertools.permutations(rest)))
+    if strings[0] != original:
+        strings.remove(original)
+        strings.insert(0, original)
+    return strings
 
 
 # def get_associated_caption_from_img_path(img_path):
@@ -2094,11 +2112,11 @@ class TextEmbeddingCachingMixin:
                             prompt_embeds.save(text_embedding_path)
                             del prompt_embeds
                         else:
+                            unique_captions = _get_unique_caption_permutations(file_item.caption)
+                            captions_to_encode = unique_captions[:K]
                             embeds_list = []
-                            embeds_list.append(self.sd.encode_prompt(file_item.caption))
-                            for _ in range(K - 1):
-                                caption_shuffled = _shuffle_caption_by_commas(file_item.caption)
-                                embeds_list.append(self.sd.encode_prompt(caption_shuffled))
+                            for caption_text in captions_to_encode:
+                                embeds_list.append(self.sd.encode_prompt(caption_text))
                             PromptEmbeds.save_multi(text_embedding_path, embeds_list)
                             for pe in embeds_list:
                                 del pe
