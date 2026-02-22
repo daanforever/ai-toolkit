@@ -1397,7 +1397,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 if content_or_style != 'fixed_cycle':
                     timesteps = self.sd.noise_scheduler.timesteps[timestep_indices.long()]
                 
-                # Debug logging for timestep distribution
+                # When debug enabled: collect data every step for timestep distribution
                 if is_debug_enabled() and (self.logging_config.log_every or 0) > 0:
                     # Always collect data (fixed_cycle has no timestep_indices, use cycle index)
                     if content_or_style == 'fixed_cycle':
@@ -1407,7 +1407,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         self._collected_indices.extend(timestep_indices.cpu().tolist())
                         self._collected_timesteps.extend(timesteps.cpu().tolist())
                     
-                    threshold = self.logging_config.log_every
+                    threshold = self.logging_config.log_every * 100
                     # Log when we have enough samples
                     if len(self._collected_indices) >= threshold:
                         scheduler_timesteps = self.sd.noise_scheduler.timesteps.cpu().tolist()
