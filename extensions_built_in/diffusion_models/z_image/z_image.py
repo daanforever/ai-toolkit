@@ -178,13 +178,11 @@ class ZImageModel(BaseModel):
             sampling_transformer_path,
             subfolder=sampling_transformer_subfolder,
             torch_dtype=dtype,
-            device_map="cpu",
         )
         if self.model_config.quantize:
             self.print_and_status_update("Quantizing sampling transformer")
             quantize_model(self, sampling_transformer)
             flush()
-        # Already on CPU via device_map="cpu"; ensure it stays there
         sampling_transformer.to("cpu")
         flush()
         return sampling_transformer
