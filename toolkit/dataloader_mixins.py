@@ -45,32 +45,37 @@ if TYPE_CHECKING:
 accelerator = get_accelerator()
 
 
-def _shuffle_caption_by_commas(caption: str) -> str:
-    """Shuffle caption segments by commas: first segment fixed, rest randomly reordered. Used for K>1 cache variants."""
+def _shuffle_caption_by_commas(caption: str, keep_n: int = 1) -> str:
+    """Shuffle caption segments by commas: first keep_n segments fixed, rest randomly reordered. Used for K>1 cache variants."""
     token_list = caption.split(',')
     token_list = [x.strip() for x in token_list]
     token_list = [x for x in token_list if x]
-    if len(token_list) > 1:
-        rest = token_list[1:]
+    keep_n = max(0, keep_n)
+    if len(token_list) > keep_n + 1:
+        fixed = token_list[:keep_n]
+        rest = token_list[keep_n:]
         random.shuffle(rest)
-        token_list = [token_list[0]] + rest
+        token_list = fixed + rest
     return ', '.join(token_list)
 
 
-def _get_unique_caption_permutations(caption: str, max_permutations: int = 256) -> List[str]:
-    """Up to max_permutations unique permutations of caption by comma segments: first segment fixed, rest reordered. Original first. Memory-safe."""
+def _get_unique_caption_permutations(caption: str, max_permutations: int = 1, keep_n: int = 1) -> List[str]:
+    """Up to max_permutations unique permutations of caption by comma segments: first keep_n segments fixed, rest reordered. Original first. Memory-safe."""
     token_list = caption.split(',')
     token_list = [x.strip() for x in token_list]
     token_list = [x for x in token_list if x]
     if len(token_list) <= 1:
         return [caption]
-    first = token_list[0]
-    rest = token_list[1:]
+    keep_n = max(0, keep_n)
+    fixed = token_list[:keep_n]
+    rest = token_list[keep_n:]
+    if len(rest) <= 1:
+        return [caption]
     original = ', '.join(token_list)
     result = [original]
     seen = {original}
     for perm in itertools.islice(itertools.permutations(rest), max_permutations * 2):
-        s = ', '.join([first] + list(perm))
+        s = ', '.join(fixed + list(perm))
         if s not in seen:
             seen.add(s)
             result.append(s)
@@ -475,16 +480,18 @@ class CaptionProcessingDTOMixin:
                 #     caption = caption + ', ' + trigger
 
         if self.dataset_config.shuffle_tokens and not self.dataset_config.cache_text_embeddings:
-            # shuffle, keep first segment (until first comma) in place
+            # shuffle, keep first N segments in place (shuffle_tokens_keep)
             token_list = caption.split(',')
             # trim whitespace
             token_list = [x.strip() for x in token_list]
             # remove empty strings
             token_list = [x for x in token_list if x]
-            if len(token_list) > 1:
-                rest = token_list[1:]
+            keep_n = max(0, getattr(self.dataset_config, 'shuffle_tokens_keep', 1))
+            if len(token_list) > keep_n + 1:
+                fixed = token_list[:keep_n]
+                rest = token_list[keep_n:]
                 random.shuffle(rest)
-                token_list = [token_list[0]] + rest
+                token_list = fixed + rest
             caption = ', '.join(token_list)
         if caption == '':
             pass
@@ -2105,7 +2112,10 @@ class TextEmbeddingCachingMixin:
                             embeds_list = []
                             embeds_list.append(self.sd.encode_prompt(file_item.caption, control_images=ctrl_img))
                             for _ in range(K - 1):
-                                caption_shuffled = _shuffle_caption_by_commas(file_item.caption)
+                                caption_shuffled = _shuffle_caption_by_commas(
+                                    file_item.caption,
+                                    keep_n=getattr(file_item.dataset_config, 'shuffle_tokens_keep', 1),
+                                )
                                 embeds_list.append(self.sd.encode_prompt(caption_shuffled, control_images=ctrl_img))
                             PromptEmbeds.save_multi(text_embedding_path, embeds_list)
                             for pe in embeds_list:
@@ -2117,7 +2127,11 @@ class TextEmbeddingCachingMixin:
                             prompt_embeds.save(text_embedding_path)
                             del prompt_embeds
                         else:
-                            unique_captions = _get_unique_caption_permutations(file_item.caption, max_permutations=K)
+                            unique_captions = _get_unique_caption_permutations(
+                                file_item.caption,
+                                max_permutations=K,
+                                keep_n=getattr(file_item.dataset_config, 'shuffle_tokens_keep', 1),
+                            )
                             captions_to_encode = unique_captions[:K]
                             embeds_list = []
                             for caption_text in captions_to_encode:
