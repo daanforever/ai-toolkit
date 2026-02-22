@@ -1,15 +1,19 @@
 """
 Custom loading of ZImageTransformer2DModel from shards or single file,
-bypassing the slow diffusers path (init_empty_weights + load_model_dict_into_meta).
+using the same low-memory path as diffusers (meta device + load_model_dict_into_meta)
+with local path/shard resolution and a single entry point.
 """
+import gc
 import json
 import os
 from typing import List, Optional
 
 import torch
+from accelerate import init_empty_weights
+from diffusers.models.model_loading_utils import load_model_dict_into_meta, load_state_dict
+from diffusers.models.modeling_utils import no_init_weights
 from diffusers.models.transformers import ZImageTransformer2DModel
 from diffusers.utils import SAFE_WEIGHTS_INDEX_NAME, SAFETENSORS_WEIGHTS_NAME
-from safetensors.torch import load_file as safetensors_load_file
 
 
 def load_zimage_transformer_from_shards(
@@ -20,8 +24,10 @@ def load_zimage_transformer_from_shards(
     **kwargs,
 ) -> ZImageTransformer2DModel:
     """
-    Load ZImageTransformer2DModel from a local folder (sharded or single safetensors),
-    using from_config + load_state_dict(..., assign=True) for faster loading.
+    Load ZImageTransformer2DModel from a local folder (sharded or single safetensors).
+
+    Uses meta device and load_model_dict_into_meta per shard (same as from_pretrained
+    with low_cpu_mem_usage), so peak RAM is on the order of one shard, not model + shard.
 
     Supports only local paths. For Hub model IDs use ZImageTransformer2DModel.from_pretrained.
     """
@@ -69,18 +75,24 @@ def load_zimage_transformer_from_shards(
         shard_paths = [single_path]
         is_sharded = False
 
-    # 3) Create model (no init_empty_weights)
-    model = ZImageTransformer2DModel.from_config(config)
+    # 3) Create model on meta device (low peak RAM)
+    with no_init_weights():
+        with init_empty_weights():
+            model = ZImageTransformer2DModel.from_config(config)
 
-    # 4) Load weights
+    # 4) Load weights per shard via load_model_dict_into_meta
     for path in shard_paths:
-        state_dict = safetensors_load_file(path, device="cpu")
-        if is_sharded:
-            model.load_state_dict(state_dict, assign=True, strict=False)
-        else:
-            if hasattr(model, "_fix_state_dict_keys_on_load"):
-                model._fix_state_dict_keys_on_load(state_dict)
-            model.load_state_dict(state_dict, assign=True, strict=True)
+        state_dict = load_state_dict(path)
+        if not is_sharded and hasattr(model, "_fix_state_dict_keys_on_load"):
+            model._fix_state_dict_keys_on_load(state_dict)
+        load_model_dict_into_meta(
+            model,
+            state_dict,
+            dtype=torch_dtype,
+            device_map=None,
+        )
+        del state_dict
+        gc.collect()
 
     # 5) Dtype and return
     if torch_dtype is not None:
