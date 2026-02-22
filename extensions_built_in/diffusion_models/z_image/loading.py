@@ -6,6 +6,7 @@ with local path/shard resolution and a single entry point.
 import gc
 import json
 import os
+import time
 from typing import List, Optional
 
 import torch
@@ -14,6 +15,7 @@ from diffusers.models.model_loading_utils import load_model_dict_into_meta, load
 from diffusers.models.modeling_utils import no_init_weights
 from diffusers.models.transformers import ZImageTransformer2DModel
 from diffusers.utils import SAFE_WEIGHTS_INDEX_NAME, SAFETENSORS_WEIGHTS_NAME
+from diffusers.utils import logging as diffusers_logging
 
 
 def load_zimage_transformer_from_shards(
@@ -31,6 +33,7 @@ def load_zimage_transformer_from_shards(
 
     Supports only local paths. For Hub model IDs use ZImageTransformer2DModel.from_pretrained.
     """
+    start = time.perf_counter()
     # 1) Config
     load_config_kwargs = {}
     for key in ("cache_dir", "local_files_only", "token", "revision"):
@@ -81,7 +84,11 @@ def load_zimage_transformer_from_shards(
             model = ZImageTransformer2DModel.from_config(config)
 
     # 4) Load weights per shard via load_model_dict_into_meta
-    for path in shard_paths:
+    if len(shard_paths) > 1:
+        shard_iter = diffusers_logging.tqdm(shard_paths, desc="Loading checkpoint shards")
+    else:
+        shard_iter = shard_paths
+    for path in shard_iter:
         state_dict = load_state_dict(path)
         if not is_sharded and hasattr(model, "_fix_state_dict_keys_on_load"):
             model._fix_state_dict_keys_on_load(state_dict)
@@ -97,4 +104,6 @@ def load_zimage_transformer_from_shards(
     # 5) Dtype and return
     if torch_dtype is not None:
         model = model.to(torch_dtype)
+    elapsed = time.perf_counter() - start
+    diffusers_logging.get_logger(__name__).info("Loaded in %.2fs", elapsed)
     return model
