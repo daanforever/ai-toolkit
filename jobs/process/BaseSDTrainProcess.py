@@ -72,7 +72,7 @@ import diffusers
 import hashlib
 
 from toolkit.util.blended_blur_noise import get_blended_blur_noise
-from toolkit.util.debug import memory_debug, set_debug_config
+from toolkit.util.debug import memory_debug, set_debug_config, is_debug_enabled
 from toolkit.util.get_model import get_model_class
 
 def flush():
@@ -1398,7 +1398,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     timesteps = self.sd.noise_scheduler.timesteps[timestep_indices.long()]
                 
                 # Debug logging for timestep distribution
-                if self.train_config.timestep_debug_log > 0:
+                if is_debug_enabled() and (self.logging_config.log_every or 0) > 0:
                     # Always collect data (fixed_cycle has no timestep_indices, use cycle index)
                     if content_or_style == 'fixed_cycle':
                         self._collected_indices.append(self.step_num % len(self._fixed_cycle_resolved_timesteps))
@@ -1407,8 +1407,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         self._collected_indices.extend(timestep_indices.cpu().tolist())
                         self._collected_timesteps.extend(timesteps.cpu().tolist())
                     
+                    threshold = self.logging_config.log_every
                     # Log when we have enough samples
-                    if len(self._collected_indices) >= self.train_config.timestep_debug_log:
+                    if len(self._collected_indices) >= threshold:
                         scheduler_timesteps = self.sd.noise_scheduler.timesteps.cpu().tolist()
                         
                         print_acc(f"\n{'='*70}")
@@ -1436,7 +1437,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         print_acc(f"  gaussian_std_target: {self.train_config.gaussian_std_target}")
                         
                         # Statistics
-                        num_samples = self.train_config.timestep_debug_log
+                        num_samples = threshold
                         indices_min = min(self._collected_indices[:num_samples])
                         indices_max = max(self._collected_indices[:num_samples])
                         indices_mean = sum(self._collected_indices[:num_samples]) / num_samples
