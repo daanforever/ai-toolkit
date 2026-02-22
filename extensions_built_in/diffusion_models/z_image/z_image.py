@@ -29,6 +29,7 @@ from diffusers import AutoencoderKL
 try:
     from diffusers import ZImagePipeline
     from diffusers.models.transformers import ZImageTransformer2DModel
+    from .loading import load_zimage_transformer_from_shards
 except ImportError:
     raise ImportError(
         "Diffusers is out of date. Update diffusers to the latest version by doing pip uninstall diffusers and then pip install -r requirements.txt"
@@ -174,11 +175,19 @@ class ZImageModel(BaseModel):
             sampling_transformer_subfolder = None
             sampling_transformer_path = os.path.join(sampling_model_path, "transformer")
 
-        sampling_transformer = ZImageTransformer2DModel.from_pretrained(
-            sampling_transformer_path,
-            subfolder=sampling_transformer_subfolder,
-            torch_dtype=dtype,
-        )
+        try:
+            sampling_transformer = load_zimage_transformer_from_shards(
+                sampling_transformer_path,
+                subfolder=sampling_transformer_subfolder,
+                torch_dtype=dtype,
+            )
+        except ValueError:
+            # Fallback for Hub model IDs (loader supports local paths only)
+            sampling_transformer = ZImageTransformer2DModel.from_pretrained(
+                sampling_transformer_path,
+                subfolder=sampling_transformer_subfolder,
+                torch_dtype=dtype,
+            )
         if self.model_config.quantize:
             self.print_and_status_update("Quantizing sampling transformer")
             quantize_model(self, sampling_transformer)
