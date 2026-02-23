@@ -21,6 +21,8 @@ from toolkit.ip_adapter import IPAdapter
 from toolkit.custom_adapter import CustomAdapter
 from toolkit.print import print_acc
 from toolkit.prompt_utils import PromptEmbeds, concat_prompt_embeds
+from toolkit.dataloader_mixins import get_t_e_cache_dir
+from toolkit.sample_prompts_cache import get_sample_prompt_hash, get_sample_prompt_path
 from toolkit.reference_adapter import ReferenceAdapter
 from toolkit.stable_diffusion_model import StableDiffusion, BlankNetwork
 from toolkit.train_tools import get_torch_dtype, apply_snr_weight, add_all_snr_to_noise_scheduler, \
@@ -124,7 +126,21 @@ class SDTrainer(BaseSDTrainProcess):
         if self.train_config.disable_sampling:
             return
         if self.sample_config is not None and self.sample_config.samples is not None and len(self.sample_config.samples) > 0:
-            # cache all the samples
+            # img_dir: same base as text embedding cache (dataset root)
+            img_dir = None
+            if self.dataset_configs:
+                d = self.dataset_configs[0]
+                if d.dataset_path and os.path.isdir(d.dataset_path):
+                    img_dir = d.dataset_path
+                elif d.dataset_path:
+                    img_dir = os.path.dirname(d.dataset_path)
+                if not img_dir and d.folder_path:
+                    img_dir = d.folder_path
+            if not img_dir:
+                img_dir = self.save_root
+            cache_dir = get_t_e_cache_dir(img_dir)
+            os.makedirs(cache_dir, exist_ok=True)
+
             self.sd.sample_prompts_cache = []
             sample_folder = os.path.join(self.save_root, 'samples')
             output_path = os.path.join(sample_folder, 'test.jpg')
@@ -142,7 +158,23 @@ class SDTrainer(BaseSDTrainProcess):
                     ctrl_img_2=sample_item.ctrl_img_2,
                     ctrl_img_3=sample_item.ctrl_img_3,
                 )
-                
+                info_dict = OrderedDict([
+                    ("prompt", gen_img_config.prompt),
+                    ("negative_prompt", gen_img_config.negative_prompt or ""),
+                    ("ctrl_img", gen_img_config.ctrl_img or ""),
+                    ("ctrl_img_1", gen_img_config.ctrl_img_1 or ""),
+                    ("ctrl_img_2", gen_img_config.ctrl_img_2 or ""),
+                    ("ctrl_img_3", gen_img_config.ctrl_img_3 or ""),
+                ])
+                if self.sd.encode_control_in_text_embeddings:
+                    info_dict["encode_control_in_text_embeddings"] = True
+                hash_str = get_sample_prompt_hash(info_dict)
+                path = get_sample_prompt_path(cache_dir, i, hash_str)
+
+                if os.path.exists(path):
+                    self.sd.sample_prompts_cache.append(path)
+                    continue
+
                 has_control_images = False
                 if gen_img_config.ctrl_img is not None or gen_img_config.ctrl_img_1 is not None or gen_img_config.ctrl_img_2 is not None or gen_img_config.ctrl_img_3 is not None:
                     has_control_images = True
@@ -207,10 +239,8 @@ class SDTrainer(BaseSDTrainProcess):
                     positive = self.sd.encode_prompt(gen_img_config.prompt).to('cpu')
                     negative = self.sd.encode_prompt(gen_img_config.negative_prompt).to('cpu')
                 
-                self.sd.sample_prompts_cache.append({
-                    'conditional': positive,
-                    'unconditional': negative
-                })
+                PromptEmbeds.save_multi(path, [positive, negative])
+                self.sd.sample_prompts_cache.append(path)
         
 
     def before_dataset_load(self):

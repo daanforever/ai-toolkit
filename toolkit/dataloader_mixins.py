@@ -1959,6 +1959,11 @@ class LatentCachingMixin:
             self.sd.restore_device_state()
 
 
+def get_t_e_cache_dir(base_dir: str) -> str:
+    """Return path to _t_e_cache directory under base_dir (same as used for text embedding cache)."""
+    return os.path.join(base_dir, '_t_e_cache')
+
+
 class TextEmbeddingFileItemDTOMixin:
     def __init__(self, *args, **kwargs):
         # if we have super, call it
@@ -1992,7 +1997,7 @@ class TextEmbeddingFileItemDTOMixin:
         else:
             # we store text embeddings in a folder in same path as image called _text_embedding_cache
             img_dir = os.path.dirname(self.path)
-            te_dir = os.path.join(img_dir, '_t_e_cache')
+            te_dir = get_t_e_cache_dir(img_dir)
             hash_dict = self.get_text_embedding_info_dict()
             filename_no_ext = os.path.splitext(os.path.basename(self.path))[0]
             # get base64 hash of md5 checksum of hash_dict

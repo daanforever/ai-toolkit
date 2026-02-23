@@ -33,6 +33,7 @@ from toolkit.metadata import get_meta_for_safetensors
 from toolkit.models.decorator import Decorator
 from toolkit.paths import KEYMAPS_ROOT
 from toolkit.prompt_utils import inject_trigger_into_prompt, PromptEmbeds, concat_prompt_embeds
+from toolkit.sample_prompts_cache import load_sample_prompt_pair
 from toolkit.reference_adapter import ReferenceAdapter
 from toolkit.sampler import get_sampler
 from toolkit.samplers.custom_flowmatch_sampler import CustomFlowMatchEulerDiscreteScheduler
@@ -1453,8 +1454,14 @@ class StableDiffusion:
                         )
 
                     if self.sample_prompts_cache is not None:
-                        conditional_embeds = self.sample_prompts_cache[i]['conditional'].to(self.device_torch, dtype=self.torch_dtype)
-                        unconditional_embeds = self.sample_prompts_cache[i]['unconditional'].to(self.device_torch, dtype=self.torch_dtype)
+                        item = self.sample_prompts_cache[i]
+                        if isinstance(item, str):
+                            cond, uncond = load_sample_prompt_pair(item)
+                            conditional_embeds = cond.to(self.device_torch, dtype=self.torch_dtype)
+                            unconditional_embeds = uncond.to(self.device_torch, dtype=self.torch_dtype)
+                        else:
+                            conditional_embeds = item['conditional'].to(self.device_torch, dtype=self.torch_dtype)
+                            unconditional_embeds = item['unconditional'].to(self.device_torch, dtype=self.torch_dtype)
                     else: 
                         # encode the prompt ourselves so we can do fun stuff with embeddings
                         if isinstance(self.adapter, CustomAdapter):

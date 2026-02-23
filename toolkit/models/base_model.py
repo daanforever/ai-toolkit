@@ -23,6 +23,7 @@ from toolkit.config_modules import ModelConfig, GenerateImageConfig, ModelArch
 from toolkit.models.decorator import Decorator
 from toolkit.paths import KEYMAPS_ROOT
 from toolkit.prompt_utils import inject_trigger_into_prompt, PromptEmbeds, concat_prompt_embeds
+from toolkit.sample_prompts_cache import load_sample_prompt_pair
 from toolkit.reference_adapter import ReferenceAdapter
 from toolkit.sd_device_states_presets import empty_preset
 from toolkit.train_tools import get_torch_dtype, apply_noise_offset
@@ -522,8 +523,14 @@ class BaseModel:
                             )
 
                         if self.sample_prompts_cache is not None:
-                            conditional_embeds = self.sample_prompts_cache[i]['conditional'].to(self.device_torch, dtype=self.torch_dtype)
-                            unconditional_embeds = self.sample_prompts_cache[i]['unconditional'].to(self.device_torch, dtype=self.torch_dtype)
+                            item = self.sample_prompts_cache[i]
+                            if isinstance(item, str):
+                                cond, uncond = load_sample_prompt_pair(item)
+                                conditional_embeds = cond.to(self.device_torch, dtype=self.torch_dtype)
+                                unconditional_embeds = uncond.to(self.device_torch, dtype=self.torch_dtype)
+                            else:
+                                conditional_embeds = item['conditional'].to(self.device_torch, dtype=self.torch_dtype)
+                                unconditional_embeds = item['unconditional'].to(self.device_torch, dtype=self.torch_dtype)
                         else:
                             ctrl_img = None
                             has_control_images = False
