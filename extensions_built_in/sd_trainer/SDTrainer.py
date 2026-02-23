@@ -35,7 +35,7 @@ from diffusers import EMAModel
 import math
 from toolkit.train_tools import precondition_model_outputs_flow_match
 from toolkit.models.diffusion_feature_extraction import DiffusionFeatureExtractor, load_dfe
-from toolkit.util.debug import memory_debug
+from toolkit.util.debug import memory_debug, is_debug_enabled
 from toolkit.util.losses import wavelet_loss, stepped_loss
 import torch.nn.functional as F
 from toolkit.unloader import unload_text_encoder
@@ -172,6 +172,8 @@ class SDTrainer(BaseSDTrainProcess):
                 path = get_sample_prompt_path(cache_dir, i, hash_str)
 
                 if os.path.exists(path):
+                    if is_debug_enabled():
+                        print_acc(f"sample_prompts_cache: hit [{i}] {path}")
                     self.sd.sample_prompts_cache.append(path)
                     continue
 
@@ -240,6 +242,8 @@ class SDTrainer(BaseSDTrainProcess):
                     negative = self.sd.encode_prompt(gen_img_config.negative_prompt).to('cpu')
                 
                 PromptEmbeds.save_multi(path, [positive, negative])
+                if is_debug_enabled():
+                    print_acc(f"sample_prompts_cache: saved [{i}] {path}")
                 self.sd.sample_prompts_cache.append(path)
         
 

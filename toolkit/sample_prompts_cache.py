@@ -9,7 +9,9 @@ import os
 from typing import Dict, Any, Tuple
 
 from toolkit.dataloader_mixins import get_t_e_cache_dir
+from toolkit.print import print_acc
 from toolkit.prompt_utils import PromptEmbeds
+from toolkit.util.debug import is_debug_enabled
 
 
 def get_sample_prompt_hash(info_dict: Dict[str, Any]) -> str:
@@ -26,6 +28,8 @@ def get_sample_prompt_path(cache_dir: str, index: int, hash_str: str) -> str:
 
 def load_sample_prompt_pair(path: str) -> Tuple[PromptEmbeds, PromptEmbeds]:
     """Load conditional (v0) and unconditional (v1) PromptEmbeds from a single multi-variant file."""
+    if is_debug_enabled():
+        print_acc(f"sample_prompts_cache: load {path}")
     conditional = PromptEmbeds.load(path, variant_index=0)
     unconditional = PromptEmbeds.load(path, variant_index=1)
     return conditional, unconditional
