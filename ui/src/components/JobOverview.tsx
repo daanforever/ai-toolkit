@@ -24,6 +24,7 @@ export default function JobOverview({ job }: JobOverviewProps) {
   const [newGaussianStd, setNewGaussianStd] = useState('');
   const [newWeightDecay, setNewWeightDecay] = useState('');
   const [newContentOrStyle, setNewContentOrStyle] = useState('balanced');
+  const [newTimestepType, setNewTimestepType] = useState('sigmoid');
   const [runtimeConfigStatus, setRuntimeConfigStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
 
   const CONTENT_OR_STYLE_OPTIONS = [
@@ -32,6 +33,13 @@ export default function JobOverview({ job }: JobOverviewProps) {
     { value: 'style', label: 'Low Noise' },
     { value: 'gaussian', label: 'Gaussian (Normal)' },
     { value: 'fixed_cycle', label: 'Fixed Cycle' },
+  ];
+
+  const TIMESTEP_TYPE_OPTIONS = [
+    { value: 'sigmoid', label: 'Sigmoid' },
+    { value: 'linear', label: 'Linear' },
+    { value: 'shift', label: 'Shift' },
+    { value: 'weighted', label: 'Weighted' },
   ];
 
   const { gpuList, isGPUInfoLoaded } = useGPUInfo(gpuIds, 5000);
@@ -177,6 +185,28 @@ export default function JobOverview({ job }: JobOverviewProps) {
     }
   };
 
+  const handleApplyRuntimeTimestepType = async () => {
+    if (!newTimestepType) {
+      setRuntimeConfigStatus('error');
+      return;
+    }
+    setRuntimeConfigStatus('loading');
+    try {
+      const res = await fetch(`/api/jobs/${job.id}/runtime-config`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ timestep_type: newTimestepType }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || res.statusText);
+      }
+      setRuntimeConfigStatus('success');
+    } catch (e) {
+      setRuntimeConfigStatus('error');
+    }
+  };
+
   const getStatusColor = (status: string) => {
     switch (status.toLowerCase()) {
       case 'running':
@@ -311,10 +341,34 @@ export default function JobOverview({ job }: JobOverviewProps) {
             </div>
           </div>
 
-          {/* Runtime Timestep Type and Gaussian (mean / std) — one row */}
+          {/* Runtime Timestep Type and Runtime Timestep Bias — row 1 */}
           <div className="space-y-2">
-            <p className="text-xs text-gray-400">Runtime Timestep Type / Gaussian (mean / std)</p>
+            <p className="text-xs text-gray-400">Runtime Timestep Type / Timestep Bias</p>
             <div className="flex items-center gap-2 flex-wrap">
+              <select
+                value={newTimestepType}
+                onChange={(e) => {
+                  setNewTimestepType(e.target.value);
+                  setRuntimeConfigStatus('idle');
+                }}
+                className="rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none min-w-[120px]"
+                title="Timestep Type"
+              >
+                {TIMESTEP_TYPE_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={handleApplyRuntimeTimestepType}
+                disabled={runtimeConfigStatus === 'loading'}
+                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {runtimeConfigStatus === 'loading' ? '…' : 'Apply'}
+              </button>
+              <span className="text-gray-500 mx-1">|</span>
               <select
                 value={newContentOrStyle}
                 onChange={(e) => {
@@ -322,6 +376,7 @@ export default function JobOverview({ job }: JobOverviewProps) {
                   setRuntimeConfigStatus('idle');
                 }}
                 className="rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none min-w-[140px]"
+                title="Timestep Bias"
               >
                 {CONTENT_OR_STYLE_OPTIONS.map((opt) => (
                   <option key={opt.value} value={opt.value}>
@@ -337,7 +392,18 @@ export default function JobOverview({ job }: JobOverviewProps) {
               >
                 {runtimeConfigStatus === 'loading' ? '…' : 'Apply'}
               </button>
-              <span className="text-gray-500 mx-1">|</span>
+            </div>
+            {(runtimeConfigStatus === 'success' || runtimeConfigStatus === 'error') && (
+              <p className={`text-xs ${runtimeConfigStatus === 'success' ? 'text-green-500' : 'text-rose-500'}`}>
+                {runtimeConfigStatus === 'success' ? 'Applied.' : 'Failed to apply.'}
+              </p>
+            )}
+          </div>
+
+          {/* Runtime Gaussian (mean / std) — row 2 */}
+          <div className="space-y-2">
+            <p className="text-xs text-gray-400">Runtime Gaussian (mean / std)</p>
+            <div className="flex items-center gap-2 flex-wrap">
               <input
                 type="number"
                 min="0"

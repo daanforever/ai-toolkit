@@ -40,6 +40,7 @@ model Job {
   runtime_gaussian_std  Float?
   runtime_weight_decay  Float?
   runtime_content_or_style String?
+  runtime_timestep_type String?
 
   @@index([status])
   @@index([gpu_ids])
