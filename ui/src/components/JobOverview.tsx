@@ -23,7 +23,16 @@ export default function JobOverview({ job }: JobOverviewProps) {
   const [newGaussianMean, setNewGaussianMean] = useState('');
   const [newGaussianStd, setNewGaussianStd] = useState('');
   const [newWeightDecay, setNewWeightDecay] = useState('');
+  const [newContentOrStyle, setNewContentOrStyle] = useState('balanced');
   const [runtimeConfigStatus, setRuntimeConfigStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
+
+  const CONTENT_OR_STYLE_OPTIONS = [
+    { value: 'balanced', label: 'Balanced' },
+    { value: 'content', label: 'High Noise' },
+    { value: 'style', label: 'Low Noise' },
+    { value: 'gaussian', label: 'Gaussian (Normal)' },
+    { value: 'fixed_cycle', label: 'Fixed Cycle' },
+  ];
 
   const { gpuList, isGPUInfoLoaded } = useGPUInfo(gpuIds, 5000);
   const { cpuInfo, isCPUInfoLoaded } = useCPUInfo(5000);
@@ -135,6 +144,28 @@ export default function JobOverview({ job }: JobOverviewProps) {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ weight_decay: value }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || res.statusText);
+      }
+      setRuntimeConfigStatus('success');
+    } catch (e) {
+      setRuntimeConfigStatus('error');
+    }
+  };
+
+  const handleApplyRuntimeContentOrStyle = async () => {
+    if (!newContentOrStyle) {
+      setRuntimeConfigStatus('error');
+      return;
+    }
+    setRuntimeConfigStatus('loading');
+    try {
+      const res = await fetch(`/api/jobs/${job.id}/runtime-config`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content_or_style: newContentOrStyle }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
@@ -280,10 +311,33 @@ export default function JobOverview({ job }: JobOverviewProps) {
             </div>
           </div>
 
-          {/* Runtime Gaussian mean / std */}
+          {/* Runtime Timestep Type and Gaussian (mean / std) — one row */}
           <div className="space-y-2">
-            <p className="text-xs text-gray-400">Runtime Gaussian (mean / std)</p>
+            <p className="text-xs text-gray-400">Runtime Timestep Type / Gaussian (mean / std)</p>
             <div className="flex items-center gap-2 flex-wrap">
+              <select
+                value={newContentOrStyle}
+                onChange={(e) => {
+                  setNewContentOrStyle(e.target.value);
+                  setRuntimeConfigStatus('idle');
+                }}
+                className="rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none min-w-[140px]"
+              >
+                {CONTENT_OR_STYLE_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={handleApplyRuntimeContentOrStyle}
+                disabled={runtimeConfigStatus === 'loading'}
+                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {runtimeConfigStatus === 'loading' ? '…' : 'Apply'}
+              </button>
+              <span className="text-gray-500 mx-1">|</span>
               <input
                 type="number"
                 min="0"
@@ -318,6 +372,11 @@ export default function JobOverview({ job }: JobOverviewProps) {
                 {runtimeConfigStatus === 'loading' ? '…' : 'Apply'}
               </button>
             </div>
+            {(runtimeConfigStatus === 'success' || runtimeConfigStatus === 'error') && (
+              <p className={`text-xs ${runtimeConfigStatus === 'success' ? 'text-green-500' : 'text-rose-500'}`}>
+                {runtimeConfigStatus === 'success' ? 'Applied.' : 'Failed to apply.'}
+              </p>
+            )}
           </div>
 
           {/* Log - Now using flex-grow to fill remaining space */}

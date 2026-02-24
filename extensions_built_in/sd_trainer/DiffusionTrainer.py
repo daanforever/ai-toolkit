@@ -41,6 +41,7 @@ class DiffusionTrainer(SDTrainer):
             self._last_applied_runtime_gaussian_mean = None
             self._last_applied_runtime_gaussian_std = None
             self._last_applied_runtime_weight_decay = None
+            self._last_applied_runtime_content_or_style = None
             # Initialize the status
             self._run_async_operation(self._update_status("running", "Starting"))
             self._stop_watcher_started = False
@@ -282,6 +283,40 @@ class DiffusionTrainer(SDTrainer):
                     f"\nruntime_weight_decay from DB not applied: optimizer has no set_weight_decay (type: {type(optimizer).__name__})"
                 )
 
+    def get_runtime_content_or_style(self):
+        """Read runtime_content_or_style from DB (only when is_ui_trainer). Returns str or None."""
+        if not self.is_ui_trainer:
+            return None
+
+        def _read():
+            with self._db_connect() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT runtime_content_or_style FROM Job WHERE id = ?",
+                    (self.job_id,),
+                )
+                row = cursor.fetchone()
+                if row is None or row[0] is None:
+                    return None
+                return str(row[0])
+
+        return _read()
+
+    def apply_runtime_content_or_style(self):
+        """If runtime_content_or_style is set in DB, apply it to train_config."""
+        if not self.is_ui_trainer:
+            return
+        value = self.get_runtime_content_or_style()
+        if value is None:
+            return
+        if value == self._last_applied_runtime_content_or_style:
+            return
+        self.train_config.content_or_style = value
+        self.train_config.content_or_style_reg = value
+        self._last_applied_runtime_content_or_style = value
+        if is_debug_enabled():
+            print_acc(f"\nruntime content_or_style from UI/DB: {value}")
+
     async def _update_key(self, key, value):
         if not self.accelerator.is_main_process:
             return
@@ -396,6 +431,7 @@ class DiffusionTrainer(SDTrainer):
             self.apply_runtime_max_lr()
             self.apply_runtime_gaussian_params()
             self.apply_runtime_weight_decay()
+            self.apply_runtime_content_or_style()
 
     def hook_before_model_load(self):
         super().hook_before_model_load()
