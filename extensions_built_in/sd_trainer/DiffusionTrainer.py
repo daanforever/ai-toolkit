@@ -183,11 +183,18 @@ class DiffusionTrainer(SDTrainer):
         if value == self._last_applied_runtime_max_lr:
             return
         optimizer = unwrap_model(self.optimizer)
+        while getattr(optimizer, "optimizer", None) is not None:
+            optimizer = optimizer.optimizer
         if hasattr(optimizer, "set_max_lr"):
             if is_debug_enabled():
                 print_acc(f"runtime_max_lr from UI/DB: {value}")
             optimizer.set_max_lr(value)
             self._last_applied_runtime_max_lr = value
+        else:
+            if is_debug_enabled():
+                print_acc(
+                    f"runtime_max_lr from DB not applied: optimizer has no set_max_lr (type: {type(optimizer).__name__})"
+                )
 
     async def _update_key(self, key, value):
         if not self.accelerator.is_main_process:
