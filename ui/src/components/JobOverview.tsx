@@ -19,6 +19,8 @@ export default function JobOverview({ job }: JobOverviewProps) {
   const logRef = useRef<HTMLDivElement>(null);
   // Track whether we should auto-scroll to bottom
   const [isScrolledToBottom, setIsScrolledToBottom] = useState(true);
+  const [newMaxLr, setNewMaxLr] = useState('');
+  const [runtimeConfigStatus, setRuntimeConfigStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
 
   const { gpuList, isGPUInfoLoaded } = useGPUInfo(gpuIds, 5000);
   const { cpuInfo, isCPUInfoLoaded } = useCPUInfo(5000);
@@ -59,6 +61,30 @@ export default function JobOverview({ job }: JobOverviewProps) {
       logRef.current.scrollTop = logRef.current.scrollHeight;
     }
   }, [log, isScrolledToBottom]);
+
+  const handleApplyRuntimeMaxLr = async () => {
+    const value = parseFloat(newMaxLr);
+    if (!Number.isFinite(value) || value <= 0) {
+      setRuntimeConfigStatus('error');
+      return;
+    }
+    setRuntimeConfigStatus('loading');
+    try {
+      const res = await fetch(`/api/jobs/${job.id}/runtime-config`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ max_lr: value }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || res.statusText);
+      }
+      setRuntimeConfigStatus('success');
+      setNewMaxLr('');
+    } catch (e) {
+      setRuntimeConfigStatus('error');
+    }
+  };
 
   const getStatusColor = (status: string) => {
     switch (status.toLowerCase()) {
@@ -132,6 +158,39 @@ export default function JobOverview({ job }: JobOverviewProps) {
                 <p className="text-sm font-medium text-gray-200">{job.speed_string == '' ? '?' : job.speed_string}</p>
               </div>
             </div>
+          </div>
+
+          {/* Runtime max LR */}
+          <div className="space-y-2">
+            <p className="text-xs text-gray-400">New max LR</p>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min="1e-6"
+                step="any"
+                placeholder="e.g. 1e-4"
+                value={newMaxLr}
+                onChange={(e) => {
+                  setNewMaxLr(e.target.value);
+                  setRuntimeConfigStatus('idle');
+                }}
+                className="flex-1 rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+              />
+              <button
+                type="button"
+                onClick={handleApplyRuntimeMaxLr}
+                disabled={runtimeConfigStatus === 'loading' || !newMaxLr.trim()}
+                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {runtimeConfigStatus === 'loading' ? '…' : 'Apply'}
+              </button>
+            </div>
+            {runtimeConfigStatus === 'success' && (
+              <p className="text-xs text-green-500">Applied.</p>
+            )}
+            {runtimeConfigStatus === 'error' && (
+              <p className="text-xs text-rose-500">Failed to apply.</p>
+            )}
           </div>
 
           {/* Log - Now using flex-grow to fill remaining space */}

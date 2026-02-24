@@ -4,6 +4,7 @@ import sqlite3
 import asyncio
 import concurrent.futures
 from extensions_built_in.sd_trainer.SDTrainer import SDTrainer
+from toolkit.accelerator import unwrap_model
 from typing import Literal, Optional
 import threading
 import time
@@ -151,6 +152,35 @@ class DiffusionTrainer(SDTrainer):
             self.is_stopping = True
             raise Exception("Job returning to queue")
 
+    def get_runtime_max_lr(self):
+        """Read runtime_max_lr from DB (only when is_ui_trainer). Returns float or None."""
+        if not self.is_ui_trainer:
+            return None
+
+        def _read():
+            with self._db_connect() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT runtime_max_lr FROM Job WHERE id = ?", (self.job_id,)
+                )
+                row = cursor.fetchone()
+                if row is None or row[0] is None:
+                    return None
+                return float(row[0])
+
+        return _read()
+
+    def apply_runtime_max_lr(self):
+        """If runtime_max_lr is set in DB, apply it to the optimizer (e.g. Adafactor)."""
+        if not self.is_ui_trainer:
+            return
+        value = self.get_runtime_max_lr()
+        if value is None:
+            return
+        optimizer = unwrap_model(self.optimizer)
+        if hasattr(optimizer, "set_max_lr"):
+            optimizer.set_max_lr(value)
+
     async def _update_key(self, key, value):
         if not self.accelerator.is_main_process:
             return
@@ -262,6 +292,7 @@ class DiffusionTrainer(SDTrainer):
         if self.is_ui_trainer:
             self.update_step()
             self.maybe_stop()
+            self.apply_runtime_max_lr()
 
     def hook_before_model_load(self):
         super().hook_before_model_load()

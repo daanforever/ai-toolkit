@@ -196,6 +196,12 @@ class Adafactor(torch.optim.Optimizer):
         if self.do_parameter_swapping:
             self.enable_parameter_swapping(self.parameter_swapping_factor)
 
+    def set_max_lr(self, value: float) -> None:
+        """Update max_lr at runtime (e.g. from UI)."""
+        self._max_lr = value
+        for group in self.param_groups:
+            group["max_lr"] = value
+
     def load_state_dict(self, state_dict):
         super().load_state_dict(state_dict)
         # Apply current run's min_lr/max_lr/lr_smoothing_rate/rms_max_decay_rate/lr so changed config is used after restart.
