@@ -17,7 +17,7 @@ export async function PATCH(
     return NextResponse.json({ error: 'Job not found' }, { status: 404 });
   }
 
-  let body: { max_lr?: number; gaussian_mean?: number; gaussian_std?: number };
+  let body: { max_lr?: number; gaussian_mean?: number; gaussian_std?: number; weight_decay?: number };
   try {
     body = await request.json();
   } catch {
@@ -27,7 +27,7 @@ export async function PATCH(
     );
   }
 
-  const data: { runtime_max_lr?: number; runtime_gaussian_mean?: number; runtime_gaussian_std?: number } = {};
+  const data: { runtime_max_lr?: number; runtime_gaussian_mean?: number; runtime_gaussian_std?: number; runtime_weight_decay?: number } = {};
 
   const maxLr = body.max_lr;
   if (maxLr !== undefined) {
@@ -62,9 +62,20 @@ export async function PATCH(
     data.runtime_gaussian_std = gaussianStd;
   }
 
+  const weightDecay = body.weight_decay;
+  if (weightDecay !== undefined) {
+    if (typeof weightDecay !== 'number' || !Number.isFinite(weightDecay) || weightDecay < 0) {
+      return NextResponse.json(
+        { error: 'weight_decay must be a non-negative number' },
+        { status: 400 }
+      );
+    }
+    data.runtime_weight_decay = weightDecay;
+  }
+
   if (Object.keys(data).length === 0) {
     return NextResponse.json(
-      { error: 'At least one of max_lr, gaussian_mean, gaussian_std must be provided' },
+      { error: 'At least one of max_lr, gaussian_mean, gaussian_std, weight_decay must be provided' },
       { status: 400 }
     );
   }

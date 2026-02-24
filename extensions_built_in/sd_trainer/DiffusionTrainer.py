@@ -40,6 +40,7 @@ class DiffusionTrainer(SDTrainer):
             self._last_applied_runtime_max_lr = None
             self._last_applied_runtime_gaussian_mean = None
             self._last_applied_runtime_gaussian_std = None
+            self._last_applied_runtime_weight_decay = None
             # Initialize the status
             self._run_async_operation(self._update_status("running", "Starting"))
             self._stop_watcher_started = False
@@ -189,13 +190,13 @@ class DiffusionTrainer(SDTrainer):
             optimizer = optimizer.optimizer
         if hasattr(optimizer, "set_max_lr"):
             if is_debug_enabled():
-                print_acc(f"runtime_max_lr from UI/DB: {value}")
+                print_acc(f"\nruntime_max_lr from UI/DB: {value}")
             optimizer.set_max_lr(value)
             self._last_applied_runtime_max_lr = value
         else:
             if is_debug_enabled():
                 print_acc(
-                    f"runtime_max_lr from DB not applied: optimizer has no set_max_lr (type: {type(optimizer).__name__})"
+                    f"\nruntime_max_lr from DB not applied: optimizer has no set_max_lr (type: {type(optimizer).__name__})"
                 )
 
     def get_runtime_gaussian_params(self):
@@ -236,8 +237,50 @@ class DiffusionTrainer(SDTrainer):
         self._last_applied_runtime_gaussian_std = std
         if is_debug_enabled():
             print_acc(
-                f"runtime gaussian_mean/std from UI/DB: {self.train_config.gaussian_mean}, {self.train_config.gaussian_std}"
+                f"\nruntime gaussian_mean/std from UI/DB: {self.train_config.gaussian_mean}, {self.train_config.gaussian_std}"
             )
+
+    def get_runtime_weight_decay(self):
+        """Read runtime_weight_decay from DB (only when is_ui_trainer). Returns float or None."""
+        if not self.is_ui_trainer:
+            return None
+
+        def _read():
+            with self._db_connect() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT runtime_weight_decay FROM Job WHERE id = ?",
+                    (self.job_id,),
+                )
+                row = cursor.fetchone()
+                if row is None or row[0] is None:
+                    return None
+                return float(row[0])
+
+        return _read()
+
+    def apply_runtime_weight_decay(self):
+        """If runtime_weight_decay is set in DB, apply it to the optimizer (e.g. Adafactor)."""
+        if not self.is_ui_trainer:
+            return
+        value = self.get_runtime_weight_decay()
+        if value is None:
+            return
+        if value == self._last_applied_runtime_weight_decay:
+            return
+        optimizer = unwrap_model(self.optimizer)
+        while getattr(optimizer, "optimizer", None) is not None:
+            optimizer = optimizer.optimizer
+        if hasattr(optimizer, "set_weight_decay"):
+            if is_debug_enabled():
+                print_acc(f"\nruntime_weight_decay from UI/DB: {value}")
+            optimizer.set_weight_decay(value)
+            self._last_applied_runtime_weight_decay = value
+        else:
+            if is_debug_enabled():
+                print_acc(
+                    f"\nruntime_weight_decay from DB not applied: optimizer has no set_weight_decay (type: {type(optimizer).__name__})"
+                )
 
     async def _update_key(self, key, value):
         if not self.accelerator.is_main_process:
@@ -352,6 +395,7 @@ class DiffusionTrainer(SDTrainer):
             self.maybe_stop()
             self.apply_runtime_max_lr()
             self.apply_runtime_gaussian_params()
+            self.apply_runtime_weight_decay()
 
     def hook_before_model_load(self):
         super().hook_before_model_load()

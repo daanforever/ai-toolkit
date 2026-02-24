@@ -22,6 +22,7 @@ export default function JobOverview({ job }: JobOverviewProps) {
   const [newMaxLr, setNewMaxLr] = useState('');
   const [newGaussianMean, setNewGaussianMean] = useState('');
   const [newGaussianStd, setNewGaussianStd] = useState('');
+  const [newWeightDecay, setNewWeightDecay] = useState('');
   const [runtimeConfigStatus, setRuntimeConfigStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
 
   const { gpuList, isGPUInfoLoaded } = useGPUInfo(gpuIds, 5000);
@@ -120,6 +121,30 @@ export default function JobOverview({ job }: JobOverviewProps) {
       setRuntimeConfigStatus('success');
       setNewGaussianMean('');
       setNewGaussianStd('');
+    } catch (e) {
+      setRuntimeConfigStatus('error');
+    }
+  };
+
+  const handleApplyRuntimeWeightDecay = async () => {
+    const value = parseFloat(newWeightDecay);
+    if (!Number.isFinite(value) || value < 0) {
+      setRuntimeConfigStatus('error');
+      return;
+    }
+    setRuntimeConfigStatus('loading');
+    try {
+      const res = await fetch(`/api/jobs/${job.id}/runtime-config`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ weight_decay: value }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || res.statusText);
+      }
+      setRuntimeConfigStatus('success');
+      setNewWeightDecay('');
     } catch (e) {
       setRuntimeConfigStatus('error');
     }
@@ -265,6 +290,33 @@ export default function JobOverview({ job }: JobOverviewProps) {
                 type="button"
                 onClick={handleApplyRuntimeGaussian}
                 disabled={runtimeConfigStatus === 'loading' || (!newGaussianMean.trim() && !newGaussianStd.trim())}
+                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {runtimeConfigStatus === 'loading' ? '…' : 'Apply'}
+              </button>
+            </div>
+          </div>
+
+          {/* Runtime weight decay */}
+          <div className="space-y-2">
+            <p className="text-xs text-gray-400">New weight decay</p>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min="0"
+                step="any"
+                placeholder="e.g. 0.01 or 0"
+                value={newWeightDecay}
+                onChange={(e) => {
+                  setNewWeightDecay(e.target.value);
+                  setRuntimeConfigStatus('idle');
+                }}
+                className="flex-1 rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+              />
+              <button
+                type="button"
+                onClick={handleApplyRuntimeWeightDecay}
+                disabled={runtimeConfigStatus === 'loading' || !newWeightDecay.trim()}
                 className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {runtimeConfigStatus === 'loading' ? '…' : 'Apply'}

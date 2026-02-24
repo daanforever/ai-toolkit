@@ -206,6 +206,13 @@ class Adafactor(torch.optim.Optimizer):
         if is_debug_enabled():
             print_acc(f"Adafactor: applied runtime max_lr={value}")
 
+    def set_weight_decay(self, value: float) -> None:
+        """Update weight_decay at runtime (e.g. from UI)."""
+        for group in self.param_groups:
+            group["weight_decay"] = value
+        if is_debug_enabled():
+            print_acc(f"Adafactor: applied runtime weight_decay={value}")
+
     def load_state_dict(self, state_dict):
         super().load_state_dict(state_dict)
         # Apply current run's min_lr/max_lr/lr_smoothing_rate/rms_max_decay_rate/lr so changed config is used after restart.

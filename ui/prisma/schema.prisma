@@ -38,6 +38,7 @@ model Job {
   runtime_max_lr  Float?
   runtime_gaussian_mean Float?
   runtime_gaussian_std  Float?
+  runtime_weight_decay  Float?
 
   @@index([status])
   @@index([gpu_ids])
