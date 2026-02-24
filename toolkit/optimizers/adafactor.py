@@ -35,9 +35,10 @@ class Adafactor(torch.optim.Optimizer):
         rms_max_decay_rate (`float`, *optional*, defaults to `0.97`):
             Decay rate for running max of update RMS used in activity normalization.
             Applied each step: ``update_rms_max = max(update_rms_max * rms_max_decay_rate, update_rms)``.
-            Also used for group-level running max of parameter RMS (param_rms_max) when scale_parameter=True,
-            to normalize per-parameter scale to (0, 1] within the group (useful for LoRA).
-            Allows the normalization scale to decrease over time so lr can recover from plateaus.
+            When scale_parameter=True and relative_step=True, also used for per-parameter running max of
+            parameter RMS (state["rms_max"]), which normalizes each parameter's scale to (0, 1] for LR
+            (useful for mixed-scale groups e.g. LoRA). Allows the normalization scale to decrease over
+            time so lr can recover from plateaus.
         beta1 (`float`, *optional*):
             Coefficient used for computing running averages of gradient
             (first moment, like in Adam). If not None, enables momentum.
@@ -149,7 +150,6 @@ class Adafactor(torch.optim.Optimizer):
             "clip_threshold": clip_threshold,
             "decay_rate": decay_rate,
             "rms_max_decay_rate": rms_max_decay_rate,
-            "param_rms_max": 0.0,
             "beta1": beta1,
             "weight_decay": weight_decay,
             "scale_parameter": scale_parameter,
@@ -214,14 +214,13 @@ class Adafactor(torch.optim.Optimizer):
             group["max_lr"] = self._max_lr
             group["lr_smoothing_rate"] = self._lr_smoothing_rate
             group["rms_max_decay_rate"] = self._rms_max_decay_rate
-            group["param_rms_max"] = group.get("param_rms_max", 0.0)
             if self._lr is not None:
                 group["lr"] = self._lr
         # Normalize state from old checkpoints: update_rms_max/update_rms must be tensors for step().
         for group in self.param_groups:
             for param in group["params"]:
                 state = self.state[param]
-                for key in ("update_rms_max", "update_rms"):
+                for key in ("update_rms_max", "update_rms", "rms_max"):
                     if key in state and not isinstance(state[key], torch.Tensor):
                         state[key] = torch.tensor(state[key], device=param.device, dtype=torch.float32)
 
@@ -270,12 +269,13 @@ class Adafactor(torch.optim.Optimizer):
             # Activity = prev_update_rms normalized to (0, 1] via running max.
             # Large updates → activity near 1 → lr near max_lr; small → activity near 0 → lr near min_lr.
 
-            # Normalize param_scale to (0, 1] by group's param_rms_max; floor at eps1 so small weights
-            # (e.g. LoRA near zero) still get a minimum effective LR (~eps1 relative to 1.0) and can
-            # escape flat regions instead of stalling when param_rms_max grows much larger than their RMS.
+            # Normalize param_scale to (0, 1] by this parameter's running max RMS (rms_max); floor at eps1
+            # so small weights (e.g. LoRA near zero) still get a minimum effective LR and can escape flat regions.
+            rms_max_val = param_state.get("rms_max", 0.0)
+            rms_max_val = rms_max_val.item() if isinstance(rms_max_val, torch.Tensor) else rms_max_val
             param_scale = max(
                 eps1,
-                min(1.0, param_scale / (param_group.get("param_rms_max", 0.0) + eps0)),
+                min(1.0, param_scale / (rms_max_val + eps0)),
             )
 
             # State holds tensors; use .item() so activity and lr stay float (needed for step, _smooth_lr, get_learning_rates).
@@ -347,9 +347,8 @@ class Adafactor(torch.optim.Optimizer):
     def _get_group_scalars(self, group, state_key, default=0.0, reduction='mean'):
         """
         Collect per-parameter scalars from state for a group, reduce in tensor space, return float.
-        Used for unified metric aggregation (RMS, update_rms, update_rms_max) so get_* and
-        param_rms_max use the same path. Only params that have state_key in state are included
-        (same as current get_update_rms/get_update_rms_max).
+        Used for unified metric aggregation (RMS, update_rms, update_rms_max) so get_* use the same
+        path. Only params that have state_key in state are included (same as get_update_rms/get_update_rms_max).
         """
         tensors = []
         device = None
@@ -486,6 +485,12 @@ class Adafactor(torch.optim.Optimizer):
 
                 state["step"] += 1
                 state["RMS"] = self._rms(p_data_fp32)
+                if "rms_max" not in state:
+                    state["rms_max"] = state["RMS"].clone().detach()
+                else:
+                    state["rms_max"] = torch.maximum(
+                        state["rms_max"] * group["rms_max_decay_rate"], state["RMS"]
+                    )
                 lr = self._get_lr(group, state)
 
                 beta2t = 1.0 - math.pow(state["step"], group["decay_rate"])
@@ -542,14 +547,6 @@ class Adafactor(torch.optim.Optimizer):
                 if (p.dtype != torch.float32 or is_quantized) and self.stochastic_rounding:
                     # apply stochastic rounding
                     copy_stochastic(p, p_data_fp32)
-
-            # Unified group scalar collection with max reduction (same path as get_update_rms/get_update_rms_max).
-            group_rms_max = self._get_group_scalars(group, "RMS", default=0.0, reduction='max')
-            if group_rms_max is not None:
-                group["param_rms_max"] = max(
-                    group["param_rms_max"] * group["rms_max_decay_rate"],
-                    group_rms_max,
-                )
 
         return loss
         
