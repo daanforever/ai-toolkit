@@ -2,6 +2,8 @@ import math
 from typing import List
 import torch
 from toolkit.optimizers.optimizer_utils import copy_stochastic, stochastic_grad_accummulation
+from toolkit.print import print_acc
+from toolkit.util.debug import is_debug_enabled
 from optimum.quanto import QBytesTensor
 import random
 
@@ -201,6 +203,8 @@ class Adafactor(torch.optim.Optimizer):
         self._max_lr = value
         for group in self.param_groups:
             group["max_lr"] = value
+        if is_debug_enabled():
+            print_acc(f"Adafactor: applied runtime max_lr={value}")
 
     def load_state_dict(self, state_dict):
         super().load_state_dict(state_dict)

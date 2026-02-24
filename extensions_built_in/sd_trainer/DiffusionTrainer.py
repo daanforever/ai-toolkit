@@ -5,6 +5,8 @@ import asyncio
 import concurrent.futures
 from extensions_built_in.sd_trainer.SDTrainer import SDTrainer
 from toolkit.accelerator import unwrap_model
+from toolkit.print import print_acc
+from toolkit.util.debug import is_debug_enabled
 from typing import Literal, Optional
 import threading
 import time
@@ -35,6 +37,7 @@ class DiffusionTrainer(SDTrainer):
             self.thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             # Track all async tasks
             self._async_tasks = []
+            self._last_applied_runtime_max_lr = None
             # Initialize the status
             self._run_async_operation(self._update_status("running", "Starting"))
             self._stop_watcher_started = False
@@ -177,9 +180,14 @@ class DiffusionTrainer(SDTrainer):
         value = self.get_runtime_max_lr()
         if value is None:
             return
+        if value == self._last_applied_runtime_max_lr:
+            return
         optimizer = unwrap_model(self.optimizer)
         if hasattr(optimizer, "set_max_lr"):
+            if is_debug_enabled():
+                print_acc(f"runtime_max_lr from UI/DB: {value}")
             optimizer.set_max_lr(value)
+            self._last_applied_runtime_max_lr = value
 
     async def _update_key(self, key, value):
         if not self.accelerator.is_main_process:
