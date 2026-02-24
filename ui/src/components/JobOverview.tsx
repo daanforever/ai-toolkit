@@ -20,6 +20,8 @@ export default function JobOverview({ job }: JobOverviewProps) {
   // Track whether we should auto-scroll to bottom
   const [isScrolledToBottom, setIsScrolledToBottom] = useState(true);
   const [newMaxLr, setNewMaxLr] = useState('');
+  const [newGaussianMean, setNewGaussianMean] = useState('');
+  const [newGaussianStd, setNewGaussianStd] = useState('');
   const [runtimeConfigStatus, setRuntimeConfigStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
 
   const { gpuList, isGPUInfoLoaded } = useGPUInfo(gpuIds, 5000);
@@ -81,6 +83,43 @@ export default function JobOverview({ job }: JobOverviewProps) {
       }
       setRuntimeConfigStatus('success');
       setNewMaxLr('');
+    } catch (e) {
+      setRuntimeConfigStatus('error');
+    }
+  };
+
+  const handleApplyRuntimeGaussian = async () => {
+    const meanVal = newGaussianMean.trim() === '' ? null : parseFloat(newGaussianMean);
+    const stdVal = newGaussianStd.trim() === '' ? null : parseFloat(newGaussianStd);
+    if (meanVal !== null && (!Number.isFinite(meanVal) || meanVal < 0 || meanVal > 1)) {
+      setRuntimeConfigStatus('error');
+      return;
+    }
+    if (stdVal !== null && (!Number.isFinite(stdVal) || stdVal <= 0)) {
+      setRuntimeConfigStatus('error');
+      return;
+    }
+    if (meanVal === null && stdVal === null) {
+      setRuntimeConfigStatus('error');
+      return;
+    }
+    const body: { gaussian_mean?: number; gaussian_std?: number } = {};
+    if (meanVal !== null) body.gaussian_mean = meanVal;
+    if (stdVal !== null) body.gaussian_std = stdVal;
+    setRuntimeConfigStatus('loading');
+    try {
+      const res = await fetch(`/api/jobs/${job.id}/runtime-config`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || res.statusText);
+      }
+      setRuntimeConfigStatus('success');
+      setNewGaussianMean('');
+      setNewGaussianStd('');
     } catch (e) {
       setRuntimeConfigStatus('error');
     }
@@ -191,6 +230,46 @@ export default function JobOverview({ job }: JobOverviewProps) {
             {runtimeConfigStatus === 'error' && (
               <p className="text-xs text-rose-500">Failed to apply.</p>
             )}
+          </div>
+
+          {/* Runtime Gaussian mean / std */}
+          <div className="space-y-2">
+            <p className="text-xs text-gray-400">Runtime Gaussian (mean / std)</p>
+            <div className="flex items-center gap-2 flex-wrap">
+              <input
+                type="number"
+                min="0"
+                max="1"
+                step="any"
+                placeholder="mean (0–1)"
+                value={newGaussianMean}
+                onChange={(e) => {
+                  setNewGaussianMean(e.target.value);
+                  setRuntimeConfigStatus('idle');
+                }}
+                className="w-24 rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+              />
+              <input
+                type="number"
+                min="1e-6"
+                step="any"
+                placeholder="std (&gt;0)"
+                value={newGaussianStd}
+                onChange={(e) => {
+                  setNewGaussianStd(e.target.value);
+                  setRuntimeConfigStatus('idle');
+                }}
+                className="w-24 rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+              />
+              <button
+                type="button"
+                onClick={handleApplyRuntimeGaussian}
+                disabled={runtimeConfigStatus === 'loading' || (!newGaussianMean.trim() && !newGaussianStd.trim())}
+                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {runtimeConfigStatus === 'loading' ? '…' : 'Apply'}
+              </button>
+            </div>
           </div>
 
           {/* Log - Now using flex-grow to fill remaining space */}

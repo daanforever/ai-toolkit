@@ -38,6 +38,8 @@ class DiffusionTrainer(SDTrainer):
             # Track all async tasks
             self._async_tasks = []
             self._last_applied_runtime_max_lr = None
+            self._last_applied_runtime_gaussian_mean = None
+            self._last_applied_runtime_gaussian_std = None
             # Initialize the status
             self._run_async_operation(self._update_status("running", "Starting"))
             self._stop_watcher_started = False
@@ -196,6 +198,47 @@ class DiffusionTrainer(SDTrainer):
                     f"runtime_max_lr from DB not applied: optimizer has no set_max_lr (type: {type(optimizer).__name__})"
                 )
 
+    def get_runtime_gaussian_params(self):
+        """Read runtime_gaussian_mean, runtime_gaussian_std from DB (only when is_ui_trainer). Returns (mean, std) or (None, None)."""
+        if not self.is_ui_trainer:
+            return (None, None)
+
+        def _read():
+            with self._db_connect() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT runtime_gaussian_mean, runtime_gaussian_std FROM Job WHERE id = ?",
+                    (self.job_id,),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    return (None, None)
+                mean = float(row[0]) if row[0] is not None else None
+                std = float(row[1]) if row[1] is not None else None
+                return (mean, std)
+
+        return _read()
+
+    def apply_runtime_gaussian_params(self):
+        """If runtime_gaussian_mean/std are set in DB, apply them to train_config."""
+        if not self.is_ui_trainer:
+            return
+        mean, std = self.get_runtime_gaussian_params()
+        if mean is None and std is None:
+            return
+        if mean == self._last_applied_runtime_gaussian_mean and std == self._last_applied_runtime_gaussian_std:
+            return
+        if mean is not None:
+            self.train_config.gaussian_mean = mean
+        if std is not None:
+            self.train_config.gaussian_std = std
+        self._last_applied_runtime_gaussian_mean = mean
+        self._last_applied_runtime_gaussian_std = std
+        if is_debug_enabled():
+            print_acc(
+                f"runtime gaussian_mean/std from UI/DB: {self.train_config.gaussian_mean}, {self.train_config.gaussian_std}"
+            )
+
     async def _update_key(self, key, value):
         if not self.accelerator.is_main_process:
             return
@@ -308,6 +351,7 @@ class DiffusionTrainer(SDTrainer):
             self.update_step()
             self.maybe_stop()
             self.apply_runtime_max_lr()
+            self.apply_runtime_gaussian_params()
 
     def hook_before_model_load(self):
         super().hook_before_model_load()
