@@ -83,7 +83,6 @@ export default function JobOverview({ job }: JobOverviewProps) {
         throw new Error(data.error || res.statusText);
       }
       setRuntimeConfigStatus('success');
-      setNewMaxLr('');
     } catch (e) {
       setRuntimeConfigStatus('error');
     }
@@ -119,8 +118,6 @@ export default function JobOverview({ job }: JobOverviewProps) {
         throw new Error(data.error || res.statusText);
       }
       setRuntimeConfigStatus('success');
-      setNewGaussianMean('');
-      setNewGaussianStd('');
     } catch (e) {
       setRuntimeConfigStatus('error');
     }
@@ -144,7 +141,6 @@ export default function JobOverview({ job }: JobOverviewProps) {
         throw new Error(data.error || res.statusText);
       }
       setRuntimeConfigStatus('success');
-      setNewWeightDecay('');
     } catch (e) {
       setRuntimeConfigStatus('error');
     }
@@ -224,37 +220,64 @@ export default function JobOverview({ job }: JobOverviewProps) {
             </div>
           </div>
 
-          {/* Runtime max LR */}
-          <div className="space-y-2">
-            <p className="text-xs text-gray-400">New max LR</p>
-            <div className="flex items-center gap-2">
-              <input
-                type="number"
-                min="1e-6"
-                step="any"
-                placeholder="e.g. 1e-4"
-                value={newMaxLr}
-                onChange={(e) => {
-                  setNewMaxLr(e.target.value);
-                  setRuntimeConfigStatus('idle');
-                }}
-                className="flex-1 rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
-              />
-              <button
-                type="button"
-                onClick={handleApplyRuntimeMaxLr}
-                disabled={runtimeConfigStatus === 'loading' || !newMaxLr.trim()}
-                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {runtimeConfigStatus === 'loading' ? '…' : 'Apply'}
-              </button>
+          {/* Runtime max LR and weight decay — one row */}
+          <div className="flex flex-wrap gap-4">
+            <div className="flex-1 min-w-[200px] space-y-2">
+              <p className="text-xs text-gray-400">New max LR</p>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min="1e-6"
+                  step="any"
+                  placeholder="e.g. 1e-4"
+                  value={newMaxLr}
+                  onChange={(e) => {
+                    setNewMaxLr(e.target.value);
+                    setRuntimeConfigStatus('idle');
+                  }}
+                  className="flex-1 rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+                />
+                <button
+                  type="button"
+                  onClick={handleApplyRuntimeMaxLr}
+                  disabled={runtimeConfigStatus === 'loading' || !newMaxLr.trim()}
+                  className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {runtimeConfigStatus === 'loading' ? '…' : 'Apply'}
+                </button>
+              </div>
+              {runtimeConfigStatus === 'success' && (
+                <p className="text-xs text-green-500">Applied.</p>
+              )}
+              {runtimeConfigStatus === 'error' && (
+                <p className="text-xs text-rose-500">Failed to apply.</p>
+              )}
             </div>
-            {runtimeConfigStatus === 'success' && (
-              <p className="text-xs text-green-500">Applied.</p>
-            )}
-            {runtimeConfigStatus === 'error' && (
-              <p className="text-xs text-rose-500">Failed to apply.</p>
-            )}
+            <div className="flex-1 min-w-[200px] space-y-2">
+              <p className="text-xs text-gray-400">New weight decay</p>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min="0"
+                  step="any"
+                  placeholder="e.g. 0.01 or 0"
+                  value={newWeightDecay}
+                  onChange={(e) => {
+                    setNewWeightDecay(e.target.value);
+                    setRuntimeConfigStatus('idle');
+                  }}
+                  className="flex-1 rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+                />
+                <button
+                  type="button"
+                  onClick={handleApplyRuntimeWeightDecay}
+                  disabled={runtimeConfigStatus === 'loading' || !newWeightDecay.trim()}
+                  className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {runtimeConfigStatus === 'loading' ? '…' : 'Apply'}
+                </button>
+              </div>
+            </div>
           </div>
 
           {/* Runtime Gaussian mean / std */}
@@ -290,33 +313,6 @@ export default function JobOverview({ job }: JobOverviewProps) {
                 type="button"
                 onClick={handleApplyRuntimeGaussian}
                 disabled={runtimeConfigStatus === 'loading' || (!newGaussianMean.trim() && !newGaussianStd.trim())}
-                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {runtimeConfigStatus === 'loading' ? '…' : 'Apply'}
-              </button>
-            </div>
-          </div>
-
-          {/* Runtime weight decay */}
-          <div className="space-y-2">
-            <p className="text-xs text-gray-400">New weight decay</p>
-            <div className="flex items-center gap-2">
-              <input
-                type="number"
-                min="0"
-                step="any"
-                placeholder="e.g. 0.01 or 0"
-                value={newWeightDecay}
-                onChange={(e) => {
-                  setNewWeightDecay(e.target.value);
-                  setRuntimeConfigStatus('idle');
-                }}
-                className="flex-1 rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
-              />
-              <button
-                type="button"
-                onClick={handleApplyRuntimeWeightDecay}
-                disabled={runtimeConfigStatus === 'loading' || !newWeightDecay.trim()}
                 className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {runtimeConfigStatus === 'loading' ? '…' : 'Apply'}
