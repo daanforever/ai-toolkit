@@ -43,7 +43,8 @@ class Adafactor(torch.optim.Optimizer):
         weight_decay (`float`, *optional*, defaults to 0.0):
             Weight decay (L2 penalty)
         scale_parameter (`bool`, *optional*, defaults to `True`):
-            If True, learning rate is scaled by root mean square
+            If True, learning rate is scaled by root mean square.
+            Scaling is stronger when update magnitude is large (to protect small parameters).
         relative_step (`bool`, *optional*, defaults to `True`):
             If True, time-dependent learning rate is computed instead of external learning rate
         warmup_init (`bool`, *optional*, defaults to `False`):
@@ -284,8 +285,8 @@ class Adafactor(torch.optim.Optimizer):
             else:
                 new_lr = (1.0 - activity) * min_lr + activity * max_lr
 
-            # param_scale influence: weaker at high activity, stronger at low activity
-            effective_scale = (1.0 - activity) * param_scale + activity * 1.0
+            # param_scale influence: stronger at high activity, weaker at low activity (protect small weights on big updates)
+            effective_scale = activity * param_scale + (1.0 - activity) * 1.0
             new_lr = new_lr * effective_scale
 
             if param_group.get("warmup_init", False):
