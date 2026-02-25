@@ -838,6 +838,23 @@ class SDTrainer(BaseSDTrainProcess):
                 elif len(loss.shape) == 5:
                     timestep_weight = timestep_weight.view(-1, 1, 1, 1, 1).detach()
                 loss = loss * timestep_weight
+            elif self.train_config.timestep_type == "gaussian":
+                mu = self.train_config.gaussian_mean       # default 0.5
+                sigma = self.train_config.gaussian_std      # default 0.2
+                # Invert so the scale matches content_or_style=='gaussian' sampling:
+                #   gaussian_mean=0.0 → peak at timestep 1000 (most noise)
+                #   gaussian_mean=0.5 → peak at timestep  500
+                #   gaussian_mean=1.0 → peak at timestep    1 (least noise)
+                t = 1.0 - (timesteps.float() / 1000.0)
+                raw_weight = torch.exp(-0.5 * ((t - mu) / sigma) ** 2)
+                t_all = torch.linspace(0.0, 1.0, 1000, device=timesteps.device)
+                mean_w = torch.exp(-0.5 * ((t_all - mu) / sigma) ** 2).mean().clamp(min=1e-8)
+                timestep_weight = (raw_weight / mean_w).to(loss.device, dtype=loss.dtype)
+                if len(loss.shape) == 4:
+                    timestep_weight = timestep_weight.view(-1, 1, 1, 1).detach()
+                elif len(loss.shape) == 5:
+                    timestep_weight = timestep_weight.view(-1, 1, 1, 1, 1).detach()
+                loss = loss * timestep_weight
             elif self.train_config.content_or_style == 'fixed_cycle' and self.train_config.fixed_cycle_weight_peak_timesteps:
                 # fixed_cycle: weight loss by Gaussian peaks at fixed_cycle_weight_peak_timesteps (e.g. 500, 375), mean-normalized
                 peaks = self.train_config.fixed_cycle_weight_peak_timesteps

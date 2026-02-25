@@ -40,6 +40,7 @@ export default function JobOverview({ job }: JobOverviewProps) {
     { value: 'linear', label: 'Linear' },
     { value: 'shift', label: 'Shift' },
     { value: 'weighted', label: 'Weighted' },
+    { value: 'gaussian', label: 'Gaussian' },
   ];
 
   const { gpuList, isGPUInfoLoaded } = useGPUInfo(gpuIds, 5000);

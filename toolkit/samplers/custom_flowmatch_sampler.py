@@ -168,7 +168,7 @@ class CustomFlowMatchEulerDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
         patch_size=1
     ):
         self.timestep_type = timestep_type
-        if timestep_type == 'linear' or timestep_type == 'weighted':
+        if timestep_type in ('linear', 'weighted', 'gaussian'):
             timesteps = torch.linspace(1000, 1, num_timesteps, device=device)
             self.timesteps = timesteps
             return timesteps
