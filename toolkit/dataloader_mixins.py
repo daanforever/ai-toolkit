@@ -2064,6 +2064,8 @@ class TextEmbeddingCachingMixin:
 
             if K > 1 and not self.dataset_config.shuffle_tokens:
                 K = 1
+            # Cap K by configurable limit (path hash and epoch-based variant selection use this same value).
+            K = min(K, self.dataset_config.shuffle_tokens_cap)
             self.dataset_config._effective_shuffle_cache_variants = K
 
             did_move = False

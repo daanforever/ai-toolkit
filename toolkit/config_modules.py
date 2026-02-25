@@ -891,6 +891,8 @@ class DatasetConfig:
         self.token_dropout_rate: float = float(kwargs.get('token_dropout_rate', 0.0))
         self.shuffle_tokens: bool = kwargs.get('shuffle_tokens', False)
         self.shuffle_tokens_keep: int = kwargs.get('shuffle_tokens_keep', 1)  # number of first tokens to keep fixed when shuffling
+        # Max number of caption permutation variants to cache. Default 24 = 4! (natural upper bound for typical 4 comma-segments after keep_n; larger values add little diversity while growing cache).
+        self.shuffle_tokens_cap: int = max(1, kwargs.get('shuffle_tokens_cap', 24))
         self.caption_dropout_rate: float = float(kwargs.get('caption_dropout_rate', 0.0))
         self.keep_tokens: int = kwargs.get('keep_tokens', 0)  # #of first tokens to always keep unless caption dropped
         self.flip_x: bool = kwargs.get('flip_x', False)
