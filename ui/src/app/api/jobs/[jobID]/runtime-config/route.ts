@@ -28,7 +28,7 @@ export async function PATCH(
   }
 
   const CONTENT_OR_STYLE_VALUES = ['balanced', 'content', 'style', 'gaussian', 'fixed_cycle'] as const;
-  const TIMESTEP_TYPE_VALUES = ['sigmoid', 'linear', 'shift', 'weighted'] as const;
+  const TIMESTEP_TYPE_VALUES = ['sigmoid', 'linear', 'shift', 'weighted', 'gaussian'] as const;
 
   const data: { runtime_max_lr?: number; runtime_gaussian_mean?: number; runtime_gaussian_std?: number; runtime_weight_decay?: number; runtime_content_or_style?: string; runtime_timestep_type?: string } = {};
 
@@ -91,7 +91,7 @@ export async function PATCH(
   if (timestepType !== undefined) {
     if (typeof timestepType !== 'string' || !TIMESTEP_TYPE_VALUES.includes(timestepType)) {
       return NextResponse.json(
-        { error: 'timestep_type must be one of: sigmoid, linear, shift, weighted' },
+        { error: 'timestep_type must be one of: sigmoid, linear, shift, weighted, gaussian' },
         { status: 400 }
       );
     }
