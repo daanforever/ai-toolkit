@@ -15,7 +15,7 @@ from toolkit.samplers.custom_flowmatch_sampler import (
 )
 from toolkit.accelerator import unwrap_model
 from optimum.quanto import freeze
-from toolkit.util.debug import memory_debug
+from toolkit.util.debug import memory_debug, is_debug_enabled
 from toolkit.util.quantize import quantize, get_qtype, quantize_model
 from toolkit.util.device import safe_module_to_device
 from toolkit.memory_management import MemoryManager
@@ -42,7 +42,7 @@ scheduler_config = {
     "shift": 3.0,
 }
 
-# Set when safetensors patches are applied for debug_zimage_load (avoid double-wrap)
+# Set when safetensors patches are applied for debug (avoid double-wrap)
 _zimage_load_debug_patched = False
 
 
@@ -258,7 +258,7 @@ class ZImageModel(BaseModel):
         self.print_and_status_update("Loading ZImage model")
         model_path = normalize_path(self.model_config.name_or_path)
 
-        if self.model_config.debug_zimage_load and not _zimage_load_debug_patched:
+        if is_debug_enabled() and not _zimage_load_debug_patched:
             log_func = self.print_and_status_update
             orig_load_file = safetensors.torch.load_file
             orig_safe_open = safetensors.safe_open
@@ -304,12 +304,15 @@ class ZImageModel(BaseModel):
             safetensors.safe_open = _wrapped_safe_open
             _zimage_load_debug_patched = True
 
-        if self.model_config.debug_zimage_load:
-            self.print_and_status_update("[ZImage debug] === Loading sampling transformer (from_pretrained) ===")
-        # Load sampling transformer first (if configured) to control peak VRAM
-        with memory_debug(self.print_and_status_update, "Loading sampling transformer"):
-            self._sampling_transformer = self._load_sampling_transformer()
-        if self.model_config.debug_zimage_load:
+        # Load sampling transformer first only when configured (to control peak VRAM when used)
+        if self.model_config.sampling_name_or_path is not None:
+            if is_debug_enabled():
+                self.print_and_status_update("[ZImage debug] === Loading sampling transformer (from_pretrained) ===")
+            with memory_debug(self.print_and_status_update, "Loading sampling transformer"):
+                self._sampling_transformer = self._load_sampling_transformer()
+        else:
+            self._sampling_transformer = None
+        if is_debug_enabled():
             self.print_and_status_update("[ZImage debug] === Loading main transformer (from_pretrained) ===")
         with memory_debug(self.print_and_status_update, "Loading transformer"):
             transformer, base_model_path = self._load_transformer(model_path)
