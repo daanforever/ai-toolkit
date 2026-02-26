@@ -120,7 +120,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         gaussian_mean?: number;
         gaussian_std?: number;
       } = {
-        weight_decay,
+        weight_decay: weightDecay,
         content_or_style: contentOrStyle,
         timestep_type: timestepType,
         gaussian_mean: gaussianMean,
