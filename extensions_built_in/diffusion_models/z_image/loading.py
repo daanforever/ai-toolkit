@@ -7,7 +7,7 @@ import gc
 import json
 import os
 import time
-from typing import List, Optional
+from typing import List, Optional, Union
 
 import torch
 from accelerate import init_empty_weights
@@ -23,6 +23,7 @@ def load_zimage_transformer_from_shards(
     *,
     subfolder: Optional[str] = None,
     torch_dtype: Optional[torch.dtype] = None,
+    device: Optional[Union[str, torch.device]] = None,
     **kwargs,
 ) -> ZImageTransformer2DModel:
     """
@@ -30,6 +31,9 @@ def load_zimage_transformer_from_shards(
 
     Uses meta device and load_model_dict_into_meta per shard (same as from_pretrained
     with low_cpu_mem_usage), so peak RAM is on the order of one shard, not model + shard.
+
+    If device is set (e.g. "cuda" or torch.device("cuda:0")), weights are loaded directly
+    onto that device instead of CPU.
 
     Supports only local paths. For Hub model IDs use ZImageTransformer2DModel.from_pretrained.
     """
@@ -83,6 +87,11 @@ def load_zimage_transformer_from_shards(
         with init_empty_weights():
             model = ZImageTransformer2DModel.from_config(config)
 
+    # Build device_map for load_model_dict_into_meta (root "" = whole model on one device)
+    device_map = None
+    if device is not None:
+        device_map = {"": device if isinstance(device, torch.device) else torch.device(device)}
+
     # 4) Load weights per shard via load_model_dict_into_meta
     if len(shard_paths) > 1:
         shard_iter = diffusers_logging.tqdm(shard_paths, desc="Loading checkpoint shards")
@@ -96,7 +105,7 @@ def load_zimage_transformer_from_shards(
             model,
             state_dict,
             dtype=torch_dtype,
-            device_map=None,
+            device_map=device_map,
         )
         del state_dict
         gc.collect()

@@ -180,6 +180,7 @@ class ZImageModel(BaseModel):
                 sampling_transformer_path,
                 subfolder=sampling_transformer_subfolder,
                 torch_dtype=dtype,
+                device=self.device_torch,
             )
         except ValueError:
             # Fallback for Hub model IDs (loader supports local paths only)
