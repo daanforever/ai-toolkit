@@ -52,7 +52,7 @@ from toolkit.sd_device_states_presets import get_train_sd_device_state_preset
 from toolkit.stable_diffusion_model import StableDiffusion
 
 from jobs.process import BaseTrainProcess
-from extensions_built_in.sd_trainer.gaussian_timestep_weights import get_gaussian_timestep_weights
+from extensions_built_in.sd_trainer.gaussian_timestep_weights import evaluate_gaussian_timestep
 from toolkit.metadata import get_meta_for_safetensors, load_metadata_from_safetensors, add_base_model_info_to_meta, \
     parse_metadata_from_safetensors
 from toolkit.train_tools import get_torch_dtype, LearnableSNRGamma, apply_learnable_snr_gos, apply_snr_weight
@@ -1279,8 +1279,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     timestep_indices.sort()
                     
                 elif content_or_style == 'gaussian':
-                    # Gaussian (normal) distribution via get_gaussian_timestep_weights (t = timestep/ntt, no inversion)
-                    # gaussian_mean: center in [0,1]; gaussian_std: spread. Curriculum: gaussian_std_target.
+                    # Gaussian (normal) distribution; gaussian_mean in [0,1] is timestep value space. Curriculum: gaussian_std_target.
                     ntt = self.train_config.num_train_timesteps
                     if self.train_config.gaussian_std_target is not None:
                         progress = self.step_num / self.train_config.steps
@@ -1291,13 +1290,14 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     allowed_start = ntt - max_noise_steps
                     allowed_end = ntt - min_noise_steps
                     all_indices = torch.arange(allowed_start, allowed_end + 1, device=latents.device, dtype=torch.long)
-                    weights = get_gaussian_timestep_weights(
+                    weights = evaluate_gaussian_timestep(
                         all_indices,
                         self.train_config.gaussian_mean,
                         current_std,
                         latents.device,
                         torch.float32,
                         ntt,
+                        scheduler_timesteps=self.sd.noise_scheduler.timesteps,
                     )
                     probs = weights / weights.sum().clamp(min=1e-8)
                     sampled_idx = torch.multinomial(probs, batch_size, replacement=True)

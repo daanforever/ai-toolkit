@@ -37,7 +37,7 @@ from toolkit.train_tools import precondition_model_outputs_flow_match
 from toolkit.models.diffusion_feature_extraction import DiffusionFeatureExtractor, load_dfe
 from toolkit.util.debug import memory_debug, is_debug_enabled
 from toolkit.util.losses import wavelet_loss, stepped_loss
-from extensions_built_in.sd_trainer.gaussian_timestep_weights import get_gaussian_timestep_weights
+from extensions_built_in.sd_trainer.gaussian_timestep_weights import evaluate_gaussian_timestep
 import torch.nn.functional as F
 from toolkit.unloader import unload_text_encoder
 from PIL import Image
@@ -841,7 +841,7 @@ class SDTrainer(BaseSDTrainProcess):
                 loss = loss * timestep_weight
             elif self.train_config.timestep_type == "gaussian":
                 ntt = self.sd.noise_scheduler.config.num_train_timesteps
-                timestep_weight = get_gaussian_timestep_weights(
+                timestep_weight = evaluate_gaussian_timestep(
                     timesteps,
                     self.train_config.gaussian_mean,
                     self.train_config.gaussian_std,
