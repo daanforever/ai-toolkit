@@ -11,14 +11,15 @@ import { redirect } from 'next/navigation';
 import JobActionBar from '@/components/JobActionBar';
 import JobConfigViewer from '@/components/JobConfigViewer';
 import JobLossGraph from '@/components/JobLossGraph';
+import JobRuntimeConfig from '@/components/JobRuntimeConfig';
 import { Job } from '@prisma/client';
 
-type PageKey = 'overview' | 'samples' | 'config' | 'loss_log';
+type PageKey = 'overview' | 'samples' | 'runtime' | 'config' | 'loss_log';
 
 interface Page {
   name: string;
   value: PageKey;
-  component: React.ComponentType<{ job: Job }>;
+  component: React.ComponentType<{ job: Job; onRefresh?: () => void }>;
   menuItem?: React.ComponentType<{ job?: Job | null }> | null;
   mainCss?: string;
 }
@@ -35,6 +36,12 @@ const pages: Page[] = [
     value: 'samples',
     component: SampleImages,
     menuItem: SampleImagesMenu,
+    mainCss: 'pt-24',
+  },
+  {
+    name: 'Runtime',
+    value: 'runtime',
+    component: JobRuntimeConfig,
     mainCss: 'pt-24',
   },
   {
@@ -91,7 +98,13 @@ export default function JobPage({ params }: { params: { jobID: string } }) {
           <>
             {pages.map(page => {
               const Component = page.component;
-              return page.value === pageKey ? <Component key={page.value} job={job} /> : null;
+              return page.value === pageKey ? (
+                <Component
+                  key={page.value}
+                  job={job}
+                  onRefresh={page.value === 'runtime' ? refreshJob : undefined}
+                />
+              ) : null;
             })}
           </>
         )}
