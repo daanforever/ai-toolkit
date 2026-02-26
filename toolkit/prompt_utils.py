@@ -1,8 +1,9 @@
 import os
+import warnings
 from typing import Optional, TYPE_CHECKING, List, Union, Tuple
 
 import torch
-from safetensors.torch import load_file, save_file
+from safetensors.torch import load_file, save_file, safe_open
 from tqdm import tqdm
 import random
 
@@ -117,8 +118,14 @@ class PromptEmbeds:
     def save(self, path: str):
         """
         Save the prompt embeds to a file.
+        Deprecated: use save_multi() with a single-item list and requested_variants=1.
         :param path: The path to save the prompt embeds.
         """
+        warnings.warn(
+            "PromptEmbeds.save() is deprecated; use PromptEmbeds.save_multi(path, [embeds], requested_variants=1) instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         pe = self.clone()
         state_dict = {}
         if isinstance(pe.text_embeds, list) or isinstance(pe.text_embeds, tuple):
@@ -139,8 +146,8 @@ class PromptEmbeds:
         save_file(state_dict, path)
 
     @classmethod
-    def save_multi(cls, path: str, embeds_list: List['PromptEmbeds']) -> None:
-        """Save multiple PromptEmbeds variants to one file (keys v0_*, v1_*, ..., num_variants)."""
+    def save_multi(cls, path: str, embeds_list: List['PromptEmbeds'], requested_variants: int) -> None:
+        """Save multiple PromptEmbeds variants to one file (keys v0_*, v1_*, ..., num_variants, requested_variants)."""
         state_dict = {}
         for vi, pe in enumerate(embeds_list):
             pe = pe.clone()
@@ -159,23 +166,43 @@ class PromptEmbeds:
                 else:
                     state_dict[f"{prefix}attention_mask"] = pe.attention_mask.cpu()
         state_dict["num_variants"] = torch.tensor([len(embeds_list)], dtype=torch.long)
+        state_dict["requested_variants"] = torch.tensor([requested_variants], dtype=torch.long)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         save_file(state_dict, path)
+
+    @classmethod
+    def get_cache_metadata_from_file(cls, path: str) -> Tuple[int, int]:
+        """Read (num_variants, requested_variants) from file without loading embed tensors. Returns (0, 0) if invalid."""
+        try:
+            with safe_open(path, framework="pt", device="cpu") as f:
+                keys = set(f.keys())
+                if "num_variants" not in keys or "requested_variants" not in keys:
+                    return (0, 0)
+                num_variants = f.get_tensor("num_variants").item()
+                requested_variants = f.get_tensor("requested_variants").item()
+                return (num_variants, requested_variants)
+        except Exception:
+            return (0, 0)
 
     @classmethod
     def load(cls, path: str, variant_index: int = 0) -> 'PromptEmbeds':
         """
         Load the prompt embeds from a file.
+        Valid file must contain both "num_variants" and "requested_variants" (save_multi format).
         :param path: The path to load the prompt embeds from.
-        :param variant_index: For multi-variant files (v0_*, v1_*, ...), load this variant. Ignored for single-variant format.
+        :param variant_index: For multi-variant files (v0_*, v1_*, ...), load this variant.
         :return: An instance of PromptEmbeds.
         """
         state_dict = load_file(path, device='cpu')
-        if "num_variants" in state_dict or any(k.startswith("v0_") for k in state_dict.keys()):
-            num_variants = state_dict["num_variants"].item() if "num_variants" in state_dict else 1
-            variant_index = min(variant_index, max(0, num_variants - 1))
-            prefix = f"v{variant_index}_"
-            state_dict = {k[len(prefix):]: v for k, v in state_dict.items() if k.startswith(prefix)}
+        if "num_variants" not in state_dict or "requested_variants" not in state_dict:
+            raise ValueError(
+                f"Invalid text embedding cache: {path} missing 'num_variants' or 'requested_variants'. "
+                "Re-run with cache_text_embeddings to recreate."
+            )
+        num_variants = state_dict["num_variants"].item()
+        variant_index = min(variant_index, max(0, num_variants - 1))
+        prefix = f"v{variant_index}_"
+        state_dict = {k[len(prefix):]: v for k, v in state_dict.items() if k.startswith(prefix)}
         text_embeds = []
         pooled_embeds = None
         attention_mask = []

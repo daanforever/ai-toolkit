@@ -1984,7 +1984,6 @@ class TextEmbeddingFileItemDTOMixin:
             ("caption", self.caption),
             ("text_embedding_space_version", self.text_embedding_space_version),
             ("text_embedding_version", self.text_embedding_version),
-            ("shuffle_cache_variants", getattr(self.dataset_config, '_effective_shuffle_cache_variants', 1)),
         ])
         # if we have a control image, cache the path
         if self.encode_control_in_text_embeddings and self.control_path is not None:
@@ -2076,9 +2075,14 @@ class TextEmbeddingCachingMixin:
                 file_item.latent_load_device = self.sd.device
 
                 text_embedding_path = file_item.get_text_embedding_path(recalculate=True)
-                # only process if not saved to disk
+                if os.path.exists(text_embedding_path):
+                    M, R = PromptEmbeds.get_cache_metadata_from_file(text_embedding_path)
+                    if M < K and R < K:
+                        try:
+                            os.remove(text_embedding_path)
+                        except OSError:
+                            pass
                 if not os.path.exists(text_embedding_path):
-                    # load if not loaded
                     if not did_move:
                         self.sd.set_device_state_preset('cache_text_encoder')
                         did_move = True
@@ -2113,7 +2117,7 @@ class TextEmbeddingCachingMixin:
                             ctrl_img = ctrl_img_list
                         if K == 1:
                             prompt_embeds: PromptEmbeds = self.sd.encode_prompt(file_item.caption, control_images=ctrl_img)
-                            prompt_embeds.save(text_embedding_path)
+                            PromptEmbeds.save_multi(text_embedding_path, [prompt_embeds], requested_variants=K)
                             del prompt_embeds
                         else:
                             embeds_list = []
@@ -2124,14 +2128,14 @@ class TextEmbeddingCachingMixin:
                                     keep_n=getattr(file_item.dataset_config, 'shuffle_tokens_keep', 1),
                                 )
                                 embeds_list.append(self.sd.encode_prompt(caption_shuffled, control_images=ctrl_img))
-                            PromptEmbeds.save_multi(text_embedding_path, embeds_list)
+                            PromptEmbeds.save_multi(text_embedding_path, embeds_list, requested_variants=K)
                             for pe in embeds_list:
                                 del pe
                             embeds_list.clear()
                     else:
                         if K == 1:
                             prompt_embeds: PromptEmbeds = self.sd.encode_prompt(file_item.caption)
-                            prompt_embeds.save(text_embedding_path)
+                            PromptEmbeds.save_multi(text_embedding_path, [prompt_embeds], requested_variants=K)
                             del prompt_embeds
                         else:
                             unique_captions = _get_unique_caption_permutations(
@@ -2143,7 +2147,7 @@ class TextEmbeddingCachingMixin:
                             embeds_list = []
                             for caption_text in captions_to_encode:
                                 embeds_list.append(self.sd.encode_prompt(caption_text))
-                            PromptEmbeds.save_multi(text_embedding_path, embeds_list)
+                            PromptEmbeds.save_multi(text_embedding_path, embeds_list, requested_variants=K)
                             for pe in embeds_list:
                                 del pe
                             embeds_list.clear()

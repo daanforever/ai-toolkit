@@ -241,7 +241,7 @@ class SDTrainer(BaseSDTrainProcess):
                     positive = self.sd.encode_prompt(gen_img_config.prompt).to('cpu')
                     negative = self.sd.encode_prompt(gen_img_config.negative_prompt).to('cpu')
                 
-                PromptEmbeds.save_multi(path, [positive, negative])
+                PromptEmbeds.save_multi(path, [positive, negative], requested_variants=2)
                 if is_debug_enabled():
                     print_acc(f"sample_prompts_cache: saved [{i}] {path}")
                 self.sd.sample_prompts_cache.append(path)
