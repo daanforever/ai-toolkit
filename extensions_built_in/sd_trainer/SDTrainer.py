@@ -37,6 +37,7 @@ from toolkit.train_tools import precondition_model_outputs_flow_match
 from toolkit.models.diffusion_feature_extraction import DiffusionFeatureExtractor, load_dfe
 from toolkit.util.debug import memory_debug, is_debug_enabled
 from toolkit.util.losses import wavelet_loss, stepped_loss
+from extensions_built_in.sd_trainer.gaussian_timestep_weights import get_gaussian_timestep_weights
 import torch.nn.functional as F
 from toolkit.unloader import unload_text_encoder
 from PIL import Image
@@ -839,17 +840,15 @@ class SDTrainer(BaseSDTrainProcess):
                     timestep_weight = timestep_weight.view(-1, 1, 1, 1, 1).detach()
                 loss = loss * timestep_weight
             elif self.train_config.timestep_type == "gaussian":
-                mu = self.train_config.gaussian_mean       # default 0.5
-                sigma = self.train_config.gaussian_std      # default 0.2
-                # Invert so the scale matches content_or_style=='gaussian' sampling:
-                #   gaussian_mean=0.0 → peak at timestep 1000 (most noise)
-                #   gaussian_mean=0.5 → peak at timestep  500
-                #   gaussian_mean=1.0 → peak at timestep    1 (least noise)
-                t = 1.0 - (timesteps.float() / 1000.0)
-                raw_weight = torch.exp(-0.5 * ((t - mu) / sigma) ** 2)
-                t_all = torch.linspace(0.0, 1.0, 1000, device=timesteps.device)
-                mean_w = torch.exp(-0.5 * ((t_all - mu) / sigma) ** 2).mean().clamp(min=1e-8)
-                timestep_weight = (raw_weight / mean_w).to(loss.device, dtype=loss.dtype)
+                ntt = self.sd.noise_scheduler.config.num_train_timesteps
+                timestep_weight = get_gaussian_timestep_weights(
+                    timesteps,
+                    self.train_config.gaussian_mean,
+                    self.train_config.gaussian_std,
+                    loss.device,
+                    loss.dtype,
+                    ntt,
+                )
                 if len(loss.shape) == 4:
                     timestep_weight = timestep_weight.view(-1, 1, 1, 1).detach()
                 elif len(loss.shape) == 5:

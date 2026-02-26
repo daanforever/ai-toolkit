@@ -52,6 +52,7 @@ from toolkit.sd_device_states_presets import get_train_sd_device_state_preset
 from toolkit.stable_diffusion_model import StableDiffusion
 
 from jobs.process import BaseTrainProcess
+from extensions_built_in.sd_trainer.gaussian_timestep_weights import get_gaussian_timestep_weights
 from toolkit.metadata import get_meta_for_safetensors, load_metadata_from_safetensors, add_base_model_info_to_meta, \
     parse_metadata_from_safetensors
 from toolkit.train_tools import get_torch_dtype, LearnableSNRGamma, apply_learnable_snr_gos, apply_snr_weight
@@ -1278,74 +1279,29 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     timestep_indices.sort()
                     
                 elif content_or_style == 'gaussian':
-                    # Gaussian (normal) distribution with configurable mean and std
-                    # gaussian_mean: controls the center of distribution (default 0.5)
-                    #   - Lower values (0.0-0.5): favor earlier timesteps (more noise)
-                    #   - Higher values (0.5-1.0): favor later timesteps (less noise)
-                    # gaussian_std: controls the spread of distribution (default 0.2)
-                    #   - Affects the shape: smaller = narrower, larger = wider
-                    
-                    # Curriculum learning: linearly interpolate gaussian_std if target is set
+                    # Gaussian (normal) distribution via get_gaussian_timestep_weights (t = timestep/ntt, no inversion)
+                    # gaussian_mean: center in [0,1]; gaussian_std: spread. Curriculum: gaussian_std_target.
+                    ntt = self.train_config.num_train_timesteps
                     if self.train_config.gaussian_std_target is not None:
                         progress = self.step_num / self.train_config.steps
                         current_std = self.train_config.gaussian_std + progress * (self.train_config.gaussian_std_target - self.train_config.gaussian_std)
                     else:
                         current_std = self.train_config.gaussian_std
-                    
-                    def truncated_normal_samples(batch_size, mu, sigma, device, low=0.0, high=1.0):
-                        # Convert mu and sigma to tensors to ensure all operations are handled by PyTorch
-                        # and to avoid TypeErrors with torch.special functions
-                        mu = torch.as_tensor(mu, device=device, dtype=torch.float32)
-                        sigma = torch.as_tensor(sigma, device=device, dtype=torch.float32)
 
-                        # Standardize the boundaries (calculate z-scores)
-                        alpha = (low - mu) / sigma
-                        beta = (high - mu) / sigma
-
-                        # Calculate Cumulative Distribution Function (CDF) values for the boundaries
-                        cdf_low = torch.special.ndtr(alpha)
-                        cdf_high = torch.special.ndtr(beta)
-
-                        # Generate uniform random samples in the [0, 1] range
-                        u = torch.rand((batch_size,), device=device)
-
-                        # Linearly interpolate between the boundary CDF values
-                        v = cdf_low + u * (cdf_high - cdf_low)
-
-                        # Clamp values to avoid numerical instability (infinities) when calling ndtri
-                        v = v.clamp(1e-7, 1 - 1e-7)
-
-                        # Apply the Inverse CDF (Quantile function) to transform samples to the truncated normal distribution
-                        samples = mu + sigma * torch.special.ndtri(v)
-                        
-                        return samples
-
-                    gaussian_samples = truncated_normal_samples(
-                        batch_size,
+                    allowed_start = ntt - max_noise_steps
+                    allowed_end = ntt - min_noise_steps
+                    all_indices = torch.arange(allowed_start, allowed_end + 1, device=latents.device, dtype=torch.long)
+                    weights = get_gaussian_timestep_weights(
+                        all_indices,
                         self.train_config.gaussian_mean,
                         current_std,
-                        latents.device
-                    )
-
-                    # Scale to num_train_timesteps
-                    timestep_indices = gaussian_samples * self.train_config.num_train_timesteps
-
-                    ntt = self.train_config.num_train_timesteps
-
-                    # Map to min/max_noise_steps range (same as content/style)
-                    timestep_indices = value_map(
-                        timestep_indices,
-                        0,
+                        latents.device,
+                        torch.float32,
                         ntt,
-                        ntt - max_noise_steps,
-                        ntt - min_noise_steps
                     )
-
-                    timestep_indices = timestep_indices.long().clamp(
-                        ntt - max_noise_steps,
-                        ntt - min_noise_steps
-                    )
-
+                    probs = weights / weights.sum().clamp(min=1e-8)
+                    sampled_idx = torch.multinomial(probs, batch_size, replacement=True)
+                    timestep_indices = all_indices[sampled_idx]
                     timestep_indices.sort()
                     
                 elif content_or_style == 'fixed_cycle':
