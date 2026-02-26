@@ -163,7 +163,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
   if (!initialConfig) {
     return (
       <div className="p-6 text-gray-400">
-        Конфиг недоступен или повреждён.
+        Config is unavailable or corrupted.
       </div>
     );
   }
@@ -172,14 +172,14 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     <div className="max-w-2xl space-y-6 p-6">
       <h2 className="text-lg font-medium text-gray-200">Runtime config</h2>
       <p className="text-sm text-gray-400">
-        Значения загружаются из job_config. Apply сохраняет конфиг и сразу применяет параметры к запущенному джобу.
+        Values are loaded from job_config. Apply saves the config and immediately applies the parameters to the running job.
       </p>
 
       <div className="space-y-4">
-        {hasMaxLr && (
-          <div className="space-y-2">
-            <p className="text-xs text-gray-400">Max LR</p>
-            <div className="flex items-center gap-2">
+        <div className="flex items-end gap-4 flex-wrap">
+          {hasMaxLr && (
+            <div className="space-y-2 flex-1 min-w-[140px]">
+              <p className="text-xs text-gray-400">Max LR</p>
               <input
                 type="number"
                 min={1e-6}
@@ -192,27 +192,26 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
                   setValue(num != null && Number.isFinite(num) ? num : undefined, 'config.process[0].train.optimizer_params.max_lr');
                   setApplyStatus('idle');
                 }}
-                className="flex-1 rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+                className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
               />
             </div>
+          )}
+          <div className="space-y-2 flex-1 min-w-[140px]">
+            <p className="text-xs text-gray-400">Weight decay</p>
+            <input
+              type="number"
+              min={0}
+              step="any"
+              placeholder="e.g. 0.01 or 0"
+              value={weightDecay}
+              onChange={(e) => {
+                const v = parseFloat(e.target.value);
+                if (Number.isFinite(v)) setValue(v, `${OPTIMIZER_PARAMS_PATH}.weight_decay`);
+                setApplyStatus('idle');
+              }}
+              className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+            />
           </div>
-        )}
-
-        <div className="space-y-2">
-          <p className="text-xs text-gray-400">Weight decay</p>
-          <input
-            type="number"
-            min={0}
-            step="any"
-            placeholder="e.g. 0.01 or 0"
-            value={weightDecay}
-            onChange={(e) => {
-              const v = parseFloat(e.target.value);
-              if (Number.isFinite(v)) setValue(v, `${OPTIMIZER_PARAMS_PATH}.weight_decay`);
-              setApplyStatus('idle');
-            }}
-            className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
-          />
         </div>
 
         <div className="space-y-2">
