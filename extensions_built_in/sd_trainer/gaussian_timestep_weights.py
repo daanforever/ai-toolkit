@@ -43,5 +43,5 @@ def get_gaussian_timestep_weights(timesteps, mu, sigma, device, dtype, num_train
         _cache = (ntt, mu, sigma, weights)
 
     _, _, _, cached_weights = _cache
-    idx = timesteps.long().clamp(0, ntt)
+    idx = timesteps.long().clamp(0, ntt).cpu()
     return cached_weights[idx].to(device=device, dtype=dtype)
