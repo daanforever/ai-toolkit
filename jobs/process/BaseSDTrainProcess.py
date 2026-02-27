@@ -2452,7 +2452,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
             loss_dict = None
             
             # Wrap first training step with memory debug
-            train_step_context = memory_debug(print_acc, "After first training step", kind="cuda") if step == start_step_num else contextlib.nullcontext()
+            train_step_context = memory_debug(print_acc, "After 10 training steps", kind="cuda") if step == (start_step_num + 10) else contextlib.nullcontext()
             with train_step_context:
                 try:
                     with self.accelerator.accumulate(self.modules_being_trained):
