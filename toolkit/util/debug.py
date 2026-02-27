@@ -145,7 +145,7 @@ def memory_debug(
         yield
     finally:
         if before_cuda is not None:
-            torch.cuda.synchronize()
+            # torch.cuda.synchronize()
             after_cuda = _cuda_snapshot_mb()
             for line in _format_cuda_diff(label, before_cuda, after_cuda):
                 print_fn(line)

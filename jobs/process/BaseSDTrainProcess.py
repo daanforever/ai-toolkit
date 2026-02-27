@@ -1,3 +1,4 @@
+import contextlib
 import copy
 import glob
 import inspect
@@ -2322,15 +2323,16 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
         self.lr_scheduler.step(self.step_num)
 
-        self.sd.set_device_state(self.train_device_state_preset)
-        flush()
-        # self.step_num = 0
+        with memory_debug(print_acc, "Before train loop (after set_device_state)", kind="cuda"):
+            self.sd.set_device_state(self.train_device_state_preset)
+            flush()
+            # self.step_num = 0
 
-        # print_acc(f"Compiling Model")
-        # torch.compile(self.sd.unet, dynamic=True)
+            # print_acc(f"Compiling Model")
+            # torch.compile(self.sd.unet, dynamic=True)
 
-        # make sure all params require grad
-        self.ensure_params_requires_grad(force=True)
+            # make sure all params require grad
+            self.ensure_params_requires_grad(force=True)
 
 
         ###################################################################
@@ -2358,82 +2360,86 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 self.sd.pipeline.enable_freeu(s1=0.9, s2=0.2, b1=1.1, b2=1.2)
             if self.progress_bar is not None:
                 self.progress_bar.unpause()
-            with torch.no_grad():
-                # if is even step and we have a reg dataset, use that
-                # todo improve this logic to send one of each through if we can buckets and batch size might be an issue
-                is_reg_step = False
-                is_save_step = self.save_config.save_every and self.step_num % self.save_config.save_every == 0
-                is_sample_step = self.sample_config.sample_every and self.step_num % self.sample_config.sample_every == 0
-                if self.train_config.disable_sampling:
-                    is_sample_step = False
+            
+            # Wrap batch fetching with memory debug on first step only
+            batch_fetch_context = memory_debug(print_acc, "First batch fetch", kind="cuda") if step == start_step_num else contextlib.nullcontext()
+            with batch_fetch_context:
+                with torch.no_grad():
+                    # if is even step and we have a reg dataset, use that
+                    # todo improve this logic to send one of each through if we can buckets and batch size might be an issue
+                    is_reg_step = False
+                    is_save_step = self.save_config.save_every and self.step_num % self.save_config.save_every == 0
+                    is_sample_step = self.sample_config.sample_every and self.step_num % self.sample_config.sample_every == 0
+                    if self.train_config.disable_sampling:
+                        is_sample_step = False
 
-                batch_list = []
+                    batch_list = []
 
-                for b in range(self.train_config.gradient_accumulation):
-                    # keep track to alternate on an accumulation step for reg   
-                    batch_step = step
-                    # don't do a reg step on sample or save steps as we dont want to normalize on those
-                    if batch_step % 2 == 0 and dataloader_reg is not None and not is_save_step and not is_sample_step:
-                        try:
-                            with self.timer('get_batch:reg'):
-                                batch = next(dataloader_iterator_reg)
-                        except StopIteration:
-                            with self.timer('reset_batch:reg'):
-                                # hit the end of an epoch, reset
+                    for b in range(self.train_config.gradient_accumulation):
+                        # keep track to alternate on an accumulation step for reg   
+                        batch_step = step
+                        # don't do a reg step on sample or save steps as we dont want to normalize on those
+                        if batch_step % 2 == 0 and dataloader_reg is not None and not is_save_step and not is_sample_step:
+                            try:
+                                with self.timer('get_batch:reg'):
+                                    batch = next(dataloader_iterator_reg)
+                            except StopIteration:
+                                with self.timer('reset_batch:reg'):
+                                    # hit the end of an epoch, reset
+                                    if self.progress_bar is not None:
+                                        self.progress_bar.pause()
+                                    dataloader_iterator_reg = iter(dataloader_reg)
+                                    trigger_dataloader_setup_epoch(dataloader_reg)
+
+                                with self.timer('get_batch:reg'):
+                                    batch = next(dataloader_iterator_reg)
                                 if self.progress_bar is not None:
-                                    self.progress_bar.pause()
-                                dataloader_iterator_reg = iter(dataloader_reg)
-                                trigger_dataloader_setup_epoch(dataloader_reg)
-
-                            with self.timer('get_batch:reg'):
-                                batch = next(dataloader_iterator_reg)
-                            if self.progress_bar is not None:
-                                self.progress_bar.unpause()
-                        is_reg_step = True
-                    elif dataloader is not None:
-                        try:
-                            with self.timer('get_batch'):
-                                batch = next(dataloader_iterator)
-                        except StopIteration:
-                            with self.timer('reset_batch'):
-                                # hit the end of an epoch, reset
+                                    self.progress_bar.unpause()
+                            is_reg_step = True
+                        elif dataloader is not None:
+                            try:
+                                with self.timer('get_batch'):
+                                    batch = next(dataloader_iterator)
+                            except StopIteration:
+                                with self.timer('reset_batch'):
+                                    # hit the end of an epoch, reset
+                                    if self.progress_bar is not None:
+                                        self.progress_bar.pause()
+                                    dataloader_iterator = iter(dataloader)
+                                    trigger_dataloader_setup_epoch(dataloader)
+                                    self.epoch_num += 1
+                                    print_acc(f"\nNew epoch {self.epoch_num}")
+                                    for dataset in get_dataloader_datasets(dataloader):
+                                        dataset.set_epoch_num(self.epoch_num)
+                                        clear_embeddings_cache = not getattr(dataset.dataset_config, 'cache_text_embeddings', False)
+                                        if clear_embeddings_cache:
+                                            dataset.clear_cached_embeddings_memory()
+                                    if self.train_config.gradient_accumulation_steps == -1:
+                                        # if we are accumulating for an entire epoch, trigger a step
+                                        self.is_grad_accumulation_step = False
+                                        self.grad_accumulation_step = 0
+                                with self.timer('get_batch'):
+                                    batch = next(dataloader_iterator)
                                 if self.progress_bar is not None:
-                                    self.progress_bar.pause()
-                                dataloader_iterator = iter(dataloader)
-                                trigger_dataloader_setup_epoch(dataloader)
-                                self.epoch_num += 1
-                                print_acc(f"\nNew epoch {self.epoch_num}")
-                                for dataset in get_dataloader_datasets(dataloader):
-                                    dataset.set_epoch_num(self.epoch_num)
-                                    clear_embeddings_cache = not getattr(dataset.dataset_config, 'cache_text_embeddings', False)
-                                    if clear_embeddings_cache:
-                                        dataset.clear_cached_embeddings_memory()
-                                if self.train_config.gradient_accumulation_steps == -1:
-                                    # if we are accumulating for an entire epoch, trigger a step
-                                    self.is_grad_accumulation_step = False
-                                    self.grad_accumulation_step = 0
-                            with self.timer('get_batch'):
-                                batch = next(dataloader_iterator)
-                            if self.progress_bar is not None:
-                                self.progress_bar.unpause()
+                                    self.progress_bar.unpause()
+                        else:
+                            batch = None
+                        batch_list.append(batch)
+                        batch_step += 1
+
+                    # setup accumulation
+                    if self.train_config.gradient_accumulation_steps == -1:
+                        # epoch is handling the accumulation, dont touch it
+                        pass
                     else:
-                        batch = None
-                    batch_list.append(batch)
-                    batch_step += 1
-
-                # setup accumulation
-                if self.train_config.gradient_accumulation_steps == -1:
-                    # epoch is handling the accumulation, dont touch it
-                    pass
-                else:
-                    # determine if we are accumulating or not
-                    # since optimizer step happens in the loop, we trigger it a step early
-                    # since we cannot reprocess it before them
-                    optimizer_step_at = self.train_config.gradient_accumulation_steps
-                    is_optimizer_step = self.grad_accumulation_step >= optimizer_step_at
-                    self.is_grad_accumulation_step = not is_optimizer_step
-                    if is_optimizer_step:
-                        self.grad_accumulation_step = 0
+                        # determine if we are accumulating or not
+                        # since optimizer step happens in the loop, we trigger it a step early
+                        # since we cannot reprocess it before them
+                        optimizer_step_at = self.train_config.gradient_accumulation_steps
+                        is_optimizer_step = self.grad_accumulation_step >= optimizer_step_at
+                        self.is_grad_accumulation_step = not is_optimizer_step
+                        if is_optimizer_step:
+                            self.grad_accumulation_step = 0
 
             # flush()
             ### HOOK ###
@@ -2444,16 +2450,20 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 optimizer.train()
             did_oom = False
             loss_dict = None
-            try:
-                with self.accelerator.accumulate(self.modules_being_trained):
-                    loss_dict = self.hook_train_loop(batch_list)
-            except torch.cuda.OutOfMemoryError:
-                did_oom = True
-            except RuntimeError as e:
-                if "CUDA out of memory" in str(e):
+            
+            # Wrap first training step with memory debug
+            train_step_context = memory_debug(print_acc, "After first training step", kind="cuda") if step == start_step_num else contextlib.nullcontext()
+            with train_step_context:
+                try:
+                    with self.accelerator.accumulate(self.modules_being_trained):
+                        loss_dict = self.hook_train_loop(batch_list)
+                except torch.cuda.OutOfMemoryError:
                     did_oom = True
-                else:
-                    raise  # not an OOM; surface real errors
+                except RuntimeError as e:
+                    if "CUDA out of memory" in str(e):
+                        did_oom = True
+                    else:
+                        raise  # not an OOM; surface real errors
             if did_oom:
                 self.num_consecutive_oom += 1
                 if self.num_consecutive_oom > 3:
