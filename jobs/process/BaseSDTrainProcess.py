@@ -1381,6 +1381,28 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         print_acc(f"\nFirst 10 timesteps (actual values after indexing):")
                         print_acc(f"{self._collected_timesteps[:10]}")
 
+                        weights_list = None
+                        if self.train_config.timestep_type == "gaussian":
+                            num_samples_val = threshold
+                            ntt = self.train_config.num_train_timesteps
+                            ts_tensor = torch.tensor(
+                                self._collected_timesteps[:num_samples_val],
+                                device=torch.device("cpu"),
+                                dtype=torch.long,
+                            )
+                            weights_tensor = evaluate_gaussian_timestep(
+                                ts_tensor,
+                                self.train_config.gaussian_mean,
+                                self.train_config.gaussian_std,
+                                torch.device("cpu"),
+                                torch.float32,
+                                ntt,
+                                scheduler_timesteps=None,
+                            )
+                            weights_list = weights_tensor.tolist()
+                            pairs_10 = list(zip(self._collected_timesteps[:10], weights_list[:10]))
+                            print_acc(f"\nFirst 10 (timestep, loss_weight): {pairs_10}")
+
                         print_acc(f"Config:")
                         print_acc(f"  content_or_style: {content_or_style}")
                         print_acc(f"  noise_scheduler: {self.train_config.noise_scheduler}")
@@ -1405,6 +1427,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         print_acc(f"\nStatistics ({num_samples} samples):")
                         print_acc(f"  Indices: max={indices_max}, mean={indices_mean:.1f}, min={indices_min}")
                         print_acc(f"  Timesteps: max={timesteps_max:.1f}, mean={timesteps_mean:.1f}, min={timesteps_min:.1f}")
+                        if weights_list is not None:
+                            weights_min = min(weights_list)
+                            weights_max = max(weights_list)
+                            weights_mean = sum(weights_list) / num_samples
+                            print_acc(f"  Loss weights: max={weights_max:.3f}, mean={weights_mean:.3f}, min={weights_min:.3f}")
                         if self.train_config.gaussian_std_target is not None:
                             progress = self.step_num / self.train_config.steps
                             current_std = self.train_config.gaussian_std + progress * (self.train_config.gaussian_std_target - self.train_config.gaussian_std)
