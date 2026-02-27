@@ -313,6 +313,7 @@ class ZImageModel(BaseModel):
                 self._sampling_transformer = self._load_sampling_transformer()
         else:
             self._sampling_transformer = None
+            
         if is_debug_enabled():
             self.print_and_status_update("[ZImage debug] === Loading main transformer (from_pretrained) ===")
         with memory_debug(self.print_and_status_update, "Loading transformer"):

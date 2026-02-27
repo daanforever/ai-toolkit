@@ -851,7 +851,6 @@ class SDTrainer(BaseSDTrainProcess):
                     loss.device,
                     loss.dtype,
                     ntt,
-                    scheduler_timesteps=self.sd.noise_scheduler.timesteps,
                 )
                 if len(loss.shape) == 4:
                     timestep_weight = timestep_weight.view(-1, 1, 1, 1).detach()

@@ -1291,14 +1291,14 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     allowed_start = ntt - max_noise_steps
                     allowed_end = ntt - min_noise_steps
                     all_indices = torch.arange(allowed_start, allowed_end + 1, device=latents.device, dtype=torch.long)
+                    all_timestep_values = self.sd.noise_scheduler.timesteps[all_indices]
                     weights = evaluate_gaussian_timestep(
-                        all_indices,
+                        all_timestep_values,
                         self.train_config.gaussian_mean,
                         current_std,
                         latents.device,
                         torch.float32,
                         ntt,
-                        scheduler_timesteps=self.sd.noise_scheduler.timesteps,
                     )
                     probs = weights / weights.sum().clamp(min=1e-8)
                     sampled_idx = torch.multinomial(probs, batch_size, replacement=True)
@@ -1398,7 +1398,6 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                 torch.device("cpu"),
                                 torch.float32,
                                 ntt,
-                                scheduler_timesteps=self.sd.noise_scheduler.timesteps,
                             )
                             weights_list = weights_tensor.tolist()
                             pairs_10 = list(zip(self._collected_timesteps[:10], weights_list[:10]))
