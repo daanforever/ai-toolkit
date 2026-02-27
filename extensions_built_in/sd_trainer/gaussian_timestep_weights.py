@@ -32,8 +32,8 @@ def evaluate_gaussian_timestep(
 
     Args:
         timesteps: 1D tensor of positions (timestep values or indices into scheduler_timesteps).
-        mu: Gaussian mean in [0, 1] (e.g. 0.8).
-        sigma: Gaussian std (e.g. 0.2).
+        mu: Gaussian mean in [0, 999] timestep space (e.g. 800 for high noise focus).
+        sigma: Gaussian std in [0, 1] (e.g. 0.2).
         device: Target device for the returned tensor.
         dtype: Target dtype for the returned tensor.
         num_train_timesteps: Number of diffusion timesteps (e.g. 1000).
@@ -44,15 +44,15 @@ def evaluate_gaussian_timestep(
     """
     global _cache
     ntt = int(num_train_timesteps)
-    mu = float(mu)
+    mu_normalized = float(mu) / 999.0
     sigma = float(sigma)
 
     if scheduler_timesteps is None:
-        cache_key = (ntt, mu, sigma)
+        cache_key = (ntt, mu_normalized, sigma)
     else:
         st = scheduler_timesteps
         first_last = (st[0].cpu().item(), st[-1].cpu().item()) if st.numel() else (0, 0)
-        cache_key = (ntt, mu, sigma, first_last[0], first_last[1])
+        cache_key = (ntt, mu_normalized, sigma, first_last[0], first_last[1])
 
     if cache_key not in _cache:
         if scheduler_timesteps is None:
@@ -64,7 +64,7 @@ def evaluate_gaussian_timestep(
             t = t / float(ntt)
             if t.numel() < ntt + 1:
                 t = torch.cat([t, t[-1:].expand(ntt + 1 - t.numel())])
-        raw = torch.exp(-0.5 * ((t - mu) / sigma) ** 2)
+        raw = torch.exp(-0.5 * ((t - mu_normalized) / sigma) ** 2)
         weights = (raw / raw.max().clamp(min=1e-8)).clone()
         _cache[cache_key] = weights
 

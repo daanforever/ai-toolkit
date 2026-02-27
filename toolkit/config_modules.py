@@ -357,7 +357,7 @@ class TrainConfig:
         self.noise_scheduler = kwargs.get('noise_scheduler', 'ddpm')
         self.content_or_style: ContentOrStyleType = kwargs.get('content_or_style', 'balanced')
         self.content_or_style_reg: ContentOrStyleType = kwargs.get('content_or_style', 'balanced')
-        self.gaussian_mean: float = kwargs.get('gaussian_mean', 0.5)
+        self.gaussian_mean: float = kwargs.get('gaussian_mean', 500)
         self.gaussian_std: float = kwargs.get('gaussian_std', 0.2)
         self.gaussian_std_target: float = kwargs.get('gaussian_std_target', None)
         self.timestep_bias_exponent: float = kwargs.get('timestep_bias_exponent', 3.0)

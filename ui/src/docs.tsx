@@ -313,9 +313,9 @@ const docs: { [key: string]: ConfigDoc } = {
         <br /><br />
         <b>Gaussian (Normal)</b>: Normal distribution with configurable center and spread. Use <code>gaussian_mean</code> and <code>gaussian_std</code> in YAML config:
         <br />
-        • <code>gaussian_mean</code> (default 0.5): Center of distribution. Lower values (0.0-0.5) = more noise/earlier timesteps, higher values (0.5-1.0) = less noise/later timesteps.
+        • <code>gaussian_mean</code> (default 500): Center of distribution in timestep space [0, 999]. Higher values (600-999) = more noise/structure learning, lower values (0-400) = less noise/detail learning. Value 999 targets maximum noise timesteps, 0 targets clean image timesteps. For flow matching models, this directly targets the timestep value in the scheduler.
         <br />
-        • <code>gaussian_std</code> (default 0.2): Spread of distribution. Smaller = narrower focus, larger = wider coverage.
+        • <code>gaussian_std</code> (default 0.2): Spread of distribution in normalized [0, 1] space. Smaller = narrower focus, larger = wider coverage.
         <br />
         • <code>gaussian_std_target</code> (optional, default None): Enable curriculum learning. When set, gaussian_std will linearly interpolate from initial value to this target value during training. Example: start with gaussian_std: 0.001 (narrow distribution, focused training) → end with gaussian_std_target: 0.3 (wide distribution, diverse timestep coverage).
         <br />

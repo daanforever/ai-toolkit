@@ -67,7 +67,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     : null;
   const gaussianMean = trainAny?.gaussian_mean != null
     ? Number(trainAny.gaussian_mean)
-    : 0.5;
+    : 500;
   const gaussianStd = trainAny?.gaussian_std != null
     ? Number(trainAny.gaussian_std)
     : 0.2;
@@ -257,9 +257,9 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
             <input
               type="number"
               min={0}
-              max={1}
+              max={999}
               step="any"
-              placeholder="mean (0–1)"
+              placeholder="mean (0–999)"
               value={gaussianMean}
               onChange={(e) => {
                 const v = parseFloat(e.target.value);

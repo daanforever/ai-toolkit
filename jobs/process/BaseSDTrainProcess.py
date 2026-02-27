@@ -1279,8 +1279,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
                     timestep_indices.sort()
                     
-                elif content_or_style == 'gaussian':
-                    # Gaussian (normal) distribution; gaussian_mean in [0,1] is timestep value space. Curriculum: gaussian_std_target.
+                elif content_or_style == "gaussian":
+                    # Gaussian (normal) distribution; gaussian_mean in [0,999] is timestep value space. Curriculum: gaussian_std_target.
                     ntt = self.train_config.num_train_timesteps
                     if self.train_config.gaussian_std_target is not None:
                         progress = self.step_num / self.train_config.steps

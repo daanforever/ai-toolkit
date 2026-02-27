@@ -45,9 +45,9 @@ export async function PATCH(
 
   const gaussianMean = body.gaussian_mean;
   if (gaussianMean !== undefined) {
-    if (typeof gaussianMean !== 'number' || !Number.isFinite(gaussianMean) || gaussianMean < 0 || gaussianMean > 1) {
+    if (typeof gaussianMean !== 'number' || !Number.isFinite(gaussianMean) || gaussianMean < 0 || gaussianMean > 999) {
       return NextResponse.json(
-        { error: 'gaussian_mean must be a number in [0, 1]' },
+        { error: 'gaussian_mean must be a number in [0, 999]' },
         { status: 400 }
       );
     }
