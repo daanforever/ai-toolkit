@@ -1398,7 +1398,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                 torch.device("cpu"),
                                 torch.float32,
                                 ntt,
-                                scheduler_timesteps=None,
+                                scheduler_timesteps=self.sd.noise_scheduler.timesteps,
                             )
                             weights_list = weights_tensor.tolist()
                             pairs_10 = list(zip(self._collected_timesteps[:10], weights_list[:10]))
