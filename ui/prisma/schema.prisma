@@ -41,6 +41,7 @@ model Job {
   runtime_weight_decay  Float?
   runtime_content_or_style String?
   runtime_timestep_type String?
+  runtime_network_weights String?
 
   @@index([status])
   @@index([gpu_ids])

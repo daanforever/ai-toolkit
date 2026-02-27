@@ -72,6 +72,8 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     ? Number(trainAny.gaussian_std)
     : 0.2;
 
+  const datasets = config?.config?.process?.[0]?.datasets;
+
   const handleApply = useCallback(async () => {
     if (!config || !train) return;
     setApplyStatus('loading');
@@ -119,6 +121,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         timestep_type?: string;
         gaussian_mean?: number;
         gaussian_std?: number;
+        network_weights?: number[];
       } = {
         weight_decay: weightDecay,
         content_or_style: contentOrStyle,
@@ -127,6 +130,9 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         gaussian_std: gaussianStd,
       };
       if (hasMaxLr && maxLr != null) patchBody.max_lr = maxLr;
+      if (process.datasets?.length) {
+        patchBody.network_weights = process.datasets.map((d: { network_weight?: number }) => d.network_weight ?? 1);
+      }
 
       const patchRes = await fetch(`/api/jobs/${job.id}/runtime-config`, {
         method: 'PATCH',
@@ -157,6 +163,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     hasMaxLr,
     gaussianMean,
     gaussianStd,
+    datasets,
     onRefresh,
   ]);
 
@@ -276,6 +283,33 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
             />
           </div>
         </div>
+
+        {Array.isArray(datasets) && datasets.length > 0 && (
+          <div className="space-y-2">
+            <p className="text-xs text-gray-400">Datasets — Network weight</p>
+            <div className="flex items-center gap-2 flex-wrap">
+              {datasets.map((d: { network_weight?: number }, i: number) => (
+                <div key={i} className="space-y-1 min-w-[100px]">
+                  <label className="block text-xs text-gray-500">Dataset {i + 1}</label>
+                  <input
+                    type="number"
+                    min={1e-6}
+                    step="any"
+                    value={d.network_weight ?? 1}
+                    onChange={(e) => {
+                      const v = parseFloat(e.target.value);
+                      if (Number.isFinite(v) && v > 0) {
+                        setValue(v, `config.process[0].datasets[${i}].network_weight`);
+                        setApplyStatus('idle');
+                      }
+                    }}
+                    className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none"
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         <div className="pt-2">
           <button

@@ -1,10 +1,12 @@
 from collections import OrderedDict
+import json
 import os
 import sqlite3
 import asyncio
 import concurrent.futures
 from extensions_built_in.sd_trainer.SDTrainer import SDTrainer
 from toolkit.accelerator import unwrap_model
+from toolkit.data_loader import get_dataloader_datasets
 from toolkit.print import print_acc
 from toolkit.util.debug import is_debug_enabled
 from typing import Literal, Optional
@@ -43,6 +45,7 @@ class DiffusionTrainer(SDTrainer):
             self._last_applied_runtime_weight_decay = None
             self._last_applied_runtime_content_or_style = None
             self._last_applied_runtime_timestep_type = None
+            self._last_applied_runtime_network_weights: Optional[tuple] = None
             # Initialize the status
             self._run_async_operation(self._update_status("running", "Starting"))
             self._stop_watcher_started = False
@@ -351,6 +354,52 @@ class DiffusionTrainer(SDTrainer):
         if is_debug_enabled():
             print_acc(f"\nruntime timestep_type from UI/DB: {value}")
 
+    def get_runtime_network_weights(self):
+        """Read runtime_network_weights from DB (only when is_ui_trainer). Returns list of float or None."""
+        if not self.is_ui_trainer:
+            return None
+
+        def _read():
+            with self._db_connect() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT runtime_network_weights FROM Job WHERE id = ?",
+                    (self.job_id,),
+                )
+                row = cursor.fetchone()
+                if row is None or row[0] is None or (isinstance(row[0], str) and row[0].strip() == ""):
+                    return None
+                try:
+                    raw = row[0] if isinstance(row[0], str) else str(row[0])
+                    parsed = json.loads(raw)
+                    if not isinstance(parsed, list):
+                        return None
+                    return [float(x) for x in parsed if isinstance(x, (int, float)) and abs(x) == x and x > 0]
+                except (ValueError, TypeError):
+                    return None
+
+        return _read()
+
+    def apply_runtime_network_weights(self):
+        """If runtime_network_weights are set in DB, apply them to dataloader dataset_configs."""
+        if not self.is_ui_trainer:
+            return
+        weights = self.get_runtime_network_weights()
+        if weights is None:
+            return
+        weights_tuple = tuple(weights)
+        if weights_tuple == self._last_applied_runtime_network_weights:
+            return
+        if self.data_loader is None:
+            return
+        datasets = get_dataloader_datasets(self.data_loader)
+        for i, ds in enumerate(datasets):
+            if i < len(weights):
+                ds.dataset_config.network_weight = weights[i]
+        self._last_applied_runtime_network_weights = weights_tuple
+        if is_debug_enabled():
+            print_acc(f"\nruntime network_weights from UI/DB applied: {list(weights_tuple)}")
+
     async def _update_key(self, key, value):
         if not self.accelerator.is_main_process:
             return
@@ -467,6 +516,7 @@ class DiffusionTrainer(SDTrainer):
             self.apply_runtime_weight_decay()
             self.apply_runtime_content_or_style()
             self.apply_runtime_timestep_type()
+            self.apply_runtime_network_weights()
 
     def hook_before_model_load(self):
         super().hook_before_model_load()

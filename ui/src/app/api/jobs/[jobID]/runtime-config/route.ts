@@ -17,7 +17,7 @@ export async function PATCH(
     return NextResponse.json({ error: 'Job not found' }, { status: 404 });
   }
 
-  let body: { max_lr?: number; gaussian_mean?: number; gaussian_std?: number; weight_decay?: number; content_or_style?: string; timestep_type?: string };
+  let body: { max_lr?: number; gaussian_mean?: number; gaussian_std?: number; weight_decay?: number; content_or_style?: string; timestep_type?: string; network_weights?: number[] };
   try {
     body = await request.json();
   } catch {
@@ -30,7 +30,7 @@ export async function PATCH(
   const CONTENT_OR_STYLE_VALUES = ['balanced', 'content', 'style', 'gaussian', 'fixed_cycle'] as const;
   const TIMESTEP_TYPE_VALUES = ['sigmoid', 'linear', 'shift', 'weighted', 'gaussian'] as const;
 
-  const data: { runtime_max_lr?: number; runtime_gaussian_mean?: number; runtime_gaussian_std?: number; runtime_weight_decay?: number; runtime_content_or_style?: string; runtime_timestep_type?: string } = {};
+  const data: { runtime_max_lr?: number; runtime_gaussian_mean?: number; runtime_gaussian_std?: number; runtime_weight_decay?: number; runtime_content_or_style?: string; runtime_timestep_type?: string; runtime_network_weights?: string } = {};
 
   const maxLr = body.max_lr;
   if (maxLr !== undefined) {
@@ -98,9 +98,29 @@ export async function PATCH(
     data.runtime_timestep_type = timestepType;
   }
 
+  const networkWeights = body.network_weights;
+  if (networkWeights !== undefined) {
+    if (!Array.isArray(networkWeights) || networkWeights.length === 0) {
+      return NextResponse.json(
+        { error: 'network_weights must be a non-empty array' },
+        { status: 400 }
+      );
+    }
+    for (let i = 0; i < networkWeights.length; i++) {
+      const w = networkWeights[i];
+      if (typeof w !== 'number' || !Number.isFinite(w) || w <= 0) {
+        return NextResponse.json(
+          { error: `network_weights[${i}] must be a positive number` },
+          { status: 400 }
+        );
+      }
+    }
+    data.runtime_network_weights = JSON.stringify(networkWeights);
+  }
+
   if (Object.keys(data).length === 0) {
     return NextResponse.json(
-      { error: 'At least one of max_lr, gaussian_mean, gaussian_std, weight_decay, content_or_style, timestep_type must be provided' },
+      { error: 'At least one of max_lr, gaussian_mean, gaussian_std, weight_decay, content_or_style, timestep_type, network_weights must be provided' },
       { status: 400 }
     );
   }
