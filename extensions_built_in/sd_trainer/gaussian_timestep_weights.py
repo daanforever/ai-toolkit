@@ -44,12 +44,12 @@ def evaluate_gaussian_timestep(
     cache_key = (ntt, mu_normalized, sigma)
     
     if cache_key not in _cache:
-        t = torch.arange(ntt + 1, dtype=torch.float32) / float(ntt)
+        t = torch.arange(ntt, dtype=torch.float32) / float(ntt)
         raw = torch.exp(-0.5 * ((t - mu_normalized) / sigma) ** 2)
         weights = (raw / raw.max().clamp(min=1e-8)).clone()
         _cache[cache_key] = weights
     
     cached_weights = _cache[cache_key]
-    max_idx = cached_weights.shape[0] - 1
+    max_idx = cached_weights.shape[0]
     idx = timesteps.long().clamp(0, max_idx).cpu()
     return cached_weights[idx].to(device=device, dtype=dtype)
