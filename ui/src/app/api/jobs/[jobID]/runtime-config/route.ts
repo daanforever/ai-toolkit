@@ -17,7 +17,7 @@ export async function PATCH(
     return NextResponse.json({ error: 'Job not found' }, { status: 404 });
   }
 
-  let body: { max_lr?: number; min_lr?: number; gaussian_mean?: number; gaussian_std?: number; weight_decay?: number; content_or_style?: string; timestep_type?: string; network_weights?: number[]; batch_size?: number };
+  let body: { max_lr?: number; min_lr?: number; gaussian_mean?: number; gaussian_std?: number; weight_decay?: number; content_or_style?: string; timestep_type?: string; network_weights?: number[]; batch_size?: number; save_every?: number };
   try {
     body = await request.json();
   } catch {
@@ -30,7 +30,7 @@ export async function PATCH(
   const CONTENT_OR_STYLE_VALUES = ['balanced', 'content', 'style', 'gaussian', 'fixed_cycle'] as const;
   const TIMESTEP_TYPE_VALUES = ['sigmoid', 'linear', 'shift', 'weighted', 'gaussian'] as const;
 
-  const data: { runtime_max_lr?: number; runtime_min_lr?: number; runtime_gaussian_mean?: number; runtime_gaussian_std?: number; runtime_weight_decay?: number; runtime_content_or_style?: string; runtime_timestep_type?: string; runtime_network_weights?: string; runtime_batch_size?: number } = {};
+  const data: { runtime_max_lr?: number; runtime_min_lr?: number; runtime_gaussian_mean?: number; runtime_gaussian_std?: number; runtime_weight_decay?: number; runtime_content_or_style?: string; runtime_timestep_type?: string; runtime_network_weights?: string; runtime_batch_size?: number; runtime_save_every?: number } = {};
 
   const maxLr = body.max_lr;
   if (maxLr !== undefined) {
@@ -140,9 +140,20 @@ export async function PATCH(
     data.runtime_batch_size = batchSize;
   }
 
+  const saveEvery = body.save_every;
+  if (saveEvery !== undefined) {
+    if (typeof saveEvery !== 'number' || !Number.isInteger(saveEvery) || saveEvery < 1 || saveEvery > 10000) {
+      return NextResponse.json(
+        { error: 'save_every must be an integer between 1 and 10000' },
+        { status: 400 }
+      );
+    }
+    data.runtime_save_every = saveEvery;
+  }
+
   if (Object.keys(data).length === 0) {
     return NextResponse.json(
-      { error: 'At least one of max_lr, min_lr, gaussian_mean, gaussian_std, weight_decay, content_or_style, timestep_type, network_weights, batch_size must be provided' },
+      { error: 'At least one of max_lr, min_lr, gaussian_mean, gaussian_std, weight_decay, content_or_style, timestep_type, network_weights, batch_size, save_every must be provided' },
       { status: 400 }
     );
   }

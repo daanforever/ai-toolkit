@@ -79,6 +79,11 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     ? Number(trainAny.batch_size)
     : 1;
 
+  const saveAny = config?.config?.process?.[0]?.save as Record<string, unknown> | undefined;
+  const saveEvery = saveAny?.save_every != null
+    ? Number(saveAny.save_every)
+    : 250;
+
   const datasets = config?.config?.process?.[0]?.datasets;
 
   const handleApply = useCallback(async () => {
@@ -109,6 +114,11 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     (process.train as Record<string, number>).gaussian_std = gaussianStd;
     (process.train as Record<string, number>).batch_size = batchSize;
 
+    if (!process.save) {
+      process.save = { save_every: 250, dtype: 'bf16', max_step_saves_to_keep: 4, save_format: 'safetensors', push_to_hub: false };
+    }
+    (process.save as Record<string, number>).save_every = saveEvery;
+
     try {
       const postRes = await fetch('/api/jobs', {
         method: 'POST',
@@ -135,6 +145,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         gaussian_std?: number;
         network_weights?: number[];
         batch_size?: number;
+        save_every?: number;
       } = {
         weight_decay: weightDecay,
         content_or_style: contentOrStyle,
@@ -142,6 +153,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         gaussian_mean: gaussianMean,
         gaussian_std: gaussianStd,
         batch_size: batchSize,
+        save_every: saveEvery,
       };
       if (hasMaxLr && maxLr != null) patchBody.max_lr = maxLr;
       if (hasMinLr && minLr != null) patchBody.min_lr = minLr;
@@ -181,6 +193,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     gaussianMean,
     gaussianStd,
     batchSize,
+    saveEvery,
     datasets,
     onRefresh,
   ]);
@@ -285,6 +298,27 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
                 <option key={opt.value} value={opt.value}>{opt.label}</option>
               ))}
             </select>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-gray-400">Save every</span>
+              <input
+                type="number"
+                min={1}
+                max={10000}
+                step={1}
+                placeholder="e.g. 250"
+                value={saveEvery}
+                onChange={(e) => {
+                  const v = e.target.value.trim();
+                  const num = v === '' ? 250 : parseInt(v, 10);
+                  if (Number.isInteger(num) && num >= 1) {
+                    setValue(num, 'config.process[0].save.save_every');
+                    setApplyStatus('idle');
+                  }
+                }}
+                className="w-24 rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+              />
+              <span className="text-xs text-gray-500">steps</span>
+            </div>
           </div>
         </div>
 

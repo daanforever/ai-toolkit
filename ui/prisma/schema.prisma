@@ -44,6 +44,7 @@ model Job {
   runtime_timestep_type String?
   runtime_network_weights String?
   runtime_batch_size Int?
+  runtime_save_every Int?
 
   @@index([status])
   @@index([gpu_ids])
