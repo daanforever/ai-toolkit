@@ -289,57 +289,58 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         </div>
 
         <div className="space-y-2">
-          <p className="text-xs text-gray-400">Gaussian (mean / std)</p>
-          <div className="flex items-center gap-2 flex-wrap">
-            <input
-              type="number"
-              min={0}
-              max={999}
-              step="any"
-              placeholder="mean (0–999)"
-              value={gaussianMean}
-              onChange={(e) => {
-                const v = parseFloat(e.target.value);
-                if (Number.isFinite(v)) setValue(v, `${TRAIN_PATH}.gaussian_mean`);
-                setApplyStatus('idle');
-              }}
-              className="w-24 rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
-            />
-            <input
-              type="number"
-              min={1e-6}
-              step="any"
-              placeholder="std (&gt;0)"
-              value={gaussianStd}
-              onChange={(e) => {
-                const v = parseFloat(e.target.value);
-                if (Number.isFinite(v)) setValue(v, `${TRAIN_PATH}.gaussian_std`);
-                setApplyStatus('idle');
-              }}
-              className="w-24 rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
-            />
+          <div className="flex items-center gap-4 flex-wrap">
+            <div className="flex items-center gap-2 flex-wrap">
+              <p className="text-xs text-gray-400">Gaussian (mean / std)</p>
+              <input
+                type="number"
+                min={0}
+                max={999}
+                step="any"
+                placeholder="mean (0–999)"
+                value={gaussianMean}
+                onChange={(e) => {
+                  const v = parseFloat(e.target.value);
+                  if (Number.isFinite(v)) setValue(v, `${TRAIN_PATH}.gaussian_mean`);
+                  setApplyStatus('idle');
+                }}
+                className="w-24 rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+              />
+              <input
+                type="number"
+                min={1e-6}
+                step="any"
+                placeholder="std (&gt;0)"
+                value={gaussianStd}
+                onChange={(e) => {
+                  const v = parseFloat(e.target.value);
+                  if (Number.isFinite(v)) setValue(v, `${TRAIN_PATH}.gaussian_std`);
+                  setApplyStatus('idle');
+                }}
+                className="w-24 rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+              />
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <p className="text-xs text-gray-400">Batch size</p>
+              <input
+                type="number"
+                min={1}
+                max={128}
+                step={1}
+                placeholder="e.g. 1"
+                value={batchSize}
+                onChange={(e) => {
+                  const v = e.target.value.trim();
+                  const num = v === '' ? 1 : parseInt(v, 10);
+                  if (Number.isInteger(num) && num >= 1) {
+                    setValue(num, 'config.process[0].train.batch_size');
+                    setApplyStatus('idle');
+                  }
+                }}
+                className="w-20 rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+              />
+            </div>
           </div>
-        </div>
-
-        <div className="space-y-2">
-          <p className="text-xs text-gray-400">Batch size</p>
-          <input
-            type="number"
-            min={1}
-            max={128}
-            step={1}
-            placeholder="e.g. 1"
-            value={batchSize}
-            onChange={(e) => {
-              const v = e.target.value.trim();
-              const num = v === '' ? 1 : parseInt(v, 10);
-              if (Number.isInteger(num) && num >= 1) {
-                setValue(num, 'config.process[0].train.batch_size');
-                setApplyStatus('idle');
-              }
-            }}
-            className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
-          />
         </div>
 
         {Array.isArray(datasets) && datasets.length > 0 && (
