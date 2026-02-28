@@ -2702,6 +2702,15 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 self.grad_accumulation_step += 1
                 self.end_step_hook()
 
+                # Re-sync local dataloader refs if they were replaced in end_step_hook
+                # (e.g. runtime batch_size change recreates self.data_loader)
+                if dataloader is not self.data_loader:
+                    dataloader = self.data_loader
+                    dataloader_iterator = iter(dataloader) if dataloader is not None else None
+                if dataloader_reg is not self.data_loader_reg:
+                    dataloader_reg = self.data_loader_reg
+                    dataloader_iterator_reg = iter(dataloader_reg) if dataloader_reg is not None else None
+
 
         ###################################################################
         ##  END TRAIN LOOP
