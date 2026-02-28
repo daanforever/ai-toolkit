@@ -78,6 +78,9 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
   const batchSize = trainAny?.batch_size != null
     ? Number(trainAny.batch_size)
     : 1;
+  const minSnrGamma = trainAny?.min_snr_gamma != null
+    ? Number(trainAny.min_snr_gamma)
+    : 5;
 
   const saveAny = config?.config?.process?.[0]?.save as Record<string, unknown> | undefined;
   const saveEvery = saveAny?.save_every != null
@@ -118,6 +121,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     (process.train as Record<string, number>).gaussian_mean = gaussianMean;
     (process.train as Record<string, number>).gaussian_std = gaussianStd;
     (process.train as Record<string, number>).batch_size = batchSize;
+    (process.train as Record<string, number>).min_snr_gamma = minSnrGamma;
 
     if (!process.save) {
       process.save = { save_every: 250, dtype: 'bf16', max_step_saves_to_keep: 4, save_format: 'safetensors', push_to_hub: false };
@@ -165,6 +169,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         batch_size?: number;
         save_every?: number;
         sample_every?: number;
+        min_snr_gamma?: number;
       } = {
         weight_decay: weightDecay,
         content_or_style: contentOrStyle,
@@ -174,6 +179,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         batch_size: batchSize,
         save_every: saveEvery,
         sample_every: sampleEvery,
+        min_snr_gamma: minSnrGamma,
       };
       if (hasMaxLr && maxLr != null) patchBody.max_lr = maxLr;
       if (hasMinLr && minLr != null) patchBody.min_lr = minLr;
@@ -215,6 +221,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     batchSize,
     saveEvery,
     sampleEvery,
+    minSnrGamma,
     datasets,
     onRefresh,
   ]);
@@ -285,6 +292,23 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
               onChange={(e) => {
                 const v = parseFloat(e.target.value);
                 if (Number.isFinite(v)) setValue(v, `${OPTIMIZER_PARAMS_PATH}.weight_decay`);
+                setApplyStatus('idle');
+              }}
+              className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+            />
+          </div>
+          <div className="space-y-2 flex-1 min-w-[140px]">
+            <p className="text-xs text-gray-400">Min SNR gamma</p>
+            <input
+              type="number"
+              min={0}
+              max={100}
+              step="any"
+              placeholder="e.g. 2 or 5"
+              value={minSnrGamma}
+              onChange={(e) => {
+                const v = parseFloat(e.target.value);
+                if (Number.isFinite(v)) setValue(v, 'config.process[0].train.min_snr_gamma');
                 setApplyStatus('idle');
               }}
               className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"

@@ -50,6 +50,7 @@ class DiffusionTrainer(SDTrainer):
             self._last_applied_runtime_batch_size = None
             self._last_applied_runtime_save_every = None
             self._last_applied_runtime_sample_every = None
+            self._last_applied_runtime_min_snr_gamma = None
             # Initialize the status
             self._run_async_operation(self._update_status("running", "Starting"))
             self._stop_watcher_started = False
@@ -404,6 +405,25 @@ class DiffusionTrainer(SDTrainer):
 
         return _read()
 
+    def get_runtime_min_snr_gamma(self):
+        """Read runtime_min_snr_gamma from DB (only when is_ui_trainer). Returns float or None."""
+        if not self.is_ui_trainer:
+            return None
+
+        def _read():
+            with self._db_connect() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT runtime_min_snr_gamma FROM Job WHERE id = ?",
+                    (self.job_id,),
+                )
+                row = cursor.fetchone()
+                if row is None or row[0] is None:
+                    return None
+                return float(row[0])
+
+        return _read()
+
     def apply_runtime_save_every(self):
         """If runtime_save_every is set in DB, apply it to save_config."""
         if not self.is_ui_trainer:
@@ -440,6 +460,25 @@ class DiffusionTrainer(SDTrainer):
         if is_debug_enabled():
             print_acc(
                 f"\nruntime sample_every from UI/DB: {old_sample_every} -> {sample_every}"
+            )
+
+    def apply_runtime_min_snr_gamma(self):
+        """If runtime_min_snr_gamma is set in DB, apply it to train_config."""
+        if not self.is_ui_trainer:
+            return
+        value = self.get_runtime_min_snr_gamma()
+        if value is None:
+            return
+        if value == self._last_applied_runtime_min_snr_gamma:
+            return
+        
+        old_min_snr_gamma = self.train_config.min_snr_gamma
+        self.train_config.min_snr_gamma = value
+        self._last_applied_runtime_min_snr_gamma = value
+        
+        if is_debug_enabled():
+            print_acc(
+                f"\nruntime min_snr_gamma from UI/DB: {old_min_snr_gamma} -> {value}"
             )
 
     def apply_runtime_weight_decay(self):
@@ -699,6 +738,7 @@ class DiffusionTrainer(SDTrainer):
             self.apply_runtime_batch_size()
             self.apply_runtime_save_every()
             self.apply_runtime_sample_every()
+            self.apply_runtime_min_snr_gamma()
 
     def hook_before_model_load(self):
         super().hook_before_model_load()

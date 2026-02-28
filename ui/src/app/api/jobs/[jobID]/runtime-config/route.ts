@@ -17,7 +17,7 @@ export async function PATCH(
     return NextResponse.json({ error: 'Job not found' }, { status: 404 });
   }
 
-  let body: { max_lr?: number; min_lr?: number; gaussian_mean?: number; gaussian_std?: number; weight_decay?: number; content_or_style?: string; timestep_type?: string; network_weights?: number[]; batch_size?: number; save_every?: number; sample_every?: number };
+  let body: { max_lr?: number; min_lr?: number; gaussian_mean?: number; gaussian_std?: number; weight_decay?: number; content_or_style?: string; timestep_type?: string; network_weights?: number[]; batch_size?: number; save_every?: number; sample_every?: number; min_snr_gamma?: number };
   try {
     body = await request.json();
   } catch {
@@ -30,7 +30,7 @@ export async function PATCH(
   const CONTENT_OR_STYLE_VALUES = ['balanced', 'content', 'style', 'gaussian', 'fixed_cycle'] as const;
   const TIMESTEP_TYPE_VALUES = ['sigmoid', 'linear', 'shift', 'weighted', 'gaussian'] as const;
 
-  const data: { runtime_max_lr?: number; runtime_min_lr?: number; runtime_gaussian_mean?: number; runtime_gaussian_std?: number; runtime_weight_decay?: number; runtime_content_or_style?: string; runtime_timestep_type?: string; runtime_network_weights?: string; runtime_batch_size?: number; runtime_save_every?: number; runtime_sample_every?: number } = {};
+  const data: { runtime_max_lr?: number; runtime_min_lr?: number; runtime_gaussian_mean?: number; runtime_gaussian_std?: number; runtime_weight_decay?: number; runtime_content_or_style?: string; runtime_timestep_type?: string; runtime_network_weights?: string; runtime_batch_size?: number; runtime_save_every?: number; runtime_sample_every?: number; runtime_min_snr_gamma?: number } = {};
 
   const maxLr = body.max_lr;
   if (maxLr !== undefined) {
@@ -162,9 +162,20 @@ export async function PATCH(
     data.runtime_sample_every = sampleEvery;
   }
 
+  const minSnrGamma = body.min_snr_gamma;
+  if (minSnrGamma !== undefined) {
+    if (typeof minSnrGamma !== 'number' || !Number.isFinite(minSnrGamma) || minSnrGamma < 0 || minSnrGamma > 100) {
+      return NextResponse.json(
+        { error: 'min_snr_gamma must be a number between 0 and 100' },
+        { status: 400 }
+      );
+    }
+    data.runtime_min_snr_gamma = minSnrGamma;
+  }
+
   if (Object.keys(data).length === 0) {
     return NextResponse.json(
-      { error: 'At least one of max_lr, min_lr, gaussian_mean, gaussian_std, weight_decay, content_or_style, timestep_type, network_weights, batch_size, save_every, sample_every must be provided' },
+      { error: 'At least one of max_lr, min_lr, gaussian_mean, gaussian_std, weight_decay, content_or_style, timestep_type, network_weights, batch_size, save_every, sample_every, min_snr_gamma must be provided' },
       { status: 400 }
     );
   }

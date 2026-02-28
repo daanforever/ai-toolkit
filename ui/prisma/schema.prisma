@@ -46,6 +46,7 @@ model Job {
   runtime_batch_size Int?
   runtime_save_every Int?
   runtime_sample_every Int?
+  runtime_min_snr_gamma Float?
 
   @@index([status])
   @@index([gpu_ids])
