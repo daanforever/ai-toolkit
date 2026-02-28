@@ -298,34 +298,34 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
                 <option key={opt.value} value={opt.value}>{opt.label}</option>
               ))}
             </select>
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-gray-400">Save every</span>
-              <input
-                type="number"
-                min={1}
-                max={10000}
-                step={1}
-                placeholder="e.g. 250"
-                value={saveEvery}
-                onChange={(e) => {
-                  const v = e.target.value.trim();
-                  const num = v === '' ? 250 : parseInt(v, 10);
-                  if (Number.isInteger(num) && num >= 1) {
-                    setValue(num, 'config.process[0].save.save_every');
-                    setApplyStatus('idle');
-                  }
-                }}
-                className="w-24 rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
-              />
-              <span className="text-xs text-gray-500">steps</span>
-            </div>
           </div>
         </div>
 
-        <div className="space-y-2">
-          <div className="flex items-center gap-4 flex-wrap">
-            <div className="flex items-center gap-2 flex-wrap">
-              <p className="text-xs text-gray-400">Gaussian (mean / std)</p>
+        <div className="space-y-2 flex-1 min-w-[140px]">
+          <p className="text-xs text-gray-400">Save every (steps)</p>
+          <input
+            type="number"
+            min={1}
+            max={10000}
+            step={1}
+            placeholder="e.g. 250"
+            value={saveEvery}
+            onChange={(e) => {
+              const v = e.target.value.trim();
+              const num = v === '' ? 250 : parseInt(v, 10);
+              if (Number.isInteger(num) && num >= 1) {
+                setValue(num, 'config.process[0].save.save_every');
+                setApplyStatus('idle');
+              }
+            }}
+            className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+          />
+        </div>
+
+        <div className="flex items-start gap-4 flex-wrap">
+          <div className="space-y-2 flex-1 min-w-[200px]">
+            <p className="text-xs text-gray-400">Gaussian (mean / std)</p>
+            <div className="flex items-center gap-2">
               <input
                 type="number"
                 min={0}
@@ -338,7 +338,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
                   if (Number.isFinite(v)) setValue(v, `${TRAIN_PATH}.gaussian_mean`);
                   setApplyStatus('idle');
                 }}
-                className="w-24 rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+                className="flex-1 rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
               />
               <input
                 type="number"
@@ -351,29 +351,29 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
                   if (Number.isFinite(v)) setValue(v, `${TRAIN_PATH}.gaussian_std`);
                   setApplyStatus('idle');
                 }}
-                className="w-24 rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+                className="flex-1 rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
               />
             </div>
-            <div className="flex items-center gap-2 flex-wrap">
-              <p className="text-xs text-gray-400">Batch size</p>
-              <input
-                type="number"
-                min={1}
-                max={128}
-                step={1}
-                placeholder="e.g. 1"
-                value={batchSize}
-                onChange={(e) => {
-                  const v = e.target.value.trim();
-                  const num = v === '' ? 1 : parseInt(v, 10);
-                  if (Number.isInteger(num) && num >= 1) {
-                    setValue(num, 'config.process[0].train.batch_size');
-                    setApplyStatus('idle');
-                  }
-                }}
-                className="w-20 rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
-              />
-            </div>
+          </div>
+          <div className="space-y-2 flex-1 min-w-[140px]">
+            <p className="text-xs text-gray-400">Batch size</p>
+            <input
+              type="number"
+              min={1}
+              max={128}
+              step={1}
+              placeholder="e.g. 1"
+              value={batchSize}
+              onChange={(e) => {
+                const v = e.target.value.trim();
+                const num = v === '' ? 1 : parseInt(v, 10);
+                if (Number.isInteger(num) && num >= 1) {
+                  setValue(num, 'config.process[0].train.batch_size');
+                  setApplyStatus('idle');
+                }
+              }}
+              className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+            />
           </div>
         </div>
 
