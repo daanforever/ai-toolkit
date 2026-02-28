@@ -52,21 +52,25 @@ def _is_enabled_for_cuda() -> bool:
 
 
 def _cuda_snapshot_mb():
-    """Return (allocated_mb, max_allocated_mb)."""
+    """Return (allocated_mb, reserved_mb, max_allocated_mb, max_reserved_mb)."""
     return (
         torch.cuda.memory_allocated() / 2**20,
+        torch.cuda.memory_reserved() / 2**20,
         torch.cuda.max_memory_allocated() / 2**20,
+        torch.cuda.max_memory_reserved() / 2**20,
     )
 
 
 def _format_cuda_diff(label: str, before: tuple, after: tuple) -> list:
-    mem_before, max_before = before
-    mem_after, max_after = after
-    delta = mem_before - mem_after
-    delta_str = f"(freed {delta:.1f} MB)" if delta >= 0 else f"(+{-delta:.1f} MB)"
+    alloc_before, reserved_before, max_alloc_before, max_reserved_before = before
+    alloc_after, reserved_after, max_alloc_after, max_reserved_after = after
+    
+    cache_before = reserved_before - alloc_before
+    cache_after = reserved_after - alloc_after
+    
     return [
-        f"[DEBUG {label}] CUDA allocated: {mem_before:.1f} MB -> {mem_after:.1f} MB {delta_str}",
-        f"[DEBUG {label}] CUDA max:       {max_before:.1f} MB -> {max_after:.1f} MB",
+        f"[DEBUG {label}] CUDA alloc: {alloc_after / 1024:.1f} GB | reserved: {reserved_after / 1024:.1f} GB | cache: {cache_after / 1024:.1f} GB",
+        f"[DEBUG {label}] CUDA peaks: alloc={max_alloc_after / 1024:.1f} GB, reserved={max_reserved_after / 1024:.1f} GB",
     ]
 
 
@@ -111,6 +115,7 @@ def memory_debug(
     print_fn: Callable[[str], None],
     label: str,
     kind: str = "all",
+    verbose: bool = False,
 ):
     """
     Context manager: measure memory around the block and log if debug is enabled.
@@ -118,6 +123,7 @@ def memory_debug(
     kind="cuda": CUDA allocated/max only.
     kind="ram": process RSS (Windows only; on other platforms logs "not supported").
     kind="all": both CUDA (if available) and RAM.
+    verbose: if True, also print torch.cuda.memory_summary() after measurements.
     """
     if kind == "cuda":
         if not _is_enabled_for_cuda():
@@ -149,6 +155,9 @@ def memory_debug(
             after_cuda = _cuda_snapshot_mb()
             for line in _format_cuda_diff(label, before_cuda, after_cuda):
                 print_fn(line)
+            if verbose:
+                print_fn(f"[DEBUG {label}] Memory summary:")
+                print_fn(torch.cuda.memory_summary(abbreviated=True))
         if kind in ("ram", "all"):
             after_ram = _ram_snapshot_mb()
             if after_ram is not None and before_ram is not None:
@@ -157,6 +166,6 @@ def memory_debug(
                 print_fn(f"[DEBUG {label}] RAM: not supported on this platform yet")
 
 
-def cuda_memory_debug(print_fn: Callable[[str], None], label: str):
+def cuda_memory_debug(print_fn: Callable[[str], None], label: str, verbose: bool = False):
     """Alias for memory_debug(print_fn, label, kind="cuda")."""
-    return memory_debug(print_fn, label, kind="cuda")
+    return memory_debug(print_fn, label, kind="cuda", verbose=verbose)
