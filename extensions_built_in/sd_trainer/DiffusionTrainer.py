@@ -49,6 +49,7 @@ class DiffusionTrainer(SDTrainer):
             self._last_applied_runtime_network_weights: Optional[tuple] = None
             self._last_applied_runtime_batch_size = None
             self._last_applied_runtime_save_every = None
+            self._last_applied_runtime_sample_every = None
             # Initialize the status
             self._run_async_operation(self._update_status("running", "Starting"))
             self._stop_watcher_started = False
@@ -384,6 +385,25 @@ class DiffusionTrainer(SDTrainer):
 
         return _read()
 
+    def get_runtime_sample_every(self):
+        """Read runtime_sample_every from DB (only when is_ui_trainer). Returns int or None."""
+        if not self.is_ui_trainer:
+            return None
+
+        def _read():
+            with self._db_connect() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT runtime_sample_every FROM Job WHERE id = ?",
+                    (self.job_id,),
+                )
+                row = cursor.fetchone()
+                if row is None or row[0] is None:
+                    return None
+                return int(row[0])
+
+        return _read()
+
     def apply_runtime_save_every(self):
         """If runtime_save_every is set in DB, apply it to save_config."""
         if not self.is_ui_trainer:
@@ -393,14 +413,33 @@ class DiffusionTrainer(SDTrainer):
             return
         if save_every == self._last_applied_runtime_save_every:
             return
-        
+
         old_save_every = self.save_config.save_every
         self.save_config.save_every = save_every
         self._last_applied_runtime_save_every = save_every
-        
+
         if is_debug_enabled():
             print_acc(
                 f"\nruntime save_every from UI/DB: {old_save_every} -> {save_every}"
+            )
+
+    def apply_runtime_sample_every(self):
+        """If runtime_sample_every is set in DB, apply it to sample_config."""
+        if not self.is_ui_trainer:
+            return
+        sample_every = self.get_runtime_sample_every()
+        if sample_every is None:
+            return
+        if sample_every == self._last_applied_runtime_sample_every:
+            return
+        
+        old_sample_every = self.sample_config.sample_every
+        self.sample_config.sample_every = sample_every
+        self._last_applied_runtime_sample_every = sample_every
+        
+        if is_debug_enabled():
+            print_acc(
+                f"\nruntime sample_every from UI/DB: {old_sample_every} -> {sample_every}"
             )
 
     def apply_runtime_weight_decay(self):
@@ -659,6 +698,7 @@ class DiffusionTrainer(SDTrainer):
             self.apply_runtime_network_weights()
             self.apply_runtime_batch_size()
             self.apply_runtime_save_every()
+            self.apply_runtime_sample_every()
 
     def hook_before_model_load(self):
         super().hook_before_model_load()

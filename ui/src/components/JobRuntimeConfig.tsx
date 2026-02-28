@@ -84,6 +84,11 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     ? Number(saveAny.save_every)
     : 250;
 
+  const sampleAny = config?.config?.process?.[0]?.sample as Record<string, unknown> | undefined;
+  const sampleEvery = sampleAny?.sample_every != null
+    ? Number(sampleAny.sample_every)
+    : 250;
+
   const datasets = config?.config?.process?.[0]?.datasets;
 
   const handleApply = useCallback(async () => {
@@ -119,6 +124,19 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     }
     (process.save as Record<string, number>).save_every = saveEvery;
 
+    if (!process.sample) {
+      process.sample = {
+        sampler: 'flowmatch',
+        sample_every: 250,
+        width: 1024,
+        height: 1024,
+        samples: [],
+        neg: '',
+        seed: 42,
+      };
+    }
+    (process.sample as Record<string, number>).sample_every = sampleEvery;
+
     try {
       const postRes = await fetch('/api/jobs', {
         method: 'POST',
@@ -146,6 +164,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         network_weights?: number[];
         batch_size?: number;
         save_every?: number;
+        sample_every?: number;
       } = {
         weight_decay: weightDecay,
         content_or_style: contentOrStyle,
@@ -154,6 +173,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         gaussian_std: gaussianStd,
         batch_size: batchSize,
         save_every: saveEvery,
+        sample_every: sampleEvery,
       };
       if (hasMaxLr && maxLr != null) patchBody.max_lr = maxLr;
       if (hasMinLr && minLr != null) patchBody.min_lr = minLr;
@@ -194,6 +214,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     gaussianStd,
     batchSize,
     saveEvery,
+    sampleEvery,
     datasets,
     onRefresh,
   ]);
@@ -301,25 +322,44 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
               </select>
             </div>
           </div>
-          <div className="space-y-2 flex-1 min-w-[140px]">
-            <p className="text-xs text-gray-400">Save every (steps)</p>
-            <input
-              type="number"
-              min={1}
-              max={10000}
-              step={1}
-              placeholder="e.g. 250"
-              value={saveEvery}
-              onChange={(e) => {
-                const v = e.target.value.trim();
-                const num = v === '' ? 250 : parseInt(v, 10);
-                if (Number.isInteger(num) && num >= 1) {
-                  setValue(num, 'config.process[0].save.save_every');
-                  setApplyStatus('idle');
-                }
-              }}
-              className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
-            />
+          <div className="space-y-2">
+            <p className="text-xs text-gray-400">Save every / Sample every (steps)</p>
+            <div className="flex items-center gap-2 flex-wrap">
+              <input
+                type="number"
+                min={1}
+                max={10000}
+                step={1}
+                placeholder="e.g. 250"
+                value={saveEvery}
+                onChange={(e) => {
+                  const v = e.target.value.trim();
+                  const num = v === '' ? 250 : parseInt(v, 10);
+                  if (Number.isInteger(num) && num >= 1) {
+                    setValue(num, 'config.process[0].save.save_every');
+                    setApplyStatus('idle');
+                  }
+                }}
+                className="rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none min-w-[120px]"
+              />
+              <input
+                type="number"
+                min={1}
+                max={10000}
+                step={1}
+                placeholder="e.g. 250"
+                value={sampleEvery}
+                onChange={(e) => {
+                  const v = e.target.value.trim();
+                  const num = v === '' ? 250 : parseInt(v, 10);
+                  if (Number.isInteger(num) && num >= 1) {
+                    setValue(num, 'config.process[0].sample.sample_every');
+                    setApplyStatus('idle');
+                  }
+                }}
+                className="rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none min-w-[120px]"
+              />
+            </div>
           </div>
         </div>
 
