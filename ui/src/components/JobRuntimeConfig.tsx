@@ -271,89 +271,91 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
           </div>
         </div>
 
-        <div className="space-y-2">
-          <p className="text-xs text-gray-400">Timestep Type / Timestep Bias</p>
-          <div className="flex items-center gap-2 flex-wrap">
-            <select
-              value={timestepType}
+        <div className="flex items-end gap-4 flex-wrap">
+          <div className="space-y-2">
+            <p className="text-xs text-gray-400">Timestep Type / Timestep Bias</p>
+            <div className="flex items-center gap-2 flex-wrap">
+              <select
+                value={timestepType}
+                onChange={(e) => {
+                  setValue(e.target.value, `${TRAIN_PATH}.timestep_type`);
+                  setApplyStatus('idle');
+                }}
+                className="rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none min-w-[120px]"
+              >
+                {TIMESTEP_TYPE_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+              <select
+                value={contentOrStyle}
+                onChange={(e) => {
+                  setValue(e.target.value, `${TRAIN_PATH}.content_or_style`);
+                  setApplyStatus('idle');
+                }}
+                className="rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none min-w-[140px]"
+              >
+                {CONTENT_OR_STYLE_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <div className="space-y-2 flex-1 min-w-[140px]">
+            <p className="text-xs text-gray-400">Save every (steps)</p>
+            <input
+              type="number"
+              min={1}
+              max={10000}
+              step={1}
+              placeholder="e.g. 250"
+              value={saveEvery}
               onChange={(e) => {
-                setValue(e.target.value, `${TRAIN_PATH}.timestep_type`);
-                setApplyStatus('idle');
+                const v = e.target.value.trim();
+                const num = v === '' ? 250 : parseInt(v, 10);
+                if (Number.isInteger(num) && num >= 1) {
+                  setValue(num, 'config.process[0].save.save_every');
+                  setApplyStatus('idle');
+                }
               }}
-              className="rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none min-w-[120px]"
-            >
-              {TIMESTEP_TYPE_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>{opt.label}</option>
-              ))}
-            </select>
-            <select
-              value={contentOrStyle}
-              onChange={(e) => {
-                setValue(e.target.value, `${TRAIN_PATH}.content_or_style`);
-                setApplyStatus('idle');
-              }}
-              className="rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none min-w-[140px]"
-            >
-              {CONTENT_OR_STYLE_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>{opt.label}</option>
-              ))}
-            </select>
+              className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+            />
           </div>
         </div>
 
-        <div className="space-y-2 flex-1 min-w-[140px]">
-          <p className="text-xs text-gray-400">Save every (steps)</p>
-          <input
-            type="number"
-            min={1}
-            max={10000}
-            step={1}
-            placeholder="e.g. 250"
-            value={saveEvery}
-            onChange={(e) => {
-              const v = e.target.value.trim();
-              const num = v === '' ? 250 : parseInt(v, 10);
-              if (Number.isInteger(num) && num >= 1) {
-                setValue(num, 'config.process[0].save.save_every');
+        <div className="flex items-end gap-4 flex-wrap">
+          <div className="space-y-2 flex-1 min-w-[140px]">
+            <p className="text-xs text-gray-400">Gaussian mean</p>
+            <input
+              type="number"
+              min={0}
+              max={999}
+              step="any"
+              placeholder="e.g. 500"
+              value={gaussianMean}
+              onChange={(e) => {
+                const v = parseFloat(e.target.value);
+                if (Number.isFinite(v)) setValue(v, `${TRAIN_PATH}.gaussian_mean`);
                 setApplyStatus('idle');
-              }
-            }}
-            className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
-          />
-        </div>
-
-        <div className="flex items-start gap-4 flex-wrap">
-          <div className="space-y-2 flex-1 min-w-[200px]">
-            <p className="text-xs text-gray-400">Gaussian (mean / std)</p>
-            <div className="flex items-center gap-2">
-              <input
-                type="number"
-                min={0}
-                max={999}
-                step="any"
-                placeholder="mean (0–999)"
-                value={gaussianMean}
-                onChange={(e) => {
-                  const v = parseFloat(e.target.value);
-                  if (Number.isFinite(v)) setValue(v, `${TRAIN_PATH}.gaussian_mean`);
-                  setApplyStatus('idle');
-                }}
-                className="flex-1 rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
-              />
-              <input
-                type="number"
-                min={1e-6}
-                step="any"
-                placeholder="std (&gt;0)"
-                value={gaussianStd}
-                onChange={(e) => {
-                  const v = parseFloat(e.target.value);
-                  if (Number.isFinite(v)) setValue(v, `${TRAIN_PATH}.gaussian_std`);
-                  setApplyStatus('idle');
-                }}
-                className="flex-1 rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
-              />
-            </div>
+              }}
+              className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+            />
+          </div>
+          <div className="space-y-2 flex-1 min-w-[140px]">
+            <p className="text-xs text-gray-400">Gaussian std</p>
+            <input
+              type="number"
+              min={1e-6}
+              step="any"
+              placeholder="e.g. 0.2"
+              value={gaussianStd}
+              onChange={(e) => {
+                const v = parseFloat(e.target.value);
+                if (Number.isFinite(v)) setValue(v, `${TRAIN_PATH}.gaussian_std`);
+                setApplyStatus('idle');
+              }}
+              className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+            />
           </div>
           <div className="space-y-2 flex-1 min-w-[140px]">
             <p className="text-xs text-gray-400">Batch size</p>
