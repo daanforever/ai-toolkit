@@ -686,9 +686,21 @@ def get_dataloader_from_datasets(
         for dataset in datasets:
             assert dataset.dataset_config.buckets, f"buckets not found on dataset {dataset.dataset_config.folder_path}, you either need all buckets or none"
 
+        # ALWAYS use UnifiedBucketManager for bucket mode
+        from toolkit.unified_bucket_manager import UnifiedBucketManager
+        from toolkit.unified_bucket_dataset import UnifiedBucketDataset
+        
+        # Create unified bucket manager
+        bucket_manager = UnifiedBucketManager(datasets, batch_size)
+        bucket_manager.build_unified_buckets()
+        bucket_manager.shuffle_and_build_batches()
+        
+        # Create unified dataset wrapper
+        unified_dataset = UnifiedBucketDataset(datasets, bucket_manager)
+        
         data_loader = DataLoader(
-            concatenated_dataset,
-            batch_size=None,  # we batch in the datasets for now
+            unified_dataset,
+            batch_size=None,  # we batch in the bucket manager
             drop_last=False,
             shuffle=True,
             collate_fn=dto_collation,  # Use the custom collate function
@@ -708,6 +720,19 @@ def get_dataloader_from_datasets(
 def trigger_dataloader_setup_epoch(dataloader: DataLoader):
     # hacky but needed because of different types of datasets and dataloaders
     dataloader.len = None
+    
+    # Support UnifiedBucketDataset
+    if hasattr(dataloader.dataset, 'bucket_manager'):
+        # Shuffle buckets in each dataset
+        for dataset in dataloader.dataset.datasets:
+            if hasattr(dataset, 'shuffle_buckets'):
+                dataset.shuffle_buckets()
+        
+        # Rebuild batch_indices with shuffled buckets
+        dataloader.dataset.bucket_manager.rebuild_for_epoch()
+        dataloader.dataset.len = None
+        return
+    
     if isinstance(dataloader.dataset, list):
         for dataset in dataloader.dataset:
             if hasattr(dataset, 'datasets'):
