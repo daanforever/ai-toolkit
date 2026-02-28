@@ -8,6 +8,7 @@ and creates unified batches with elements from different datasets mixed together
 import random
 import warnings
 from typing import List, Dict, Tuple, TYPE_CHECKING
+from toolkit.print import print_acc
 
 if TYPE_CHECKING:
     from toolkit.data_loader import AiToolkitDataset
@@ -104,13 +105,16 @@ class UnifiedBucketManager:
                     f"(reference: {ref_config.random_crop}). Elements will use their own dataset's random_crop."
                 )
     
-    def build_unified_buckets(self):
+    def build_unified_buckets(self, quiet=False):
         """
         Build unified buckets by combining buckets from all datasets.
         
         Iterates through all datasets and their buckets, combining buckets with
         the same bucket_key (dimensions). Stores (dataset_idx, local_file_idx) pairs
         for each element.
+        
+        Args:
+            quiet: If True, suppress informational messages
         
         Example result:
             unified_buckets["512x768"] = [(0, 5), (0, 12), (1, 3), (1, 8), ...]
@@ -135,10 +139,23 @@ class UnifiedBucketManager:
                 # Add all files from this bucket with (dataset_idx, file_idx) pairs
                 for local_file_idx in bucket.file_list_idx:
                     self.unified_buckets[bucket_key].append((dataset_idx, local_file_idx))
+        
+        # Print unified bucket summary
+        if not quiet:
+            if len(self.datasets) > 1:
+                print_acc(f'Unified bucket sizes ({len(self.datasets)} datasets combined):')
+            else:
+                print_acc(f'Unified bucket sizes for {self.datasets[0].dataset_path}:')
+            for bucket_key, elements in self.unified_buckets.items():
+                print_acc(f'  {bucket_key}: {len(elements)} files')
+            print_acc(f'{len(self.unified_buckets)} buckets made')
     
-    def shuffle_and_build_batches(self):
+    def shuffle_and_build_batches(self, quiet=False):
         """
         Shuffle elements within each bucket and build batches.
+        
+        Args:
+            quiet: If True, suppress informational messages
         
         Process:
         1. For each bucket, shuffle all elements (mixing datasets)
@@ -162,6 +179,10 @@ class UnifiedBucketManager:
         
         # Shuffle the order of batches themselves
         random.shuffle(self.batch_indices)
+        
+        # Print batch creation summary
+        if not quiet:
+            print_acc(f'  - {len(self.batch_indices)} batches created (batch_size={self.batch_size})')
     
     def rebuild_for_epoch(self):
         """
@@ -175,10 +196,11 @@ class UnifiedBucketManager:
         rebuilds buckets and batches for a new epoch, while update_batch_size()
         only recreates batches with a new size.
         """
+        print_acc('Rebuilding unified buckets for new epoch')
         # Rebuild unified buckets (datasets have already shuffled their buckets)
-        self.build_unified_buckets()
+        self.build_unified_buckets(quiet=True)
         # Create new batch indices with shuffled data
-        self.shuffle_and_build_batches()
+        self.shuffle_and_build_batches(quiet=True)
     
     def update_batch_size(self, new_batch_size: int):
         """
