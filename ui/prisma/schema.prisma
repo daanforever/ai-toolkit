@@ -36,6 +36,7 @@ model Job {
   speed_string    String   @default("")
   queue_position  Int      @default(0)
   runtime_max_lr  Float?
+  runtime_min_lr  Float?
   runtime_gaussian_mean Float?
   runtime_gaussian_std  Float?
   runtime_weight_decay  Float?

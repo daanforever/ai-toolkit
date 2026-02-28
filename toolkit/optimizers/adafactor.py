@@ -206,6 +206,14 @@ class Adafactor(torch.optim.Optimizer):
         if is_debug_enabled():
             print_acc(f"Adafactor: applied runtime max_lr={value}")
 
+    def set_min_lr(self, value: float) -> None:
+        """Update min_lr at runtime (e.g. from UI)."""
+        self._min_lr = value
+        for group in self.param_groups:
+            group["min_lr"] = value
+        if is_debug_enabled():
+            print_acc(f"Adafactor: applied runtime min_lr={value}")
+
     def set_weight_decay(self, value: float) -> None:
         """Update weight_decay at runtime (e.g. from UI)."""
         for group in self.param_groups:

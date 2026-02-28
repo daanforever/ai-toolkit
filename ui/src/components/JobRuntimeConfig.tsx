@@ -58,12 +58,16 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
   const optimizerParams = train?.optimizer_params;
   const trainAny = train as Record<string, unknown> | undefined;
   const hasMaxLr = optimizerParams && 'max_lr' in optimizerParams;
+  const hasMinLr = optimizerParams && 'min_lr' in optimizerParams;
 
   const timestepType = train?.timestep_type ?? defaultJobConfig.config.process[0].train.timestep_type;
   const contentOrStyle = train?.content_or_style ?? defaultJobConfig.config.process[0].train.content_or_style;
   const weightDecay = optimizerParams?.weight_decay ?? defaultJobConfig.config.process[0].train.optimizer_params.weight_decay;
   const maxLr = hasMaxLr && typeof (optimizerParams as { max_lr?: number }).max_lr === 'number'
     ? (optimizerParams as { max_lr: number }).max_lr
+    : null;
+  const minLr = hasMinLr && typeof (optimizerParams as { min_lr?: number }).min_lr === 'number'
+    ? (optimizerParams as { min_lr: number }).min_lr
     : null;
   const gaussianMean = trainAny?.gaussian_mean != null
     ? Number(trainAny.gaussian_mean)
@@ -95,6 +99,9 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     if (hasMaxLr) {
       (process.train.optimizer_params as Record<string, number>).max_lr = maxLr ?? 1e-4;
     }
+    if (hasMinLr) {
+      (process.train.optimizer_params as Record<string, number>).min_lr = minLr ?? 1e-6;
+    }
     (process.train as Record<string, number>).gaussian_mean = gaussianMean;
     (process.train as Record<string, number>).gaussian_std = gaussianStd;
 
@@ -116,6 +123,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
 
       const patchBody: {
         max_lr?: number;
+        min_lr?: number;
         weight_decay?: number;
         content_or_style?: string;
         timestep_type?: string;
@@ -130,6 +138,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         gaussian_std: gaussianStd,
       };
       if (hasMaxLr && maxLr != null) patchBody.max_lr = maxLr;
+      if (hasMinLr && minLr != null) patchBody.min_lr = minLr;
       if (process.datasets?.length) {
         patchBody.network_weights = process.datasets.map((d: { network_weight?: number }) => d.network_weight ?? 1);
       }
@@ -161,6 +170,8 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     weightDecay,
     maxLr,
     hasMaxLr,
+    minLr,
+    hasMinLr,
     gaussianMean,
     gaussianStd,
     datasets,
@@ -197,6 +208,25 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
                   const v = e.target.value.trim();
                   const num = v === '' ? null : parseFloat(v);
                   setValue(num != null && Number.isFinite(num) ? num : undefined, 'config.process[0].train.optimizer_params.max_lr');
+                  setApplyStatus('idle');
+                }}
+                className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+              />
+            </div>
+          )}
+          {hasMinLr && (
+            <div className="space-y-2 flex-1 min-w-[140px]">
+              <p className="text-xs text-gray-400">Min LR</p>
+              <input
+                type="number"
+                min={1e-6}
+                step="any"
+                placeholder="e.g. 1e-6"
+                value={minLr ?? ''}
+                onChange={(e) => {
+                  const v = e.target.value.trim();
+                  const num = v === '' ? null : parseFloat(v);
+                  setValue(num != null && Number.isFinite(num) ? num : undefined, 'config.process[0].train.optimizer_params.min_lr');
                   setApplyStatus('idle');
                 }}
                 className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"

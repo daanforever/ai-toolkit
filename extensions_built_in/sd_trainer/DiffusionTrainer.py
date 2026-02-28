@@ -40,6 +40,7 @@ class DiffusionTrainer(SDTrainer):
             # Track all async tasks
             self._async_tasks = []
             self._last_applied_runtime_max_lr = None
+            self._last_applied_runtime_min_lr = None
             self._last_applied_runtime_gaussian_mean = None
             self._last_applied_runtime_gaussian_std = None
             self._last_applied_runtime_weight_decay = None
@@ -202,6 +203,47 @@ class DiffusionTrainer(SDTrainer):
             if is_debug_enabled():
                 print_acc(
                     f"\nruntime_max_lr from DB not applied: optimizer has no set_max_lr (type: {type(optimizer).__name__})"
+                )
+
+    def get_runtime_min_lr(self):
+        """Read runtime_min_lr from DB (only when is_ui_trainer). Returns float or None."""
+        if not self.is_ui_trainer:
+            return None
+
+        def _read():
+            with self._db_connect() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT runtime_min_lr FROM Job WHERE id = ?", (self.job_id,)
+                )
+                row = cursor.fetchone()
+                if row is None or row[0] is None:
+                    return None
+                return float(row[0])
+
+        return _read()
+
+    def apply_runtime_min_lr(self):
+        """If runtime_min_lr is set in DB, apply it to the optimizer (e.g. Adafactor)."""
+        if not self.is_ui_trainer:
+            return
+        value = self.get_runtime_min_lr()
+        if value is None:
+            return
+        if value == self._last_applied_runtime_min_lr:
+            return
+        optimizer = unwrap_model(self.optimizer)
+        while getattr(optimizer, "optimizer", None) is not None:
+            optimizer = optimizer.optimizer
+        if hasattr(optimizer, "set_min_lr"):
+            if is_debug_enabled():
+                print_acc(f"\nruntime_min_lr from UI/DB: {value}")
+            optimizer.set_min_lr(value)
+            self._last_applied_runtime_min_lr = value
+        else:
+            if is_debug_enabled():
+                print_acc(
+                    f"\nruntime_min_lr from DB not applied: optimizer has no set_min_lr (type: {type(optimizer).__name__})"
                 )
 
     def get_runtime_gaussian_params(self):
@@ -512,6 +554,7 @@ class DiffusionTrainer(SDTrainer):
             self.update_step()
             self.maybe_stop()
             self.apply_runtime_max_lr()
+            self.apply_runtime_min_lr()
             self.apply_runtime_gaussian_params()
             self.apply_runtime_weight_decay()
             self.apply_runtime_content_or_style()
