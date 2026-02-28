@@ -47,6 +47,7 @@ class DiffusionTrainer(SDTrainer):
             self._last_applied_runtime_content_or_style = None
             self._last_applied_runtime_timestep_type = None
             self._last_applied_runtime_network_weights: Optional[tuple] = None
+            self._last_applied_runtime_batch_size = None
             # Initialize the status
             self._run_async_operation(self._update_status("running", "Starting"))
             self._stop_watcher_started = False
@@ -287,6 +288,25 @@ class DiffusionTrainer(SDTrainer):
                 f"\nruntime gaussian_mean/std from UI/DB: {self.train_config.gaussian_mean}, {self.train_config.gaussian_std}"
             )
 
+    def get_runtime_batch_size(self):
+        """Read runtime_batch_size from DB (only when is_ui_trainer). Returns int or None."""
+        if not self.is_ui_trainer:
+            return None
+
+        def _read():
+            with self._db_connect() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT runtime_batch_size FROM Job WHERE id = ?",
+                    (self.job_id,),
+                )
+                row = cursor.fetchone()
+                if row is None or row[0] is None:
+                    return None
+                return int(row[0])
+
+        return _read()
+
     def get_runtime_weight_decay(self):
         """Read runtime_weight_decay from DB (only when is_ui_trainer). Returns float or None."""
         if not self.is_ui_trainer:
@@ -305,6 +325,44 @@ class DiffusionTrainer(SDTrainer):
                 return float(row[0])
 
         return _read()
+
+    def apply_runtime_batch_size(self):
+        """If runtime_batch_size is set in DB, apply it to train_config and recreate data loaders."""
+        if not self.is_ui_trainer:
+            return
+        batch_size = self.get_runtime_batch_size()
+        if batch_size is None:
+            return
+        if batch_size == self._last_applied_runtime_batch_size:
+            return
+        
+        old_batch_size = self.train_config.batch_size
+        self.train_config.batch_size = batch_size
+        self._last_applied_runtime_batch_size = batch_size
+        
+        # Recreate data loaders with new batch_size
+        if self.datasets is not None:
+            from toolkit.data_loader import get_dataloader_from_datasets
+            self.data_loader = get_dataloader_from_datasets(
+                self.datasets, 
+                self.train_config.batch_size, 
+                self.sd, 
+                train_config=self.train_config
+            )
+        
+        if self.datasets_reg is not None:
+            from toolkit.data_loader import get_dataloader_from_datasets
+            self.data_loader_reg = get_dataloader_from_datasets(
+                self.datasets_reg, 
+                self.train_config.batch_size,
+                self.sd, 
+                train_config=self.train_config
+            )
+        
+        if is_debug_enabled():
+            print_acc(
+                f"\nruntime batch_size from UI/DB: {old_batch_size} -> {batch_size}, data loaders recreated"
+            )
 
     def apply_runtime_weight_decay(self):
         """If runtime_weight_decay is set in DB, apply it to the optimizer (e.g. Adafactor)."""
@@ -560,6 +618,7 @@ class DiffusionTrainer(SDTrainer):
             self.apply_runtime_content_or_style()
             self.apply_runtime_timestep_type()
             self.apply_runtime_network_weights()
+            self.apply_runtime_batch_size()
 
     def hook_before_model_load(self):
         super().hook_before_model_load()

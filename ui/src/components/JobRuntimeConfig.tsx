@@ -75,6 +75,9 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
   const gaussianStd = trainAny?.gaussian_std != null
     ? Number(trainAny.gaussian_std)
     : 0.2;
+  const batchSize = trainAny?.batch_size != null
+    ? Number(trainAny.batch_size)
+    : 1;
 
   const datasets = config?.config?.process?.[0]?.datasets;
 
@@ -104,6 +107,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     }
     (process.train as Record<string, number>).gaussian_mean = gaussianMean;
     (process.train as Record<string, number>).gaussian_std = gaussianStd;
+    (process.train as Record<string, number>).batch_size = batchSize;
 
     try {
       const postRes = await fetch('/api/jobs', {
@@ -130,12 +134,14 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         gaussian_mean?: number;
         gaussian_std?: number;
         network_weights?: number[];
+        batch_size?: number;
       } = {
         weight_decay: weightDecay,
         content_or_style: contentOrStyle,
         timestep_type: timestepType,
         gaussian_mean: gaussianMean,
         gaussian_std: gaussianStd,
+        batch_size: batchSize,
       };
       if (hasMaxLr && maxLr != null) patchBody.max_lr = maxLr;
       if (hasMinLr && minLr != null) patchBody.min_lr = minLr;
@@ -174,6 +180,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     hasMinLr,
     gaussianMean,
     gaussianStd,
+    batchSize,
     datasets,
     onRefresh,
   ]);
@@ -312,6 +319,27 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
               className="w-24 rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
             />
           </div>
+        </div>
+
+        <div className="space-y-2">
+          <p className="text-xs text-gray-400">Batch size</p>
+          <input
+            type="number"
+            min={1}
+            max={128}
+            step={1}
+            placeholder="e.g. 1"
+            value={batchSize}
+            onChange={(e) => {
+              const v = e.target.value.trim();
+              const num = v === '' ? 1 : parseInt(v, 10);
+              if (Number.isInteger(num) && num >= 1) {
+                setValue(num, 'config.process[0].train.batch_size');
+                setApplyStatus('idle');
+              }
+            }}
+            className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+          />
         </div>
 
         {Array.isArray(datasets) && datasets.length > 0 && (
