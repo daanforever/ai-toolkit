@@ -435,7 +435,14 @@ class BaseModel:
                     # Load sampling transformer onto device if it exists
                     if self._sampling_transformer is not None:
                         self.model.to("cpu")
+
+                        if torch.cuda.is_available():
+                            torch.cuda.synchronize()
+                            torch.cuda.empty_cache()
+
+                        self.network.force_to(self.device_torch, torch.float32)
                         self._sampling_transformer.to(self.device_torch, dtype=self.torch_dtype)
+                        print_acc("\nLoaded sampling transformer to GPU")
                     else:
                         self.model.to(self.device_torch, dtype=self.torch_dtype)
 
@@ -690,9 +697,9 @@ class BaseModel:
             # Unload sampling transformer from GPU and restore main model to device
             if self._sampling_transformer is not None:
                 self._sampling_transformer.to("cpu")
+                self.network.force_to('cpu', torch.float32)
                 self.model.to(self.device_torch, dtype=self.torch_dtype)
-                if is_debug_enabled():
-                    print_acc("\nUnloaded sampling transformer to CPU")
+                print_acc("\nUnloaded sampling transformer to CPU")
             # Ensure CUDA work is finished so VRAM is actually released before next use
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
