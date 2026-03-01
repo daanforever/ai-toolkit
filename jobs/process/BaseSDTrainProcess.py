@@ -53,7 +53,6 @@ from toolkit.sd_device_states_presets import get_train_sd_device_state_preset
 from toolkit.stable_diffusion_model import StableDiffusion
 
 from jobs.process import BaseTrainProcess
-from extensions_built_in.sd_trainer.gaussian_timestep_weights import evaluate_gaussian_timestep
 from toolkit.metadata import get_meta_for_safetensors, load_metadata_from_safetensors, add_base_model_info_to_meta, \
     parse_metadata_from_safetensors
 from toolkit.train_tools import get_torch_dtype, LearnableSNRGamma, apply_learnable_snr_gos, apply_snr_weight
@@ -76,6 +75,8 @@ import hashlib
 from toolkit.util.blended_blur_noise import get_blended_blur_noise
 from toolkit.util.debug import memory_debug, set_debug_config, is_debug_enabled
 from toolkit.util.get_model import get_model_class
+from toolkit.timestep_sampler import TimestepSampler, TimestepSamplerResult
+from toolkit.timestep_debug import TimestepDistributionLogger
 
 def flush():
     torch.cuda.empty_cache()
@@ -102,9 +103,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
         self.start_step = 0
         self.epoch_num = 0
         self.last_save_step = 0
-        # For logging timestep debugging
-        self._collected_indices = []
-        self._collected_timesteps = []
+        # For logging timestep debugging (lazy init when debug enabled)
+        self._timestep_debug_logger = None
         # start at 1 so we can do a sample at the start
         self.grad_accumulation_step = 1
         # if true, then we do not do an optimizer step. We are accumulating gradients
@@ -1231,218 +1231,45 @@ class BaseSDTrainProcess(BaseTrainProcess):
             
                     
             with self.timer('prepare_timesteps_indices'):
-
                 content_or_style = self.train_config.content_or_style
                 if is_reg:
                     content_or_style = self.train_config.content_or_style_reg
 
-                # if self.train_config.timestep_sampling == 'style' or self.train_config.timestep_sampling == 'content':
-                if self.train_config.timestep_type == 'next_sample':
-                    timestep_indices = torch.randint(
-                            0,
-                            num_train_timesteps - 2, # -1 for 0 idx, -1 so we can step
-                            (batch_size,),
-                            device=self.device_torch
-                        )
-                    timestep_indices = timestep_indices.long()
-                elif self.train_config.timestep_type == 'one_step':
-                    timestep_indices = torch.zeros((batch_size,), device=self.device_torch, dtype=torch.long)
-                elif content_or_style in ['style', 'content']:
-                    # this is from diffusers training code
-                    # Cubic sampling for favoring later or earlier timesteps
-                    # For more details about why cubic sampling is used for content / structure,
-                    # refer to section 3.4 of https://arxiv.org/abs/2302.08453
-
-                    # for content / structure, it is best to favor earlier timesteps
-                    # for style, it is best to favor later timesteps
-
-                    orig_timesteps = torch.rand((batch_size,), device=latents.device)
-                    ntt = self.train_config.num_train_timesteps
-
-                    if content_or_style == 'content':
-                        timestep_indices = (1 - orig_timesteps) ** self.train_config.timestep_bias_exponent * self.train_config.num_train_timesteps
-                    elif content_or_style == 'style':
-                        timestep_indices = orig_timesteps ** self.train_config.timestep_bias_exponent * self.train_config.num_train_timesteps
-
-                    timestep_indices = value_map(
-                        timestep_indices,
-                        0,
-                        ntt,
-                        ntt - max_noise_steps,
-                        ntt - min_noise_steps
+                if not hasattr(self, '_timestep_sampler') or self._timestep_sampler is None:
+                    self._timestep_sampler = TimestepSampler(
+                        self.train_config, self.sd.noise_scheduler
                     )
+                result = self._timestep_sampler.sample(
+                    batch_size=batch_size,
+                    latents=latents,
+                    content_or_style=content_or_style,
+                    min_noise_steps=min_noise_steps,
+                    max_noise_steps=max_noise_steps,
+                    num_train_timesteps=num_train_timesteps,
+                    device=self.device_torch,
+                    step_num=self.step_num,
+                )
+                timesteps = result.timesteps
+                timestep_indices = result.timestep_indices
 
-                    timestep_indices = timestep_indices.long().clamp(
-                        ntt - max_noise_steps,
-                        ntt - min_noise_steps
-                    )
-
-                    timestep_indices.sort()
-                    
-                elif content_or_style == "gaussian":
-                    # Gaussian (normal) distribution; gaussian_mean in [0,999] is timestep value space. Curriculum: gaussian_std_target.
-                    ntt = self.train_config.num_train_timesteps
-                    if self.train_config.gaussian_std_target is not None:
-                        progress = self.step_num / self.train_config.steps
-                        current_std = self.train_config.gaussian_std + progress * (self.train_config.gaussian_std_target - self.train_config.gaussian_std)
-                    else:
-                        current_std = self.train_config.gaussian_std
-
-                    allowed_start = ntt - max_noise_steps
-                    allowed_end = ntt - min_noise_steps
-                    all_indices = torch.arange(allowed_start, allowed_end + 1, device=latents.device, dtype=torch.long)
-                    all_timestep_values = self.sd.noise_scheduler.timesteps[all_indices]
-                    weights = evaluate_gaussian_timestep(
-                        all_timestep_values,
-                        self.train_config.gaussian_mean,
-                        current_std,
-                        latents.device,
-                        torch.float32,
-                        ntt,
-                    )
-                    probs = weights / weights.sum().clamp(min=1e-8)
-                    sampled_idx = torch.multinomial(probs, batch_size, replacement=True)
-                    timestep_indices = all_indices[sampled_idx]
-                    timestep_indices.sort()
-                    
-                elif content_or_style == 'fixed_cycle':
-                    # Deterministic cycle over fixed timestep values (for Turbo LoRA reproducibility)
-                    timestep_list = self.train_config.fixed_cycle_timesteps
-                    if not timestep_list:
-                        raise ValueError("content_or_style is 'fixed_cycle' but fixed_cycle_timesteps is empty")
-                    resolved = getattr(self, '_fixed_cycle_resolved_timesteps', None)
-                    if resolved is None:
-                        list_copy = list(timestep_list)
-                        if self.train_config.fixed_cycle_seed is not None:
-                            random.Random(self.train_config.fixed_cycle_seed).shuffle(list_copy)
-                        st = self.sd.noise_scheduler.timesteps
-                        resolved = []
-                        for v in list_copy:
-                            v_t = torch.tensor(v, device=st.device, dtype=st.dtype)
-                            idx = (torch.abs(st - v_t)).argmin().item()
-                            resolved.append(st[idx].item())
-                        self._fixed_cycle_resolved_timesteps = resolved
-                    idx_cycle = self.step_num % len(resolved)
-                    t_val = resolved[idx_cycle]
-                    st = self.sd.noise_scheduler.timesteps
-                    timesteps = torch.full(
-                        (batch_size,), t_val, device=latents.device, dtype=st.dtype
-                    )
-                    
-                elif content_or_style == 'balanced':
-                    if min_noise_steps == max_noise_steps:
-                        timestep_indices = torch.ones((batch_size,), device=self.device_torch) * min_noise_steps
-                    else:
-                        # todo, some schedulers use indices, otheres use timesteps. Not sure what to do here
-                        min_idx = min_noise_steps + 1
-                        max_idx = max_noise_steps - 1
-                        if self.train_config.noise_scheduler == 'flowmatch':
-                            # flowmatch uses indices, so we need to use indices
-                            min_idx = min_noise_steps
-                            max_idx = max_noise_steps
-                        timestep_indices = torch.randint(
-                            min_idx,
-                            max_idx,
-                            (batch_size,),
-                            device=self.device_torch
-                        )
-                    timestep_indices = timestep_indices.long()
-                else:
-                    raise ValueError(f"Unknown content_or_style {content_or_style}")
             with self.timer('convert_timestep_indices_to_timesteps'):
-                # convert the timestep_indices to a timestep (fixed_cycle already set timesteps above)
-                if content_or_style != 'fixed_cycle':
-                    timesteps = self.sd.noise_scheduler.timesteps[timestep_indices.long()]
-                
-                # When debug enabled: collect data every step for timestep distribution
                 if is_debug_enabled() and (self.logging_config.log_every or 0) > 0:
-                    # Always collect data (fixed_cycle has no timestep_indices, use cycle index)
-                    if content_or_style == 'fixed_cycle':
-                        self._collected_indices.append(self.step_num % len(self._fixed_cycle_resolved_timesteps))
-                        self._collected_timesteps.extend(timesteps.cpu().tolist())
-                    else:
-                        self._collected_indices.extend(timestep_indices.cpu().tolist())
-                        self._collected_timesteps.extend(timesteps.cpu().tolist())
-                    
-                    threshold = self.logging_config.log_every * 100
-                    # Log when we have enough samples
-                    if len(self._collected_indices) >= threshold:
-                        scheduler_timesteps = self.sd.noise_scheduler.timesteps.cpu().tolist()
-                        
-                        print_acc(f"\n{'='*70}")
-                        print_acc(f"TIMESTEP DISTRIBUTION DEBUG")
-                        print_acc(f"{'='*70}")
+                    if self._timestep_debug_logger is None:
+                        self._timestep_debug_logger = TimestepDistributionLogger(
+                            self.train_config, self.logging_config
+                        )
+                    self._timestep_debug_logger.collect(
+                        timestep_indices, timesteps, content_or_style,
+                        self.step_num, self._timestep_sampler,
+                    )
+                    if self._timestep_debug_logger.should_log():
+                        self._timestep_debug_logger.log_and_reset(
+                            self.step_num,
+                            min_noise_steps,
+                            max_noise_steps,
+                            self.sd.noise_scheduler.timesteps,
+                        )
 
-                        print_acc(f"Total scheduler timesteps length: {len(scheduler_timesteps)}")
-                        # print_acc(f"\nScheduler timesteps array (first 10): {scheduler_timesteps[:10]}")
-                        # print_acc(f"Scheduler timesteps array (last 10): {scheduler_timesteps[-10:]}")
-                        
-                        print_acc(f"\nFirst 10 timestep_indices (generated indices):")
-                        print_acc(f"{self._collected_indices[:10]}")
-                        print_acc(f"\nFirst 10 timesteps (actual values after indexing):")
-                        print_acc(f"{self._collected_timesteps[:10]}")
-
-                        weights_list = None
-                        if self.train_config.timestep_type == "gaussian":
-                            num_samples_val = threshold
-                            ntt = self.train_config.num_train_timesteps
-                            ts_tensor = torch.tensor(
-                                self._collected_timesteps[:num_samples_val],
-                                device=torch.device("cpu"),
-                                dtype=torch.long,
-                            )
-                            weights_tensor = evaluate_gaussian_timestep(
-                                ts_tensor,
-                                self.train_config.gaussian_mean,
-                                self.train_config.gaussian_std,
-                                torch.device("cpu"),
-                                torch.float32,
-                                ntt,
-                            )
-                            weights_list = weights_tensor.tolist()
-                            pairs_10 = list(zip(self._collected_timesteps[:10], weights_list[:10]))
-                            print_acc(f"\nFirst 10 (timestep, loss_weight): {pairs_10}")
-
-                        print_acc(f"Config:")
-                        print_acc(f"  content_or_style: {content_or_style}")
-                        print_acc(f"  noise_scheduler: {self.train_config.noise_scheduler}")
-                        print_acc(f"  timestep_type: {self.train_config.timestep_type}")
-                        print_acc(f"  num_train_timesteps: {self.train_config.num_train_timesteps}")
-                        print_acc(f"  min_denoising_steps: {min_noise_steps}")
-                        print_acc(f"  max_denoising_steps: {max_noise_steps}")
-                        print_acc(f"  gaussian_mean: {self.train_config.gaussian_mean}")
-                        print_acc(f"  gaussian_std: {self.train_config.gaussian_std}")
-                        print_acc(f"  gaussian_std_target: {self.train_config.gaussian_std_target}")
-                        
-                        # Statistics
-                        num_samples = threshold
-                        indices_min = min(self._collected_indices[:num_samples])
-                        indices_max = max(self._collected_indices[:num_samples])
-                        indices_mean = sum(self._collected_indices[:num_samples]) / num_samples
-                        
-                        timesteps_min = min(self._collected_timesteps[:num_samples])
-                        timesteps_max = max(self._collected_timesteps[:num_samples])
-                        timesteps_mean = sum(self._collected_timesteps[:num_samples]) / num_samples
-                        
-                        print_acc(f"\nStatistics ({num_samples} samples):")
-                        print_acc(f"  Indices: max={indices_max}, mean={indices_mean:.1f}, min={indices_min}")
-                        print_acc(f"  Timesteps: max={timesteps_max:.1f}, mean={timesteps_mean:.1f}, min={timesteps_min:.1f}")
-                        if weights_list is not None:
-                            weights_min = min(weights_list)
-                            weights_max = max(weights_list)
-                            weights_mean = sum(weights_list) / num_samples
-                            print_acc(f"  Loss weights: max={weights_max:.3f}, mean={weights_mean:.3f}, min={weights_min:.3f}")
-                        if self.train_config.gaussian_std_target is not None:
-                            progress = self.step_num / self.train_config.steps
-                            current_std = self.train_config.gaussian_std + progress * (self.train_config.gaussian_std_target - self.train_config.gaussian_std)
-                            percent = progress * 100.0
-                            print_acc(f"  current_std: {current_std:.3f} (progress: {percent:.1f}%)")
-                        print_acc(f"  Step: {self.step_num} ({self.step_num * 100 / self.train_config.steps:.1f}%)")
-                        print_acc(f"{'='*70}\n")
-                        
-                        self._collected_indices = []
-                        self._collected_timesteps = []
-                
             with self.timer('prepare_noise'):
                 # get noise
                 noise = self.get_noise(latents, batch_size, dtype=dtype, batch=batch, timestep=timesteps)
