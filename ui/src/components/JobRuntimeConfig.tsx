@@ -92,6 +92,9 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     ? Number(sampleAny.sample_every)
     : 250;
 
+  const loggingAny = config?.config?.process?.[0]?.logging as { debug?: boolean } | undefined;
+  const debug = loggingAny?.debug ?? false;
+
   const datasets = config?.config?.process?.[0]?.datasets;
 
   const handleApply = useCallback(async () => {
@@ -141,6 +144,11 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     }
     (process.sample as Record<string, number>).sample_every = sampleEvery;
 
+    if (!process.logging) {
+      process.logging = { debug: false };
+    }
+    (process.logging as Record<string, boolean>).debug = debug;
+
     try {
       const postRes = await fetch('/api/jobs', {
         method: 'POST',
@@ -170,6 +178,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         save_every?: number;
         sample_every?: number;
         min_snr_gamma?: number;
+        debug?: boolean;
       } = {
         weight_decay: weightDecay,
         content_or_style: contentOrStyle,
@@ -180,6 +189,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         save_every: saveEvery,
         sample_every: sampleEvery,
         min_snr_gamma: minSnrGamma,
+        debug,
       };
       if (hasMaxLr && maxLr != null) patchBody.max_lr = maxLr;
       if (hasMinLr && minLr != null) patchBody.min_lr = minLr;
@@ -222,6 +232,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     saveEvery,
     sampleEvery,
     minSnrGamma,
+    debug,
     datasets,
     onRefresh,
   ]);
@@ -440,6 +451,26 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
               }}
               className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
             />
+          </div>
+        </div>
+
+        <div className="flex items-center gap-4 flex-wrap">
+          <div className="space-y-2 flex items-center gap-2">
+            <p className="text-xs text-gray-400">Debug (logging)</p>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={debug}
+              onClick={() => {
+                setValue(!debug, 'config.process[0].logging.debug');
+                setApplyStatus('idle');
+              }}
+              className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-900 ${debug ? 'bg-blue-600' : 'bg-gray-600'}`}
+            >
+              <span
+                className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition-transform ${debug ? 'translate-x-5' : 'translate-x-1'}`}
+              />
+            </button>
           </div>
         </div>
 

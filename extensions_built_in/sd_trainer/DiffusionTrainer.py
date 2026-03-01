@@ -51,6 +51,7 @@ class DiffusionTrainer(SDTrainer):
             self._last_applied_runtime_save_every = None
             self._last_applied_runtime_sample_every = None
             self._last_applied_runtime_min_snr_gamma = None
+            self._last_applied_runtime_debug = None
             # Initialize the status
             self._run_async_operation(self._update_status("running", "Starting"))
             self._stop_watcher_started = False
@@ -424,6 +425,37 @@ class DiffusionTrainer(SDTrainer):
 
         return _read()
 
+    def get_runtime_debug(self):
+        """Read runtime_debug from DB (only when is_ui_trainer). Returns bool or None."""
+        if not self.is_ui_trainer:
+            return None
+
+        def _read():
+            with self._db_connect() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT runtime_debug FROM RuntimeParams WHERE jobId = ?",
+                    (self.job_id,),
+                )
+                row = cursor.fetchone()
+                if row is None or row[0] is None:
+                    return None
+                return bool(row[0])
+
+        return _read()
+
+    def apply_runtime_debug(self):
+        """If runtime_debug is set in DB, apply it to logging_config.debug."""
+        if not self.is_ui_trainer:
+            return
+        value = self.get_runtime_debug()
+        if value is None or value == self._last_applied_runtime_debug:
+            return
+        self.logging_config.debug = value
+        self._last_applied_runtime_debug = value
+        if is_debug_enabled():
+            print_acc(f"\nruntime debug from UI/DB: {value}")
+
     def apply_runtime_save_every(self):
         """If runtime_save_every is set in DB, apply it to save_config."""
         if not self.is_ui_trainer:
@@ -647,6 +679,7 @@ class DiffusionTrainer(SDTrainer):
         self._last_applied_runtime_save_every = None
         self._last_applied_runtime_sample_every = None
         self._last_applied_runtime_min_snr_gamma = None
+        self._last_applied_runtime_debug = None
 
     async def _update_key(self, key, value):
         if not self.accelerator.is_main_process:
@@ -770,6 +803,7 @@ class DiffusionTrainer(SDTrainer):
             self.apply_runtime_save_every()
             self.apply_runtime_sample_every()
             self.apply_runtime_min_snr_gamma()
+            self.apply_runtime_debug()
 
     def hook_before_model_load(self):
         super().hook_before_model_load()
