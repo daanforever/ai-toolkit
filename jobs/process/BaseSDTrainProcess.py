@@ -1766,7 +1766,6 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
 
                 # todo switch everything to proper mixed precision like this
-                self.network.force_to(self.device_torch, dtype=torch.float32)
                 # give network to sd so it can use it
                 self.sd.network = self.network
                 self.network._update_torch_multiplier()
@@ -1838,7 +1837,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
                             **network_kwargs
                         )
                         
-                        sampling_network.force_to(self.device_torch, dtype=torch.float32)
+                        # Share parameters immediately to avoid wasteful GPU allocation
+                        sampling_network.share_parameters_with(self.network)
                         sampling_network._update_torch_multiplier()
                         
                         sampling_network.apply_to(
@@ -1854,10 +1854,13 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         
                         # Store sampling network on model for use during generation
                         self.sd._sampling_network = sampling_network
-                        # One LoRA for both: share parameters with training network (no copy/sync)
-                        if hasattr(sampling_network, "share_parameters_with"):
-                            sampling_network.share_parameters_with(self.network)
                         flush()
+                
+                # Move LoRA networks to CPU before dataset loading (caching phase)
+                # Keep float32 for numerical stability in optimizer (master weights)
+                # prepare_accelerator will restore them to GPU after caching
+                self.network.force_to('cpu', torch.float32)
+                flush()
 
                 # LyCORIS doesnt have default_lr
                 config = {
