@@ -177,7 +177,7 @@ class DiffusionTrainer(SDTrainer):
             with self._db_connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT runtime_max_lr FROM Job WHERE id = ?", (self.job_id,)
+                    "SELECT runtime_max_lr FROM RuntimeParams WHERE jobId = ?", (self.job_id,)
                 )
                 row = cursor.fetchone()
                 if row is None or row[0] is None:
@@ -218,7 +218,7 @@ class DiffusionTrainer(SDTrainer):
             with self._db_connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT runtime_min_lr FROM Job WHERE id = ?", (self.job_id,)
+                    "SELECT runtime_min_lr FROM RuntimeParams WHERE jobId = ?", (self.job_id,)
                 )
                 row = cursor.fetchone()
                 if row is None or row[0] is None:
@@ -259,7 +259,7 @@ class DiffusionTrainer(SDTrainer):
             with self._db_connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT runtime_gaussian_mean, runtime_gaussian_std FROM Job WHERE id = ?",
+                    "SELECT runtime_gaussian_mean, runtime_gaussian_std FROM RuntimeParams WHERE jobId = ?",
                     (self.job_id,),
                 )
                 row = cursor.fetchone()
@@ -300,7 +300,7 @@ class DiffusionTrainer(SDTrainer):
             with self._db_connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT runtime_batch_size FROM Job WHERE id = ?",
+                    "SELECT runtime_batch_size FROM RuntimeParams WHERE jobId = ?",
                     (self.job_id,),
                 )
                 row = cursor.fetchone()
@@ -319,7 +319,7 @@ class DiffusionTrainer(SDTrainer):
             with self._db_connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT runtime_weight_decay FROM Job WHERE id = ?",
+                    "SELECT runtime_weight_decay FROM RuntimeParams WHERE jobId = ?",
                     (self.job_id,),
                 )
                 row = cursor.fetchone()
@@ -376,7 +376,7 @@ class DiffusionTrainer(SDTrainer):
             with self._db_connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT runtime_save_every FROM Job WHERE id = ?",
+                    "SELECT runtime_save_every FROM RuntimeParams WHERE jobId = ?",
                     (self.job_id,),
                 )
                 row = cursor.fetchone()
@@ -395,7 +395,7 @@ class DiffusionTrainer(SDTrainer):
             with self._db_connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT runtime_sample_every FROM Job WHERE id = ?",
+                    "SELECT runtime_sample_every FROM RuntimeParams WHERE jobId = ?",
                     (self.job_id,),
                 )
                 row = cursor.fetchone()
@@ -414,7 +414,7 @@ class DiffusionTrainer(SDTrainer):
             with self._db_connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT runtime_min_snr_gamma FROM Job WHERE id = ?",
+                    "SELECT runtime_min_snr_gamma FROM RuntimeParams WHERE jobId = ?",
                     (self.job_id,),
                 )
                 row = cursor.fetchone()
@@ -513,7 +513,7 @@ class DiffusionTrainer(SDTrainer):
             with self._db_connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT runtime_content_or_style FROM Job WHERE id = ?",
+                    "SELECT runtime_content_or_style FROM RuntimeParams WHERE jobId = ?",
                     (self.job_id,),
                 )
                 row = cursor.fetchone()
@@ -547,7 +547,7 @@ class DiffusionTrainer(SDTrainer):
             with self._db_connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT runtime_timestep_type FROM Job WHERE id = ?",
+                    "SELECT runtime_timestep_type FROM RuntimeParams WHERE jobId = ?",
                     (self.job_id,),
                 )
                 row = cursor.fetchone()
@@ -580,7 +580,7 @@ class DiffusionTrainer(SDTrainer):
             with self._db_connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT runtime_network_weights FROM Job WHERE id = ?",
+                    "SELECT runtime_network_weights FROM RuntimeParams WHERE jobId = ?",
                     (self.job_id,),
                 )
                 row = cursor.fetchone()
@@ -616,6 +616,37 @@ class DiffusionTrainer(SDTrainer):
         self._last_applied_runtime_network_weights = weights_tuple
         if is_debug_enabled():
             print_acc(f"\nruntime network_weights from UI/DB applied: {list(weights_tuple)}")
+
+    def clear_runtime_params(self):
+        """Clear all runtime parameters from the RuntimeParams table for this job."""
+        if not self.is_ui_trainer:
+            return
+        
+        def _clear():
+            with self._db_connect() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "DELETE FROM RuntimeParams WHERE jobId = ?", (self.job_id,)
+                )
+        
+        _clear()
+        if is_debug_enabled():
+            print_acc("\nCleared runtime parameters from database")
+
+    def _reset_last_applied_runtime(self):
+        """Reset all cached runtime parameter values to None."""
+        self._last_applied_runtime_max_lr = None
+        self._last_applied_runtime_min_lr = None
+        self._last_applied_runtime_gaussian_mean = None
+        self._last_applied_runtime_gaussian_std = None
+        self._last_applied_runtime_weight_decay = None
+        self._last_applied_runtime_content_or_style = None
+        self._last_applied_runtime_timestep_type = None
+        self._last_applied_runtime_network_weights = None
+        self._last_applied_runtime_batch_size = None
+        self._last_applied_runtime_save_every = None
+        self._last_applied_runtime_sample_every = None
+        self._last_applied_runtime_min_snr_gamma = None
 
     async def _update_key(self, key, value):
         if not self.accelerator.is_main_process:
@@ -755,6 +786,8 @@ class DiffusionTrainer(SDTrainer):
     def hook_before_train_loop(self):
         super().hook_before_train_loop()
         if self.is_ui_trainer:
+            self.clear_runtime_params()
+            self._reset_last_applied_runtime()
             self.maybe_stop()
             self.update_step()
             self.update_status("running", "Training")

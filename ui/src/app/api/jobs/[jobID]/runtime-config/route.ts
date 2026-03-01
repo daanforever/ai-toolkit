@@ -180,9 +180,10 @@ export async function PATCH(
     );
   }
 
-  const updated = await prisma.job.update({
-    where: { id: jobID },
-    data,
+  const updated = await prisma.runtimeParams.upsert({
+    where: { jobId: jobID },
+    update: data,
+    create: { jobId: jobID, ...data },
   });
 
   return NextResponse.json(updated);

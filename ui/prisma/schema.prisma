@@ -22,32 +22,39 @@ model Queue {
 }
 
 model Job {
-  id              String   @id @default(uuid())
-  name            String   @unique
+  id              String          @id @default(uuid())
+  name            String          @unique
   gpu_ids         String
   job_config      String // JSON string
-  created_at      DateTime @default(now())
-  updated_at      DateTime @updatedAt
-  status          String   @default("stopped")
-  stop            Boolean  @default(false)
-  return_to_queue Boolean  @default(false) // same as stop, but will be set to 'queued' when stopped
-  step            Int      @default(0)
-  info            String   @default("")
-  speed_string    String   @default("")
-  queue_position  Int      @default(0)
-  runtime_max_lr  Float?
-  runtime_min_lr  Float?
-  runtime_gaussian_mean Float?
-  runtime_gaussian_std  Float?
-  runtime_weight_decay  Float?
-  runtime_content_or_style String?
-  runtime_timestep_type String?
-  runtime_network_weights String?
-  runtime_batch_size Int?
-  runtime_save_every Int?
-  runtime_sample_every Int?
-  runtime_min_snr_gamma Float?
+  created_at      DateTime        @default(now())
+  updated_at      DateTime        @updatedAt
+  status          String          @default("stopped")
+  stop            Boolean         @default(false)
+  return_to_queue Boolean         @default(false) // same as stop, but will be set to 'queued' when stopped
+  step            Int             @default(0)
+  info            String          @default("")
+  speed_string    String          @default("")
+  queue_position  Int             @default(0)
+  runtimeParams   RuntimeParams?
 
   @@index([status])
   @@index([gpu_ids])
+}
+
+model RuntimeParams {
+  jobId                    String   @id
+  job                      Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  runtime_max_lr           Float?
+  runtime_min_lr           Float?
+  runtime_gaussian_mean    Float?
+  runtime_gaussian_std     Float?
+  runtime_weight_decay     Float?
+  runtime_content_or_style String?
+  runtime_timestep_type    String?
+  runtime_network_weights  String?
+  runtime_batch_size       Int?
+  runtime_save_every       Int?
+  runtime_sample_every     Int?
+  runtime_min_snr_gamma    Float?
+  updated_at               DateTime @updatedAt
 }
