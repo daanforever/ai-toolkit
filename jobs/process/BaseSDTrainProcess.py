@@ -1764,8 +1764,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     **network_kwargs
                 )
 
-
                 # todo switch everything to proper mixed precision like this
+                self.network.force_to(self.device_torch, dtype=torch.float32)
+
                 # give network to sd so it can use it
                 self.sd.network = self.network
                 self.network._update_torch_multiplier()
