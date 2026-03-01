@@ -259,51 +259,51 @@ class ZImageModel(BaseModel):
         self.print_and_status_update("Loading ZImage model")
         model_path = normalize_path(self.model_config.name_or_path)
 
-        if is_debug_enabled() and not _zimage_load_debug_patched:
-            log_func = self.print_and_status_update
-            orig_load_file = safetensors.torch.load_file
-            orig_safe_open = safetensors.safe_open
+        # if is_debug_enabled() and not _zimage_load_debug_patched:
+        #     log_func = self.print_and_status_update
+        #     orig_load_file = safetensors.torch.load_file
+        #     orig_safe_open = safetensors.safe_open
 
-            def _debug_path_and_size(path):
-                if path is not None and isinstance(path, (str, os.PathLike)) and os.path.isfile(path):
-                    path_str = os.path.abspath(path)
-                    try:
-                        size = os.path.getsize(path)
-                        return path_str, f" size={size}"
-                    except OSError:
-                        return path_str, ""
-                path_str = repr(path) if path else "<no path>"
-                return path_str, ""
+        #     def _debug_path_and_size(path):
+        #         if path is not None and isinstance(path, (str, os.PathLike)) and os.path.isfile(path):
+        #             path_str = os.path.abspath(path)
+        #             try:
+        #                 size = os.path.getsize(path)
+        #                 return path_str, f" size={size}"
+        #             except OSError:
+        #                 return path_str, ""
+        #         path_str = repr(path) if path else "<no path>"
+        #         return path_str, ""
 
-            def _wrapped_load_file(*args, **kwargs):
-                path = args[0] if args else kwargs.get("filename") or kwargs.get("path")
-                path_str, size_str = _debug_path_and_size(path)
-                start = time.perf_counter()
-                result = orig_load_file(*args, **kwargs)
-                duration = time.perf_counter() - start
-                log_func(f"[ZImage debug] load_file path={path_str}{size_str} duration={duration:.3f}s")
-                return result
+        #     def _wrapped_load_file(*args, **kwargs):
+        #         path = args[0] if args else kwargs.get("filename") or kwargs.get("path")
+        #         path_str, size_str = _debug_path_and_size(path)
+        #         start = time.perf_counter()
+        #         result = orig_load_file(*args, **kwargs)
+        #         duration = time.perf_counter() - start
+        #         log_func(f"[ZImage debug] load_file path={path_str}{size_str} duration={duration:.3f}s")
+        #         return result
 
-            def _wrapped_safe_open(*args, **kwargs):
-                path = args[0] if args else kwargs.get("filename") or kwargs.get("path")
-                path_str, size_str = _debug_path_and_size(path)
-                start = time.perf_counter()
-                result = orig_safe_open(*args, **kwargs)
+        #     def _wrapped_safe_open(*args, **kwargs):
+        #         path = args[0] if args else kwargs.get("filename") or kwargs.get("path")
+        #         path_str, size_str = _debug_path_and_size(path)
+        #         start = time.perf_counter()
+        #         result = orig_safe_open(*args, **kwargs)
 
-                class _WrappedCtx:
-                    def __enter__(_self):
-                        return result.__enter__()
+        #         class _WrappedCtx:
+        #             def __enter__(_self):
+        #                 return result.__enter__()
 
-                    def __exit__(_self, *exc):
-                        duration = time.perf_counter() - start
-                        log_func(f"[ZImage debug] safe_open path={path_str}{size_str} duration={duration:.3f}s")
-                        return result.__exit__(*exc)
+        #             def __exit__(_self, *exc):
+        #                 duration = time.perf_counter() - start
+        #                 log_func(f"[ZImage debug] safe_open path={path_str}{size_str} duration={duration:.3f}s")
+        #                 return result.__exit__(*exc)
 
-                return _WrappedCtx()
+        #         return _WrappedCtx()
 
-            safetensors.torch.load_file = _wrapped_load_file
-            safetensors.safe_open = _wrapped_safe_open
-            _zimage_load_debug_patched = True
+        #     safetensors.torch.load_file = _wrapped_load_file
+        #     safetensors.safe_open = _wrapped_safe_open
+        #     _zimage_load_debug_patched = True
 
         # Load sampling transformer first only when configured (to control peak VRAM when used)
         if self.model_config.sampling_name_or_path is not None:
@@ -377,15 +377,15 @@ class ZImageModel(BaseModel):
             tokenizer = [pipe.tokenizer]
 
             # leave it on cpu for now
-            if not self.low_vram:
-                pipe.transformer = pipe.transformer.to(self.device_torch)
+            # if not self.low_vram:
+            #     pipe.transformer = pipe.transformer.to(self.device_torch)
 
             flush()
             # just to make sure everything is on the right device and dtype
-            text_encoder[0].to(self.device_torch)
-            text_encoder[0].requires_grad_(False)
-            text_encoder[0].eval()
-            flush()
+            # text_encoder[0].to(self.device_torch)
+            # text_encoder[0].requires_grad_(False)
+            # text_encoder[0].eval()
+            # flush()
 
         # save it to the model class
         with memory_debug(self.print_and_status_update, "Model Loaded"):
