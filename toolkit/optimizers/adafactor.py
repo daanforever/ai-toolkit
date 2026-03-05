@@ -315,13 +315,14 @@ class Adafactor(torch.optim.Optimizer):
             new_lr = new_lr * effective_scale
 
             if param_group.get("warmup_init", False):
-                warmup_target = new_lr
-                current = lr_previous
-                gap = warmup_target - current
+                warmup_target = param_group["max_lr"]
+                gap = warmup_target - lr_previous
                 if gap > 0:
                     warmup_step = update_rms_max - prev_update_rms + eps0
                     step_actual = min(warmup_step, gap)
-                    new_lr = current + step_actual
+                    new_lr = lr_previous + step_actual
+                else:
+                    param_group["warmup_init"] = False
 
         else:
             new_lr = param_scale * rel_step_sz  # external schedule, scaled by param RMS
