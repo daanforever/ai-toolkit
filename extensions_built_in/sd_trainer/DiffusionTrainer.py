@@ -529,12 +529,12 @@ class DiffusionTrainer(SDTrainer):
             if is_debug_enabled():
                 print_acc(f"\nruntime_weight_decay from UI/DB: {value}")
             optimizer.set_weight_decay(value)
-            self._last_applied_runtime_weight_decay = value
         else:
             if is_debug_enabled():
                 print_acc(
                     f"\nruntime_weight_decay from DB not applied: optimizer has no set_weight_decay (type: {type(optimizer).__name__})"
                 )
+        self._last_applied_runtime_weight_decay = value
 
     def get_runtime_content_or_style(self):
         """Read runtime_content_or_style from DB (only when is_ui_trainer). Returns str or None."""
