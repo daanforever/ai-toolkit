@@ -86,11 +86,6 @@ class Adafactor(torch.optim.Optimizer):
     Adafactor(model.parameters(), scale_parameter=True, relative_step=True, warmup_init=True, lr=None)
     ```
 
-    Note:
-        When ``lr=None`` (i.e. ``relative_step=True``), ``base_lrs`` is set to ``max_lr`` per group
-        so that it is always a list of floats. This allows loggers and custom schedulers that
-        use ``optimizer.base_lrs`` for arithmetic or formatting to work without handling None.
-
     When using `lr=None` with [`Trainer`] you will most likely need to use [`~optimization.AdafactorSchedule`]
     scheduler as following:
 
@@ -172,13 +167,6 @@ class Adafactor(torch.optim.Optimizer):
         self._lr_smoothing_rate = lr_smoothing_rate
         self._rms_max_decay_rate = rms_max_decay_rate
         self._lr = lr
-
-        # When lr=None (relative_step=True), use max_lr per group so base_lrs is always List[float].
-        # This avoids None in base_lrs for loggers/schedulers that do arithmetic or formatting on it.
-        self.base_lrs: List[float] = [
-            (group['lr'] if group['lr'] is not None else group['max_lr'])
-            for group in self.param_groups
-        ]
 
         self.is_stochastic_rounding_accumulation = False
 
@@ -395,18 +383,11 @@ class Adafactor(torch.optim.Optimizer):
         One value per group: mean LR over params in group (same aggregation as get_update_rms/get_update_rms_max).
         Fallback to group["lr"] or 0.0 when no param in group has state yet.
         """
-        lrs = []
+        out = []
         for group in self.param_groups:
-            lr_list = [
-                self.state[param]["lr_previous"]
-                for param in group["params"]
-                if param in self.state and "lr_previous" in self.state[param]
-            ]
-            if lr_list:
-                lrs.append(torch.tensor(lr_list, dtype=torch.float64).mean().item())
-            else:
-                lrs.append(group["lr"] if group["lr"] is not None else 0.0)
-        return lrs if lrs else self.base_lrs
+            v = self._get_group_scalars(group, "lr_previous", default=0.0, reduction='mean')
+            out.append(v if v is not None else (group["lr"] if group["lr"] is not None else 0.0))
+        return out
 
     @torch.no_grad()
     def step(self, closure=None):
