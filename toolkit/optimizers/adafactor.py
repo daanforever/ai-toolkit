@@ -282,8 +282,10 @@ class Adafactor(torch.optim.Optimizer):
         if param_group["relative_step"]:
             grad_rms_val = param_state["grad_rms"]
             grad_rms_val = grad_rms_val.item() if isinstance(grad_rms_val, torch.Tensor) else grad_rms_val
+            grad_rms_max_val = param_state["grad_rms_max"]
+            grad_rms_max_val = grad_rms_max_val.item() if isinstance(grad_rms_max_val, torch.Tensor) else grad_rms_max_val
 
-            activity = min(1.0, 0.5 + 0.5 * grad_rms_val / (rms_val + eps1))
+            activity = min(1.0, 0.5 + 0.5 * grad_rms_val / (grad_rms_max_val + eps1))
             new_lr = max_lr * param_scale * activity
 
             if param_group.get("warmup_init", False):
