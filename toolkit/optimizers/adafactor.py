@@ -54,8 +54,7 @@ class Adafactor(torch.optim.Optimizer):
             Time-dependent learning rate computation depends on whether warm-up initialization is being used
         min_lr (`float`, *optional*, defaults to `1e-6`):
             Minimum learning rate multiplier for warmup phase when `warmup_init=True` and `relative_step=True`.
-            Controls the linear growth rate: `lr = min_lr * step` during warmup.
-        max_lr (`float`, *optional*, defaults to `1e-2`):
+        max_lr (`float`, *optional*, defaults to `1e-4`):
             Maximum learning rate cap for relative step mode when `relative_step=True`.
             Acts as upper bound for `min_step` when `warmup_init=False` or when warmup phase completes.
         lr_smoothing_rate (`float`, *optional*, defaults to `100.0`):
@@ -85,6 +84,11 @@ class Adafactor(torch.optim.Optimizer):
     ```python
     Adafactor(model.parameters(), scale_parameter=True, relative_step=True, warmup_init=True, lr=None)
     ```
+
+    Note:
+        When ``lr=None`` (i.e. ``relative_step=True``), ``base_lrs`` is set to ``max_lr`` per group
+        so that it is always a list of floats. This allows loggers and custom schedulers that
+        use ``optimizer.base_lrs`` for arithmetic or formatting to work without handling None.
 
     When using `lr=None` with [`Trainer`] you will most likely need to use [`~optimization.AdafactorSchedule`]
     scheduler as following:
@@ -168,8 +172,11 @@ class Adafactor(torch.optim.Optimizer):
         self._rms_max_decay_rate = rms_max_decay_rate
         self._lr = lr
 
+        # When lr=None (relative_step=True), use max_lr per group so base_lrs is always List[float].
+        # This avoids None in base_lrs for loggers/schedulers that do arithmetic or formatting on it.
         self.base_lrs: List[float] = [
-            group['lr'] for group in self.param_groups
+            (group['lr'] if group['lr'] is not None else group['max_lr'])
+            for group in self.param_groups
         ]
 
         self.is_stochastic_rounding_accumulation = False
@@ -225,8 +232,8 @@ class Adafactor(torch.optim.Optimizer):
         super().load_state_dict(state_dict)
         # Apply current run's min_lr/max_lr/lr_smoothing_rate/rms_max_decay_rate/lr so changed config is used after restart.
         for group in self.param_groups:
-            group["min_lr"] = self._min_lr
-            group["max_lr"] = self._max_lr
+            group["min_lr"] = max(group["eps"][0], self._min_lr)
+            group["max_lr"] = max(group["eps"][0], self._max_lr)
             group["lr_smoothing_rate"] = self._lr_smoothing_rate
             group["rms_max_decay_rate"] = self._rms_max_decay_rate
             if self._lr is not None:
@@ -267,7 +274,7 @@ class Adafactor(torch.optim.Optimizer):
                 break
 
     def _get_lr(self, param_group, param_state):
-        rel_step_sz = param_group["lr"]  # external lr when relative_step=False
+        new_lr = param_group["lr"] or 0.0  # external lr
         eps0 = param_group["eps"][0]
         eps1 = param_group["eps"][1]
         min_lr = param_group["min_lr"]
@@ -275,66 +282,35 @@ class Adafactor(torch.optim.Optimizer):
         param_scale = 1.0
 
         if param_group["scale_parameter"]:
-            # State holds tensors; convert to float so _get_lr returns float and step/_smooth_lr/get_learning_rates keep working.
+            # Tie param_scale to the parameter's RMS so we don't give large lr when RMS is small; floor at eps1
+            # so small weights still get a minimum scale (used as-is when relative_step=False, else in relative_step formula).
             rms_val = param_state["RMS"]
             rms_val = rms_val.item() if isinstance(rms_val, torch.Tensor) else rms_val
             param_scale = max(eps1, rms_val)
+            if not param_group["relative_step"]:
+                new_lr *= param_scale
 
         if param_group["relative_step"]:
-            # Activity = prev_update_rms normalized to (0, 1] via running max.
-            # Large updates → activity near 1 → lr near max_lr; small → activity near 0 → lr near min_lr.
-
-            # Normalize param_scale to (0, 1] by this parameter's running max RMS (rms_max); floor at eps1
-            # so small weights (e.g. LoRA near zero) still get a minimum effective LR and can escape flat regions.
-            rms_max_val = param_state.get("rms_max", 0.0)
-            rms_max_val = rms_max_val.item() if isinstance(rms_max_val, torch.Tensor) else rms_max_val
-            param_scale = max(
-                eps1,
-                min(1.0, param_scale / (rms_max_val + eps0)),
-            )
-
-            # State holds tensors; use .item() so activity and lr stay float (needed for step, _smooth_lr, get_learning_rates).
-            prev_update_rms = param_state.get("update_rms", 0.0)
-            prev_update_rms = prev_update_rms.item() if isinstance(prev_update_rms, torch.Tensor) else prev_update_rms
-            update_rms_max = param_state.get("update_rms_max", 0.0)
-            update_rms_max = update_rms_max.item() if isinstance(update_rms_max, torch.Tensor) else update_rms_max
             lr_previous = param_state.get("lr_previous", 0.0)
-            lr_previous = lr_previous.item() if isinstance(lr_previous, torch.Tensor) else lr_previous
-
-            part1 = min(1.0, prev_update_rms / (update_rms_max + eps0)) / 2
-            part2 = max(0, 1 - abs(lr_previous - prev_update_rms) / (lr_previous + eps0)) / 2
-            activity = part1 + part2 # in [0, 1]
-
-            if min_lr == 0:
-                new_lr = max(max_lr/10, activity * max_lr)  # floor eps0 to avoid exact zero
-            else:
-                new_lr = (1.0 - activity) * min_lr + activity * max_lr
-
-            # param_scale influence: stronger at high activity, weaker at low activity (protect small weights on big updates)
-            effective_scale = activity * param_scale + (1.0 - activity) * 1.0
-            new_lr = new_lr * effective_scale
+            new_lr = max_lr * max(eps1, param_scale)
 
             if param_group.get("warmup_init", False):
                 warmup_target = param_group["max_lr"]
                 gap = warmup_target - lr_previous
                 if gap > 0:
-                    warmup_step = update_rms_max - prev_update_rms + eps0
+                    update_rms_max = param_state.get("update_rms_max", 0.0)
+                    update_rms_max = update_rms_max.item() if isinstance(update_rms_max, torch.Tensor) else update_rms_max
+                    warmup_step = max(max_lr * eps1, update_rms_max + eps0)
                     step_actual = min(warmup_step, gap)
                     new_lr = lr_previous + step_actual
                 else:
                     param_group["warmup_init"] = False
 
-        else:
-            new_lr = param_scale * rel_step_sz  # external schedule, scaled by param RMS
+            new_lr = max(min_lr, min(new_lr, max_lr))
 
-        # Smooth step-to-step changes and clamp to [min_lr, max_lr].
-        smooth_lr = self._smooth_lr(param_group, param_state, new_lr)
-        new_lr = max(min_lr, min(smooth_lr, max_lr))
-        if min_lr == 0:
-            new_lr = max(eps0, new_lr)  # re-apply floor after smoothing
+        param_state["lr_previous"] = new_lr
 
-        param_state["lr_previous"] = new_lr  # used by _smooth_lr next step
-        return (new_lr.item() if isinstance(new_lr, torch.Tensor) else new_lr)
+        return new_lr
 
     def _smooth_lr(self, param_group, param_state, raw_lr):
         # Blend raw_lr with previous step's final lr to reduce step-to-step jumps.
@@ -417,9 +393,9 @@ class Adafactor(torch.optim.Optimizer):
         lrs = []
         for group in self.param_groups:
             lr_list = [
-                self._get_lr(group, self.state[param])
+                self.state[param]["lr_previous"]
                 for param in group["params"]
-                if param in self.state and len(self.state[param]) > 0
+                if param in self.state and "lr_previous" in self.state[param]
             ]
             if lr_list:
                 lrs.append(torch.tensor(lr_list, dtype=torch.float64).mean().item())
