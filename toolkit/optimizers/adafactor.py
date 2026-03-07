@@ -35,6 +35,7 @@ class Adafactor(torch.optim.Optimizer):
         rms_max_decay_rate (`float`, *optional*, defaults to `0.97`):
             Decay rate for running max of update RMS used in activity normalization.
             Applied each step: ``update_rms_max = max(update_rms_max * rms_max_decay_rate, update_rms)``.
+            The same decay is used for gradient RMS running max (state["grad_rms_max"]) for consistency.
             When scale_parameter=True and relative_step=True, also used for per-parameter running max of
             parameter RMS (state["rms_max"]), which normalizes each parameter's scale to (0, 1] for LR
             (useful for mixed-scale groups e.g. LoRA). Allows the normalization scale to decrease over
@@ -242,7 +243,7 @@ class Adafactor(torch.optim.Optimizer):
         for group in self.param_groups:
             for param in group["params"]:
                 state = self.state[param]
-                for key in ("update_rms_max", "update_rms", "rms_max"):
+                for key in ("update_rms_max", "update_rms", "rms_max", "grad_rms", "grad_rms_max"):
                     if key in state and not isinstance(state[key], torch.Tensor):
                         state[key] = torch.tensor(state[key], device=param.device, dtype=torch.float32)
 
@@ -280,21 +281,25 @@ class Adafactor(torch.optim.Optimizer):
         min_lr = param_group["min_lr"]
         max_lr = param_group["max_lr"]
         param_scale = 1.0
+        rms_val = param_state["RMS"]
+        rms_val = rms_val.item() if isinstance(rms_val, torch.Tensor) else rms_val
 
         if param_group["scale_parameter"]:
             # Tie param_scale to the parameter's RMS so we don't give large lr when RMS is small; floor at eps1
             # so small weights still get a minimum scale (used as-is when relative_step=False, else in relative_step formula).
-            rms_val = param_state["RMS"]
-            rms_val = rms_val.item() if isinstance(rms_val, torch.Tensor) else rms_val
             param_scale = max(eps1, rms_val)
             if not param_group["relative_step"]:
                 new_lr *= param_scale
 
         if param_group["relative_step"]:
-            lr_previous = param_state.get("lr_previous", 0.0)
-            new_lr = max_lr * max(eps1, param_scale)
+            grad_rms_val = param_state["grad_rms"]
+            grad_rms_val = grad_rms_val.item() if isinstance(grad_rms_val, torch.Tensor) else grad_rms_val
+
+            activity = min(1.0, 0.5 + 0.5 * grad_rms_val / (rms_val + eps1))
+            new_lr = max_lr * max(eps1, param_scale) * activity
 
             if param_group.get("warmup_init", False):
+                lr_previous = param_state.get("lr_previous", 0.0)
                 warmup_target = param_group["max_lr"]
                 gap = warmup_target - lr_previous
                 if gap > 0:
@@ -483,9 +488,20 @@ class Adafactor(torch.optim.Optimizer):
                     state["rms_max"] = torch.maximum(
                         state["rms_max"] * group["rms_max_decay_rate"], state["RMS"]
                     )
+                # Store grad_rms and grad_rms_max as 0-dim tensors (same path as update_rms/update_rms_max).
+                state["grad_rms"] = self._rms(grad)
+                current_grad_max = state.get("grad_rms_max")
+                if current_grad_max is None:
+                    current_grad_max = torch.tensor(0.0, device=grad.device, dtype=grad.dtype)
+                elif not isinstance(current_grad_max, torch.Tensor):
+                    current_grad_max = torch.tensor(current_grad_max, device=grad.device, dtype=grad.dtype)
+                state["grad_rms_max"] = torch.maximum(
+                    current_grad_max * group["rms_max_decay_rate"], state["grad_rms"]
+                )
                 lr = self._get_lr(group, state)
 
                 beta2t = 1.0 - math.pow(state["step"], group["decay_rate"])
+                beta2t = min(0.99, beta2t)
                 eps = group["eps"]
                 if isinstance(eps, tuple) or isinstance(eps, list):
                     eps = eps[0]
@@ -607,3 +623,44 @@ class Adafactor(torch.optim.Optimizer):
         Use with get_avg_update_rms() to monitor normalization scale and update magnitude vs recent max.
         """
         return self._scalars_per_group_to_avg(self.get_update_rms_max())
+
+    def get_grad_rms(self):
+        """
+        Get RMS (root mean square) of gradients for each parameter group.
+        Per-group value is mean over params in group via tensor reduction (_get_group_scalars).
+
+        Returns:
+            List[float]: One value per group; 0.0 for groups that haven't been updated yet.
+        """
+        out = []
+        for group in self.param_groups:
+            v = self._get_group_scalars(group, "grad_rms", default=0.0, reduction='mean')
+            out.append(v if v is not None else 0.0)
+        return out
+
+    def get_grad_rms_max(self):
+        """
+        Get running max of gradient RMS for each parameter group.
+        Per-group value is mean over params in group via tensor reduction (_get_group_scalars).
+
+        Returns:
+            List[float]: One value per group; 0.0 for groups with no grad_rms_max in state yet.
+        """
+        out = []
+        for group in self.param_groups:
+            v = self._get_group_scalars(group, "grad_rms_max", default=0.0, reduction='mean')
+            out.append(v if v is not None else 0.0)
+        return out
+
+    def get_avg_grad_rms(self):
+        """
+        Average RMS of gradients across all parameter groups (unified tensor reduction).
+        """
+        return self._scalars_per_group_to_avg(self.get_grad_rms())
+
+    def get_avg_grad_rms_max(self):
+        """
+        Average of per-group grad_rms_max across groups (unified tensor reduction).
+        Use with get_avg_grad_rms() to monitor gradient scale vs recent max.
+        """
+        return self._scalars_per_group_to_avg(self.get_grad_rms_max())
