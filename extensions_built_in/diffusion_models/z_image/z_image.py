@@ -587,9 +587,6 @@ class ZImageModel(BaseModel):
             # Restore original network
             if saved_network is not None:
                 self.network = saved_network
-            # Ensure sampling transformer is off GPU (defense in depth)
-            if getattr(self, "_sampling_transformer", None) is not None:
-                self._sampling_transformer.to("cpu")
 
     def get_loss_target(self, *args, **kwargs):
         noise = kwargs.get("noise")
