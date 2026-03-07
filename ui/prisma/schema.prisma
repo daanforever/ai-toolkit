@@ -53,6 +53,7 @@ model RuntimeParams {
   runtime_timestep_type    String?
   runtime_network_weights  String?
   runtime_batch_size       Int?
+  runtime_gradient_accumulation Int?
   runtime_save_every       Int?
   runtime_sample_every     Int?
   runtime_min_snr_gamma    Float?

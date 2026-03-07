@@ -48,6 +48,7 @@ class DiffusionTrainer(SDTrainer):
             self._last_applied_runtime_timestep_type = None
             self._last_applied_runtime_network_weights: Optional[tuple] = None
             self._last_applied_runtime_batch_size = None
+            self._last_applied_runtime_gradient_accumulation = None
             self._last_applied_runtime_save_every = None
             self._last_applied_runtime_sample_every = None
             self._last_applied_runtime_min_snr_gamma = None
@@ -368,6 +369,41 @@ class DiffusionTrainer(SDTrainer):
                 f"\nruntime batch_size from UI/DB: {old_batch_size} -> {batch_size}, data loaders recreated"
             )
 
+    def get_runtime_gradient_accumulation(self):
+        """Read runtime_gradient_accumulation from DB (only when is_ui_trainer). Returns int or None."""
+        if not self.is_ui_trainer:
+            return None
+
+        def _read():
+            with self._db_connect() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT runtime_gradient_accumulation FROM RuntimeParams WHERE jobId = ?",
+                    (self.job_id,),
+                )
+                row = cursor.fetchone()
+                if row is None or row[0] is None:
+                    return None
+                return int(row[0])
+
+        return _read()
+
+    def apply_runtime_gradient_accumulation(self):
+        """If runtime_gradient_accumulation is set in DB, apply it to train_config."""
+        if not self.is_ui_trainer:
+            return
+        value = self.get_runtime_gradient_accumulation()
+        if value is None:
+            return
+        if value == self._last_applied_runtime_gradient_accumulation:
+            return
+        self.train_config.gradient_accumulation = value
+        self._last_applied_runtime_gradient_accumulation = value
+        if is_debug_enabled():
+            print_acc(
+                f"\nruntime gradient_accumulation from UI/DB: {value}"
+            )
+
     def get_runtime_save_every(self):
         """Read runtime_save_every from DB (only when is_ui_trainer). Returns int or None."""
         if not self.is_ui_trainer:
@@ -676,6 +712,7 @@ class DiffusionTrainer(SDTrainer):
         self._last_applied_runtime_timestep_type = None
         self._last_applied_runtime_network_weights = None
         self._last_applied_runtime_batch_size = None
+        self._last_applied_runtime_gradient_accumulation = None
         self._last_applied_runtime_save_every = None
         self._last_applied_runtime_sample_every = None
         self._last_applied_runtime_min_snr_gamma = None
@@ -800,6 +837,7 @@ class DiffusionTrainer(SDTrainer):
             self.apply_runtime_timestep_type()
             self.apply_runtime_network_weights()
             self.apply_runtime_batch_size()
+            self.apply_runtime_gradient_accumulation()
             self.apply_runtime_save_every()
             self.apply_runtime_sample_every()
             self.apply_runtime_min_snr_gamma()

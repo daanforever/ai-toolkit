@@ -78,6 +78,9 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
   const batchSize = trainAny?.batch_size != null
     ? Number(trainAny.batch_size)
     : 1;
+  const gradientAccumulation = trainAny?.gradient_accumulation != null
+    ? Number(trainAny.gradient_accumulation)
+    : 1;
   const minSnrGamma = trainAny?.min_snr_gamma != null
     ? Number(trainAny.min_snr_gamma)
     : 5;
@@ -124,6 +127,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     (process.train as Record<string, number>).gaussian_mean = gaussianMean;
     (process.train as Record<string, number>).gaussian_std = gaussianStd;
     (process.train as Record<string, number>).batch_size = batchSize;
+    (process.train as Record<string, number>).gradient_accumulation = gradientAccumulation;
     (process.train as Record<string, number>).min_snr_gamma = minSnrGamma;
 
     if (!process.save) {
@@ -175,6 +179,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         gaussian_std?: number;
         network_weights?: number[];
         batch_size?: number;
+        gradient_accumulation?: number;
         save_every?: number;
         sample_every?: number;
         min_snr_gamma?: number;
@@ -186,6 +191,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         gaussian_mean: gaussianMean,
         gaussian_std: gaussianStd,
         batch_size: batchSize,
+        gradient_accumulation: gradientAccumulation,
         save_every: saveEvery,
         sample_every: sampleEvery,
         min_snr_gamma: minSnrGamma,
@@ -229,6 +235,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     gaussianMean,
     gaussianStd,
     batchSize,
+    gradientAccumulation,
     saveEvery,
     sampleEvery,
     minSnrGamma,
@@ -432,6 +439,9 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
               className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
             />
           </div>
+        </div>
+
+        <div className="flex items-end gap-4 flex-wrap">
           <div className="space-y-2 flex-1 min-w-[140px]">
             <p className="text-xs text-gray-400">Batch size</p>
             <input
@@ -446,6 +456,26 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
                 const num = v === '' ? 1 : parseInt(v, 10);
                 if (Number.isInteger(num) && num >= 1) {
                   setValue(num, 'config.process[0].train.batch_size');
+                  setApplyStatus('idle');
+                }
+              }}
+              className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+            />
+          </div>
+          <div className="space-y-2 flex-1 min-w-[140px]">
+            <p className="text-xs text-gray-400">Gradient accumulation</p>
+            <input
+              type="number"
+              min={1}
+              max={64}
+              step={1}
+              placeholder="e.g. 1"
+              value={gradientAccumulation}
+              onChange={(e) => {
+                const v = e.target.value.trim();
+                const num = v === '' ? 1 : parseInt(v, 10);
+                if (Number.isInteger(num) && num >= 1) {
+                  setValue(num, 'config.process[0].train.gradient_accumulation');
                   setApplyStatus('idle');
                 }
               }}
