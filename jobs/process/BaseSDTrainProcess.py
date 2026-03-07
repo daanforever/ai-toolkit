@@ -1471,12 +1471,6 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         self.sd._sampling_network = sampling_network
                         flush()
                 
-                # Move LoRA networks to CPU before dataset loading (caching phase)
-                # Keep float32 for numerical stability in optimizer (master weights)
-                # prepare_accelerator will restore them to GPU after caching
-                self.network.force_to('cpu', torch.float32)
-                flush()
-
                 # LyCORIS doesnt have default_lr
                 config = {
                     'text_encoder_lr': self.train_config.lr,

@@ -435,11 +435,7 @@ class BaseModel:
                     # Load sampling transformer onto device if it exists
                     if self._sampling_transformer is not None:
                         self.model.to("cpu", dtype=self.torch_dtype)
-
-                        if torch.cuda.is_available():
-                            torch.cuda.synchronize()
-                            torch.cuda.empty_cache()
-
+                        self.network.force_to('cpu', torch.float32)
                         self._sampling_transformer.to(self.device_torch, dtype=self.torch_dtype)
                         self._sampling_network.force_to(self.device_torch, self.torch_dtype)
                         print_acc("\nLoaded sampling transformer to GPU")
@@ -701,16 +697,13 @@ class BaseModel:
                 self.model.to(self.device_torch, dtype=self.torch_dtype)
                 self.network.force_to(self.device_torch, torch.float32)
                 print_acc("\nUnloaded sampling transformer to CPU")
-            # Ensure CUDA work is finished so VRAM is actually released before next use
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
+
             # Clear pipeline and cache to reduce vram usage (only if we created pipeline here)
             if pipeline_created:
                 try:
                     del pipeline
                 except NameError:
                     pass
-            torch.cuda.empty_cache()
 
         # restore training state
         torch.set_rng_state(rng_state)
