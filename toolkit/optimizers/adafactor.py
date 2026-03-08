@@ -216,6 +216,9 @@ class Adafactor(torch.optim.Optimizer):
             group["lr"] = max(group["eps"][0], self._lr)
             group["lr_smoothing_rate"] = self._lr_smoothing_rate
             group["rms_max_decay_rate"] = self._rms_max_decay_rate
+            # Normalize _group_rms_max if present (old checkpoints may not have it)
+            if "_group_rms_max" in group and not isinstance(group["_group_rms_max"], torch.Tensor):
+                group["_group_rms_max"] = torch.tensor(group["_group_rms_max"], dtype=torch.float32)
         # Normalize state from old checkpoints: update_rms_max/update_rms must be tensors for step().
         for group in self.param_groups:
             for param in group["params"]:
@@ -252,63 +255,49 @@ class Adafactor(torch.optim.Optimizer):
                 break
 
     def _get_lr(self, param_group, param_state):
-        new_lr = param_group["lr"] # external lr or ceiling
-        cap_lr = param_group["lr"] # ceiling when relative_step=True
-        eps0 = param_group["eps"][0]
-        eps1 = param_group["eps"][1]
-        min_lr = param_group["min_lr"]
-        param_scale = 1.0
-        rms_val = param_state["RMS"]
-        rms_val = rms_val.item() if isinstance(rms_val, torch.Tensor) else rms_val
+        """
+        Compute adaptive learning rate for a parameter.
 
-        if param_group["scale_parameter"]:
-            # Tie param_scale to the parameter's RMS so we don't give large lr when RMS is small; floor at eps1
-            # so small weights still get a minimum scale (used as-is when relative_step=False, else in relative_step formula).
-            param_scale = max(eps1, rms_val)
-            if not param_group["relative_step"]:
-                new_lr *= param_scale
+        In manual LR mode (relative_step=False), returns group["lr"] optionally scaled by param RMS.
+        In adaptive mode (relative_step=True), computes LR from three normalized coefficients:
+          - weight: relative gap of this param vs group max RMS. Small weights -> ~1, largest -> eps1.
+          - activity: gradient RMS vs its historical max. Range [0, ~1].
+          - protection: safety factor preventing update from exceeding weight magnitude.
 
-        if param_group["relative_step"]:
-            grad_rms_val = param_state["grad_rms"]
-            grad_rms_val = grad_rms_val.item() if isinstance(grad_rms_val, torch.Tensor) else grad_rms_val
-            grad_rms_max_val = param_state["grad_rms_max"]
-            grad_rms_max_val = grad_rms_max_val.item() if isinstance(grad_rms_max_val, torch.Tensor) else grad_rms_max_val
+        Warmup phase (warmup_init=True): uses higher effective_min_lr = max(min_lr, cap_lr * eps1)
+        to bootstrap small weights. Auto-disabled when group_rms_max >= cap_lr * eps1.
 
-            activity = min(1.0, 0.5 + 0.5 * grad_rms_val / (grad_rms_max_val + eps1))
-            new_lr = cap_lr * param_scale * activity
+        Returns:
+            float: learning rate for this parameter
+        """
+        cap_lr     = param_group["lr"]
+        min_lr     = param_group["min_lr"]
+        eps0       = param_group["eps"][0]
+        eps1       = param_group["eps"][1]
+        param_rms  = param_state["RMS"].item()
 
-            if param_group.get("warmup_init", False):
-                lr_previous = param_state.get("lr_previous", 0.0)
-                warmup_target = param_group["lr"]
-                gap = warmup_target - lr_previous
-                if gap > 0:
-                    update_rms_max = param_state.get("update_rms_max", 0.0)
-                    update_rms_max = update_rms_max.item() if isinstance(update_rms_max, torch.Tensor) else update_rms_max
-                    warmup_step = max(cap_lr * eps1, update_rms_max + eps0)
-                    step_actual = min(warmup_step, gap)
-                    new_lr = lr_previous + step_actual
-                else:
-                    param_group["warmup_init"] = False
+        if not param_group["relative_step"]:
+            new_lr = cap_lr
+            if param_group["scale_parameter"]:
+                new_lr *= max(eps1, param_rms)
+        else:
+            grad_rms     = param_state["grad_rms"].item()
+            grad_rms_max = param_state["grad_rms_max"].item()
+            group_rms_max = param_group.get("_group_rms_max", torch.tensor(eps1)).item()
 
-            new_lr = max(min_lr, min(new_lr, cap_lr))
+            weight     = max(eps1, (group_rms_max - param_rms) / (group_rms_max + eps0))
+            activity   = grad_rms / (grad_rms_max + eps0)
+            protection = min(1.0, max(param_rms, eps0) / (grad_rms + eps0))
 
+            new_lr = cap_lr * weight * activity * protection
+
+        if param_group.get("warmup_init", False):
+            effective_min_lr = max(min_lr, cap_lr * eps1)
+        else:
+            effective_min_lr = min_lr
+        new_lr = max(effective_min_lr, min(new_lr, cap_lr))
         param_state["lr_previous"] = new_lr
-
         return new_lr
-
-    def _smooth_lr(self, param_group, param_state, raw_lr):
-        # Blend raw_lr with previous step's final lr to reduce step-to-step jumps.
-        # Larger |raw_lr - lr_previous| → more weight on lr_previous → smoother.
-        min_lr = param_group["min_lr"]
-        cap_lr = param_group["lr"]
-        lr_smoothing_rate = param_group["lr_smoothing_rate"]
-        lr_previous = param_state.get("lr_previous", raw_lr)
-        smoothing_scale = (cap_lr - min_lr) / lr_smoothing_rate
-        lr_delta = raw_lr - lr_previous
-        denominator = abs(lr_delta) + smoothing_scale + param_group["eps"][0]
-        blend_weight = abs(lr_delta) / denominator
-        smoothed_lr = (1 - blend_weight) * raw_lr + blend_weight * lr_previous
-        return smoothed_lr
 
     @staticmethod
     def _get_options(param_group, param_shape):
@@ -395,6 +384,15 @@ class Adafactor(torch.optim.Optimizer):
             loss = closure()
 
         for group in self.param_groups:
+            # Decay group_rms_max once per step
+            if "_group_rms_max" in group:
+                group["_group_rms_max"] = group["_group_rms_max"] * group["rms_max_decay_rate"]
+
+            # Warmup termination: weights grown enough for protection to work reliably
+            if group.get("warmup_init", False) and "_group_rms_max" in group:
+                if group["_group_rms_max"].item() >= group["lr"] * group["eps"][1]:
+                    group["warmup_init"] = False
+
             for p in group["params"]:
                 if p.grad is None or not p.requires_grad:
                     continue
@@ -459,6 +457,13 @@ class Adafactor(torch.optim.Optimizer):
                 else:
                     state["rms_max"] = torch.maximum(
                         state["rms_max"] * group["rms_max_decay_rate"], state["RMS"]
+                    )
+                # Update group running max
+                if "_group_rms_max" not in group:
+                    group["_group_rms_max"] = state["RMS"].clone().detach()
+                else:
+                    group["_group_rms_max"] = torch.maximum(
+                        group["_group_rms_max"], state["RMS"]
                     )
                 # Store grad_rms and grad_rms_max as 0-dim tensors (same path as update_rms/update_rms_max).
                 state["grad_rms"] = self._rms(grad)
