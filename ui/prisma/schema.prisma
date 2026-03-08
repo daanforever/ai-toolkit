@@ -44,7 +44,7 @@ model Job {
 model RuntimeParams {
   jobId                    String   @id
   job                      Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
-  runtime_max_lr           Float?
+  runtime_lr               Float?
   runtime_min_lr           Float?
   runtime_gaussian_mean    Float?
   runtime_gaussian_std     Float?

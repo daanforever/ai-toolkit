@@ -39,7 +39,7 @@ class DiffusionTrainer(SDTrainer):
             self.thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             # Track all async tasks
             self._async_tasks = []
-            self._last_applied_runtime_max_lr = None
+            self._last_applied_runtime_lr = None
             self._last_applied_runtime_min_lr = None
             self._last_applied_runtime_gaussian_mean = None
             self._last_applied_runtime_gaussian_std = None
@@ -170,8 +170,8 @@ class DiffusionTrainer(SDTrainer):
             self.is_stopping = True
             raise Exception("Job returning to queue")
 
-    def get_runtime_max_lr(self):
-        """Read runtime_max_lr from DB (only when is_ui_trainer). Returns float or None."""
+    def get_runtime_lr(self):
+        """Read runtime_lr from DB (only when is_ui_trainer). Returns float or None."""
         if not self.is_ui_trainer:
             return None
 
@@ -179,7 +179,7 @@ class DiffusionTrainer(SDTrainer):
             with self._db_connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT runtime_max_lr FROM RuntimeParams WHERE jobId = ?", (self.job_id,)
+                    "SELECT runtime_lr FROM RuntimeParams WHERE jobId = ?", (self.job_id,)
                 )
                 row = cursor.fetchone()
                 if row is None or row[0] is None:
@@ -188,27 +188,27 @@ class DiffusionTrainer(SDTrainer):
 
         return _read()
 
-    def apply_runtime_max_lr(self):
-        """If runtime_max_lr is set in DB, apply it to the optimizer (e.g. Adafactor)."""
+    def apply_runtime_lr(self):
+        """If runtime_lr is set in DB, apply it to the optimizer (e.g. Adafactor)."""
         if not self.is_ui_trainer:
             return
-        value = self.get_runtime_max_lr()
+        value = self.get_runtime_lr()
         if value is None:
             return
-        if value == self._last_applied_runtime_max_lr:
+        if value == self._last_applied_runtime_lr:
             return
         optimizer = unwrap_model(self.optimizer)
         while getattr(optimizer, "optimizer", None) is not None:
             optimizer = optimizer.optimizer
-        if hasattr(optimizer, "set_max_lr"):
+        if hasattr(optimizer, "set_lr"):
             if is_debug_enabled():
-                print_acc(f"\nruntime_max_lr from UI/DB: {value}")
-            optimizer.set_max_lr(value)
-            self._last_applied_runtime_max_lr = value
+                print_acc(f"\nruntime_lr from UI/DB: {value}")
+            optimizer.set_lr(value)
+            self._last_applied_runtime_lr = value
         else:
             if is_debug_enabled():
                 print_acc(
-                    f"\nruntime_max_lr from DB not applied: optimizer has no set_max_lr (type: {type(optimizer).__name__})"
+                    f"\nruntime_lr from DB not applied: optimizer has no set_lr (type: {type(optimizer).__name__})"
                 )
 
     def get_runtime_min_lr(self):
@@ -703,7 +703,7 @@ class DiffusionTrainer(SDTrainer):
 
     def _reset_last_applied_runtime(self):
         """Reset all cached runtime parameter values to None."""
-        self._last_applied_runtime_max_lr = None
+        self._last_applied_runtime_lr = None
         self._last_applied_runtime_min_lr = None
         self._last_applied_runtime_gaussian_mean = None
         self._last_applied_runtime_gaussian_std = None
@@ -829,7 +829,7 @@ class DiffusionTrainer(SDTrainer):
         if self.is_ui_trainer:
             self.update_step()
             self.maybe_stop()
-            self.apply_runtime_max_lr()
+            self.apply_runtime_lr()
             self.apply_runtime_min_lr()
             self.apply_runtime_gaussian_params()
             self.apply_runtime_weight_decay()

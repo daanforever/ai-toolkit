@@ -57,15 +57,14 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
   const train = config?.config?.process?.[0]?.train;
   const optimizerParams = train?.optimizer_params;
   const trainAny = train as Record<string, unknown> | undefined;
-  const hasMaxLr = optimizerParams && 'max_lr' in optimizerParams;
   const hasMinLr = optimizerParams && 'min_lr' in optimizerParams;
 
   const timestepType = train?.timestep_type ?? defaultJobConfig.config.process[0].train.timestep_type;
   const contentOrStyle = train?.content_or_style ?? defaultJobConfig.config.process[0].train.content_or_style;
   const weightDecay = optimizerParams?.weight_decay ?? defaultJobConfig.config.process[0].train.optimizer_params.weight_decay;
-  const maxLr = hasMaxLr && typeof (optimizerParams as { max_lr?: number }).max_lr === 'number'
-    ? (optimizerParams as { max_lr: number }).max_lr
-    : null;
+  const lr = typeof train?.lr === 'number' && Number.isFinite(train.lr)
+    ? train.lr
+    : (defaultJobConfig.config.process[0].train.lr ?? 1e-4);
   const minLr = hasMinLr && typeof (optimizerParams as { min_lr?: number }).min_lr === 'number'
     ? (optimizerParams as { min_lr: number }).min_lr
     : null;
@@ -118,9 +117,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     process.train.timestep_type = timestepType;
     process.train.content_or_style = contentOrStyle;
     process.train.optimizer_params.weight_decay = weightDecay;
-    if (hasMaxLr) {
-      (process.train.optimizer_params as Record<string, number>).max_lr = maxLr ?? 1e-4;
-    }
+    (process.train as Record<string, number>).lr = lr;
     if (hasMinLr) {
       (process.train.optimizer_params as Record<string, number>).min_lr = minLr ?? 1e-6;
     }
@@ -170,7 +167,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
       }
 
       const patchBody: {
-        max_lr?: number;
+        lr?: number;
         min_lr?: number;
         weight_decay?: number;
         content_or_style?: string;
@@ -197,7 +194,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         min_snr_gamma: minSnrGamma,
         debug,
       };
-      if (hasMaxLr && maxLr != null) patchBody.max_lr = maxLr;
+      if (lr != null && Number.isFinite(lr)) patchBody.lr = lr;
       if (hasMinLr && minLr != null) patchBody.min_lr = minLr;
       if (process.datasets?.length) {
         patchBody.network_weights = process.datasets.map((d: { network_weight?: number }) => d.network_weight ?? 1);
@@ -228,8 +225,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     timestepType,
     contentOrStyle,
     weightDecay,
-    maxLr,
-    hasMaxLr,
+    lr,
     minLr,
     hasMinLr,
     gaussianMean,
@@ -261,19 +257,19 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
 
       <div className="space-y-4">
         <div className="flex items-end gap-4 flex-wrap">
-          {hasMaxLr && (
+          {train && (
             <div className="space-y-2 flex-1 min-w-[140px]">
-              <p className="text-xs text-gray-400">Max LR</p>
+              <p className="text-xs text-gray-400">LR</p>
               <input
                 type="number"
                 min={1e-6}
                 step="any"
                 placeholder="e.g. 1e-4"
-                value={maxLr ?? ''}
+                value={lr ?? ''}
                 onChange={(e) => {
                   const v = e.target.value.trim();
                   const num = v === '' ? null : parseFloat(v);
-                  setValue(num != null && Number.isFinite(num) ? num : undefined, 'config.process[0].train.optimizer_params.max_lr');
+                  setValue(num != null && Number.isFinite(num) ? num : undefined, 'config.process[0].train.lr');
                   setApplyStatus('idle');
                 }}
                 className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"

@@ -17,7 +17,7 @@ export async function PATCH(
     return NextResponse.json({ error: 'Job not found' }, { status: 404 });
   }
 
-  let body: { max_lr?: number; min_lr?: number; gaussian_mean?: number; gaussian_std?: number; weight_decay?: number; content_or_style?: string; timestep_type?: string; network_weights?: number[]; batch_size?: number; gradient_accumulation?: number; save_every?: number; sample_every?: number; min_snr_gamma?: number; debug?: boolean };
+  let body: { lr?: number; min_lr?: number; gaussian_mean?: number; gaussian_std?: number; weight_decay?: number; content_or_style?: string; timestep_type?: string; network_weights?: number[]; batch_size?: number; gradient_accumulation?: number; save_every?: number; sample_every?: number; min_snr_gamma?: number; debug?: boolean };
   try {
     body = await request.json();
   } catch {
@@ -30,17 +30,17 @@ export async function PATCH(
   const CONTENT_OR_STYLE_VALUES = ['balanced', 'content', 'style', 'gaussian', 'fixed_cycle'] as const;
   const TIMESTEP_TYPE_VALUES = ['sigmoid', 'linear', 'shift', 'weighted', 'gaussian'] as const;
 
-  const data: { runtime_max_lr?: number; runtime_min_lr?: number; runtime_gaussian_mean?: number; runtime_gaussian_std?: number; runtime_weight_decay?: number; runtime_content_or_style?: string; runtime_timestep_type?: string; runtime_network_weights?: string; runtime_batch_size?: number; runtime_gradient_accumulation?: number; runtime_save_every?: number; runtime_sample_every?: number; runtime_min_snr_gamma?: number; runtime_debug?: boolean } = {};
+  const data: { runtime_lr?: number; runtime_min_lr?: number; runtime_gaussian_mean?: number; runtime_gaussian_std?: number; runtime_weight_decay?: number; runtime_content_or_style?: string; runtime_timestep_type?: string; runtime_network_weights?: string; runtime_batch_size?: number; runtime_gradient_accumulation?: number; runtime_save_every?: number; runtime_sample_every?: number; runtime_min_snr_gamma?: number; runtime_debug?: boolean } = {};
 
-  const maxLr = body.max_lr;
-  if (maxLr !== undefined) {
-    if (typeof maxLr !== 'number' || !Number.isFinite(maxLr) || maxLr <= 0) {
+  const lr = body.lr;
+  if (lr !== undefined) {
+    if (typeof lr !== 'number' || !Number.isFinite(lr) || lr <= 0) {
       return NextResponse.json(
-        { error: 'max_lr must be a positive number' },
+        { error: 'lr must be a positive number' },
         { status: 400 }
       );
     }
-    data.runtime_max_lr = maxLr;
+    data.runtime_lr = lr;
   }
 
   const minLr = body.min_lr;
@@ -197,7 +197,7 @@ export async function PATCH(
 
   if (Object.keys(data).length === 0) {
     return NextResponse.json(
-      { error: 'At least one of max_lr, min_lr, gaussian_mean, gaussian_std, weight_decay, content_or_style, timestep_type, network_weights, batch_size, gradient_accumulation, save_every, sample_every, min_snr_gamma, debug must be provided' },
+      { error: 'At least one of lr, min_lr, gaussian_mean, gaussian_std, weight_decay, content_or_style, timestep_type, network_weights, batch_size, gradient_accumulation, save_every, sample_every, min_snr_gamma, debug must be provided' },
       { status: 400 }
     );
   }

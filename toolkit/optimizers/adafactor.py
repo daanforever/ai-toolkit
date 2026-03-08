@@ -24,8 +24,8 @@ class Adafactor(torch.optim.Optimizer):
     Arguments:
         params (`Iterable[nn.parameter.Parameter]`):
             Iterable of parameters to optimize or dictionaries defining parameter groups.
-        lr (`float`, *optional*):
-            The external learning rate.
+        lr (`float`, *optional*, defaults to `1e-4` when `relative_step=True`):
+            When `relative_step=True`, acts as maximum learning rate cap (upper bound). When `relative_step=False`, the manual learning rate.
         eps (`Tuple[float, float]`, *optional*, defaults to `(1e-30, 0.001)`):
             Regularization constants for square gradient and parameter scale respectively
         clip_threshold (`float`, *optional*, defaults to 1.0):
@@ -55,9 +55,6 @@ class Adafactor(torch.optim.Optimizer):
             Time-dependent learning rate computation depends on whether warm-up initialization is being used
         min_lr (`float`, *optional*, defaults to `1e-6`):
             Minimum learning rate multiplier for warmup phase when `warmup_init=True` and `relative_step=True`.
-        max_lr (`float`, *optional*, defaults to `1e-4`):
-            Maximum learning rate cap for relative step mode when `relative_step=True`.
-            Acts as upper bound for `min_step` when `warmup_init=False` or when warmup phase completes.
         lr_smoothing_rate (`float`, *optional*, defaults to `100.0`):
             Divisor for the smoothing scale in step-to-step learning rate smoothing in `_smooth_lr`.
             Larger values yield stronger smoothing (smaller step-to-step LR changes).
@@ -118,7 +115,7 @@ class Adafactor(torch.optim.Optimizer):
     def __init__(
         self,
         params,
-        lr=None,
+        lr=1e-4,
         eps=(1e-30, 1e-3),
         clip_threshold=1.0,
         decay_rate=-0.8,
@@ -129,7 +126,6 @@ class Adafactor(torch.optim.Optimizer):
         relative_step=True,
         warmup_init=False,
         min_lr=1e-6,
-        max_lr=1e-4,
         lr_smoothing_rate=100.0,
         do_parameter_swapping=False,
         parameter_swapping_factor=0.1,
@@ -137,9 +133,6 @@ class Adafactor(torch.optim.Optimizer):
         stochastic_rounding=True,
     ):
         self.stochastic_rounding = stochastic_rounding
-        if lr is not None and lr != 0 and relative_step:
-            raise ValueError(
-                "Cannot combine manual `lr` and `relative_step=True` options")
         if warmup_init and not relative_step:
             raise ValueError(
                 "`warmup_init=True` requires `relative_step=True`")
@@ -156,14 +149,12 @@ class Adafactor(torch.optim.Optimizer):
             "relative_step": relative_step,
             "warmup_init": warmup_init,
             "min_lr": min_lr,
-            "max_lr": max_lr,
             "lr_smoothing_rate": lr_smoothing_rate,
         }
         super().__init__(params, defaults)
         
-        # Store LR limits, lr_smoothing_rate, rms_max_decay_rate and external lr so they can be reapplied after load_state_dict (restart with new config).
+        # Store LR limits, lr_smoothing_rate, rms_max_decay_rate and lr so they can be reapplied after load_state_dict (restart with new config).
         self._min_lr = min_lr
-        self._max_lr = max_lr
         self._lr_smoothing_rate = lr_smoothing_rate
         self._rms_max_decay_rate = rms_max_decay_rate
         self._lr = lr
@@ -194,13 +185,13 @@ class Adafactor(torch.optim.Optimizer):
         if self.do_parameter_swapping:
             self.enable_parameter_swapping(self.parameter_swapping_factor)
 
-    def set_max_lr(self, value: float) -> None:
-        """Update max_lr at runtime (e.g. from UI)."""
-        self._max_lr = value
+    def set_lr(self, value: float) -> None:
+        """Update lr at runtime (e.g. from UI)."""
+        self._lr = value
         for group in self.param_groups:
-            group["max_lr"] = value
+            group["lr"] = value
         if is_debug_enabled():
-            print_acc(f"Adafactor: applied runtime max_lr={value}")
+            print_acc(f"Adafactor: applied runtime lr={value}")
 
     def set_min_lr(self, value: float) -> None:
         """Update min_lr at runtime (e.g. from UI)."""
@@ -219,14 +210,12 @@ class Adafactor(torch.optim.Optimizer):
 
     def load_state_dict(self, state_dict):
         super().load_state_dict(state_dict)
-        # Apply current run's min_lr/max_lr/lr_smoothing_rate/rms_max_decay_rate/lr so changed config is used after restart.
+        # Apply current run's min_lr/lr_smoothing_rate/rms_max_decay_rate/lr so changed config is used after restart.
         for group in self.param_groups:
             group["min_lr"] = max(group["eps"][0], self._min_lr)
-            group["max_lr"] = max(group["eps"][0], self._max_lr)
+            group["lr"] = max(group["eps"][0], self._lr)
             group["lr_smoothing_rate"] = self._lr_smoothing_rate
             group["rms_max_decay_rate"] = self._rms_max_decay_rate
-            if self._lr is not None:
-                group["lr"] = self._lr
         # Normalize state from old checkpoints: update_rms_max/update_rms must be tensors for step().
         for group in self.param_groups:
             for param in group["params"]:
@@ -263,11 +252,11 @@ class Adafactor(torch.optim.Optimizer):
                 break
 
     def _get_lr(self, param_group, param_state):
-        new_lr = param_group["lr"] or 0.0  # external lr
+        new_lr = param_group["lr"] # external lr or ceiling
+        cap_lr = param_group["lr"] # ceiling when relative_step=True
         eps0 = param_group["eps"][0]
         eps1 = param_group["eps"][1]
         min_lr = param_group["min_lr"]
-        max_lr = param_group["max_lr"]
         param_scale = 1.0
         rms_val = param_state["RMS"]
         rms_val = rms_val.item() if isinstance(rms_val, torch.Tensor) else rms_val
@@ -286,22 +275,22 @@ class Adafactor(torch.optim.Optimizer):
             grad_rms_max_val = grad_rms_max_val.item() if isinstance(grad_rms_max_val, torch.Tensor) else grad_rms_max_val
 
             activity = min(1.0, 0.5 + 0.5 * grad_rms_val / (grad_rms_max_val + eps1))
-            new_lr = max_lr * param_scale * activity
+            new_lr = cap_lr * param_scale * activity
 
             if param_group.get("warmup_init", False):
                 lr_previous = param_state.get("lr_previous", 0.0)
-                warmup_target = param_group["max_lr"]
+                warmup_target = param_group["lr"]
                 gap = warmup_target - lr_previous
                 if gap > 0:
                     update_rms_max = param_state.get("update_rms_max", 0.0)
                     update_rms_max = update_rms_max.item() if isinstance(update_rms_max, torch.Tensor) else update_rms_max
-                    warmup_step = max(max_lr * eps1, update_rms_max + eps0)
+                    warmup_step = max(cap_lr * eps1, update_rms_max + eps0)
                     step_actual = min(warmup_step, gap)
                     new_lr = lr_previous + step_actual
                 else:
                     param_group["warmup_init"] = False
 
-            new_lr = max(min_lr, min(new_lr, max_lr))
+            new_lr = max(min_lr, min(new_lr, cap_lr))
 
         param_state["lr_previous"] = new_lr
 
@@ -311,10 +300,10 @@ class Adafactor(torch.optim.Optimizer):
         # Blend raw_lr with previous step's final lr to reduce step-to-step jumps.
         # Larger |raw_lr - lr_previous| → more weight on lr_previous → smoother.
         min_lr = param_group["min_lr"]
-        max_lr = param_group["max_lr"]
+        cap_lr = param_group["lr"]
         lr_smoothing_rate = param_group["lr_smoothing_rate"]
         lr_previous = param_state.get("lr_previous", raw_lr)
-        smoothing_scale = (max_lr - min_lr) / lr_smoothing_rate
+        smoothing_scale = (cap_lr - min_lr) / lr_smoothing_rate
         lr_delta = raw_lr - lr_previous
         denominator = abs(lr_delta) + smoothing_scale + param_group["eps"][0]
         blend_weight = abs(lr_delta) / denominator
