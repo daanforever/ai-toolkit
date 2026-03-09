@@ -122,8 +122,8 @@ class Adafactor(torch.optim.Optimizer):
         rms_max_decay_rate=0.97,
         beta1=None,
         weight_decay=0.0,
-        scale_parameter=True,
-        relative_step=True,
+        scale_parameter=False,
+        relative_step=False,
         warmup_init=False,
         min_lr=1e-6,
         lr_smoothing_rate=100.0,
@@ -298,17 +298,18 @@ class Adafactor(torch.optim.Optimizer):
             protection    = min(1.0, param_rms / (grad_rms + eps0))
 
             new_lr = (cap_lr + cap_lr * weight) * protection
+            new_lr = max(min_lr, min(new_lr, cap_lr))
 
         if param_group.get("warmup_init", False):
             target = (cap_lr - min_lr) / 2
             prev = param_state.get("lr_previous", 0.0)
             gap = target - prev
             new_lr = prev + update_rms + cap_lr * eps1 + gap * eps1
+            new_lr = max(min_lr, min(new_lr, cap_lr))
 
             if new_lr > target:
                 param_group["warmup_init"] = False
             
-        new_lr = max(min_lr, min(new_lr, cap_lr))
         param_state["lr_previous"] = new_lr
         return new_lr
 
