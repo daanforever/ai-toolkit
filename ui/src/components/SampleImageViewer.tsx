@@ -48,9 +48,18 @@ export default function SampleImageViewer({
 
   const imgInfo = useMemo(() => {
     // handle windows C:\\Apps\\AI-Toolkit\\AI-Toolkit\\output\\LoRA-Name\\samples\\1763563000704__000004000_0.jpg
-    const ii = { filename: '', step: 0, promptIdx: 0 };
+    const ii: {
+      filename: string;
+      step: number;
+      promptIdx: number;
+      isNoised?: boolean;
+      timestep?: number;
+    } = {
+      filename: '',
+      step: 0,
+      promptIdx: 0,
+    };
     if (imgPath) {
-      // handle windows
       let filename: string | null = null;
       if (imgPath.includes('\\')) {
         const parts = imgPath.split('\\');
@@ -63,15 +72,25 @@ export default function SampleImageViewer({
         return ii;
       }
       ii.filename = filename;
-      const parts = filename
-        .split('.')[0]
-        .split('_')
-        .filter(p => p !== '');
-      if (parts.length === 3) {
-        ii.step = parseInt(parts[1]);
-        ii.promptIdx = parseInt(parts[2]);
+      const noisedMatch = filename.match(/^noised_step_(\d+)(?:_t(\d+))?\.(jpg|jpeg|png|webp)$/i);
+      if (noisedMatch) {
+        ii.step = parseInt(noisedMatch[1], 10);
+        ii.promptIdx = -1;
+        ii.isNoised = true;
+        if (noisedMatch[2] !== undefined) {
+          ii.timestep = parseInt(noisedMatch[2], 10);
+        }
       } else {
-        console.error('Unexpected filename format for sample image:', filename);
+        const parts = filename
+          .split('.')[0]
+          .split('_')
+          .filter(p => p !== '');
+        if (parts.length === 3) {
+          ii.step = parseInt(parts[1], 10);
+          ii.promptIdx = parseInt(parts[2], 10);
+        } else {
+          console.error('Unexpected filename format for sample image:', filename);
+        }
       }
     }
     return ii;
@@ -102,21 +121,29 @@ export default function SampleImageViewer({
 
   const handleArrowLeft = useCallback(() => {
     if (currentIndex === -1) return;
+    if (imgInfo.isNoised || imgInfo.promptIdx === -1) {
+      setImageAtIndex(currentIndex - 1);
+      return;
+    }
     if (imgInfo.promptIdx === 0) return;
     const minIdx = currentIndex - imgInfo.promptIdx;
     const nextIdx = currentIndex - 1;
     if (nextIdx < minIdx) return;
     setImageAtIndex(nextIdx);
-  }, [sampleImages, currentIndex, imgInfo.promptIdx, setImageAtIndex]);
+  }, [currentIndex, imgInfo.isNoised, imgInfo.promptIdx, setImageAtIndex]);
 
   const handleArrowRight = useCallback(() => {
     if (currentIndex === -1) return;
+    if (imgInfo.isNoised || imgInfo.promptIdx === -1) {
+      setImageAtIndex(currentIndex + 1);
+      return;
+    }
     const stepMinIdx = currentIndex - imgInfo.promptIdx;
     const maxIdx = stepMinIdx + numSamples - 1;
     const nextIdx = currentIndex + 1;
     if (nextIdx > maxIdx) return;
     setImageAtIndex(nextIdx);
-  }, [sampleImages, currentIndex, imgInfo.promptIdx, setImageAtIndex]);
+  }, [currentIndex, imgInfo.isNoised, imgInfo.promptIdx, setImageAtIndex]);
 
   const sampleItem = useMemo<SampleItem | null>(() => {
     if (!sampleConfig) return null;
@@ -225,13 +252,27 @@ export default function SampleImageViewer({
             {/* # make full width */}
             <div className="bg-gray-950 text-sm flex justify-between items-center px-4 py-2">
               <div className="flex-1 relative h-10 min-w-0">
-                {sampleItem?.prompt && (
+                {imgInfo.isNoised ? (
                   <div className="absolute inset-0 grid place-items-center overflow-auto mr-4">
                     <div className="w-full">
-                      <span className="text-gray-400 mr-1">Prompt:</span>
-                      <span className="whitespace-pre-wrap break-words">{sampleItem.prompt}</span>
+                      <span className="text-gray-400 mr-1">
+                        Noised input (step {imgInfo.step.toLocaleString()}
+                        {imgInfo.timestep !== undefined
+                          ? `, timestep ${imgInfo.timestep.toLocaleString()}`
+                          : ''}
+                        )
+                      </span>
                     </div>
                   </div>
+                ) : (
+                  sampleItem?.prompt && (
+                    <div className="absolute inset-0 grid place-items-center overflow-auto mr-4">
+                      <div className="w-full">
+                        <span className="text-gray-400 mr-1">Prompt:</span>
+                        <span className="whitespace-pre-wrap break-words">{sampleItem.prompt}</span>
+                      </div>
+                    </div>
+                  )
                 )}
               </div>
               {controlImages.length > 0 && (
@@ -252,10 +293,11 @@ export default function SampleImageViewer({
                   <span className="text-gray-400">Step:</span> {imgInfo.step.toLocaleString()}
                 </div>
                 <div>
-                  <span className="text-gray-400">Sample #:</span> {imgInfo.promptIdx + 1}
+                  <span className="text-gray-400">Sample #:</span>{' '}
+                  {imgInfo.isNoised ? '—' : imgInfo.promptIdx + 1}
                 </div>
                 <div>
-                  <span className="text-gray-400">Seed:</span> {seed}
+                  <span className="text-gray-400">Seed:</span> {imgInfo.isNoised ? '—' : seed}
                 </div>
               </div>
             </div>

@@ -16,7 +16,7 @@ from toolkit.config_modules import GenerateImageConfig
 from toolkit.data_loader import get_dataloader_datasets
 from toolkit.data_transfer_object.data_loader import DataLoaderBatchDTO, FileItemDTO
 from toolkit.guidance import get_targeted_guidance_loss, get_guidance_loss, GuidanceType
-from toolkit.image_utils import show_tensors, show_latents
+from toolkit.image_utils import show_tensors, show_latents, save_tensors
 from toolkit.ip_adapter import IPAdapter
 from toolkit.custom_adapter import CustomAdapter
 from toolkit.print import print_acc
@@ -1310,6 +1310,21 @@ class SDTrainer(BaseSDTrainProcess):
                     self.sd.text_encoder.to(self.sd.te_torch_dtype)
 
             noisy_latents, noise, timesteps, conditioned_prompts, imgs = self.process_general_training_batch(batch)
+            # Save noised input preview to samples/ on same steps as validation sampling (for Web UI)
+            if (
+                self.accelerator.is_main_process
+                and self.sample_config.sample_every
+                and self.step_num % self.sample_config.sample_every == 0
+                and len(noisy_latents.shape) == 4
+            ):
+                with torch.no_grad():
+                    noisy_single = noisy_latents[:1]
+                    decoded = self.sd.decode_latents(noisy_single)
+                    samples_dir = os.path.join(self.save_root, 'samples')
+                    os.makedirs(samples_dir, exist_ok=True)
+                    timestep_val = int(timesteps[0].item())
+                    path = os.path.join(samples_dir, f'noised_step_{self.step_num:09d}_t{timestep_val}.jpg')
+                    save_tensors(decoded, path)
             if self.train_config.do_cfg or self.train_config.do_random_cfg:
                 # pick random negative prompts
                 if self.negative_prompt_pool is not None:
