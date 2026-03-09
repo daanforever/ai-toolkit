@@ -80,6 +80,8 @@ class SampleConfig:
     def __init__(self, **kwargs):
         self.sampler: str = kwargs.get('sampler', 'ddpm')
         self.sample_every: int = kwargs.get('sample_every', 100)
+        # controls saving of noised previews to samples/ (default False for backwards compatibility)
+        self.sample_noised: bool = kwargs.get('sample_noised', False)
         self.width: int = kwargs.get('width', 512)
         self.height: int = kwargs.get('height', 512)
         self.neg = kwargs.get('neg', False)

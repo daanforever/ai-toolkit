@@ -1311,8 +1311,10 @@ class SDTrainer(BaseSDTrainProcess):
 
             noisy_latents, noise, timesteps, conditioned_prompts, imgs = self.process_general_training_batch(batch)
             # Save noised input preview to samples/ on same steps as validation sampling (for Web UI)
+            # Only if enabled via sample_config.sample_noised (default False for backwards compatibility)
             if (
                 self.accelerator.is_main_process
+                and getattr(self.sample_config, "sample_noised", False)
                 and self.sample_config.sample_every
                 and self.step_num % self.sample_config.sample_every == 0
                 and len(noisy_latents.shape) == 4

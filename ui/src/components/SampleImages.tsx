@@ -67,7 +67,7 @@ interface SampleImagesProps {
 }
 
 export default function SampleImages({ job }: SampleImagesProps) {
-  const { sampleImages, status, refreshSampleImages } = useSampleImages(job.id, 5000);
+  const { sampleImages: rawSampleImages, status, refreshSampleImages } = useSampleImages(job.id, 5000);
   const [selectedSamplePath, setSelectedSamplePath] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const didFirstScroll = useRef(false);
@@ -81,6 +81,18 @@ export default function SampleImages({ job }: SampleImagesProps) {
     }
     return 10;
   }, [job]);
+
+  const hasNoised = useMemo(() => {
+    return rawSampleImages.some(imgPath => {
+      const filename = imgPath.split(/[/\\]/).pop() || '';
+      return /^noised_step_(\d+)(?:_t(\d+))?\.(jpg|jpeg|png|webp)$/i.test(filename);
+    });
+  }, [rawSampleImages]);
+
+  const effectiveNumSamples = useMemo(() => {
+    if (numSamples <= 0) return 1;
+    return hasNoised ? numSamples + 1 : numSamples;
+  }, [numSamples, hasNoised]);
 
   const scrollToBottom = () => {
     if (containerRef.current) {
@@ -103,7 +115,7 @@ export default function SampleImages({ job }: SampleImagesProps) {
     let textColor = '';
     let iconColor = '';
 
-    if (sampleImages.length > 0) return null;
+    if (rawSampleImages.length > 0) return null;
 
     if (status == 'loading') {
       icon = <LuLoader className="animate-spin w-8 h-8" />;
@@ -123,7 +135,7 @@ export default function SampleImages({ job }: SampleImagesProps) {
       textColor = 'text-red-900 dark:text-red-100';
       iconColor = 'text-red-600 dark:text-red-400';
     }
-    if (status == 'success' && sampleImages.length === 0) {
+    if (status == 'success' && rawSampleImages.length === 0) {
       icon = <LuImageOff className="w-8 h-8" />;
       text = 'No Samples Found';
       subtitle = 'No samples have been generated yet';
@@ -144,13 +156,13 @@ export default function SampleImages({ job }: SampleImagesProps) {
         <p className="text-sm opacity-75 leading-relaxed">{subtitle}</p>
       </div>
     );
-  }, [status, sampleImages.length]);
+  }, [status, rawSampleImages.length]);
 
   // Use direct Tailwind class without string interpolation
   // This way Tailwind can properly generate the class
   // I hate this, but it's the only way to make it work
   const gridColsClass = useMemo(() => {
-    const cols = Math.min(numSamples, 40);
+    const cols = Math.min(effectiveNumSamples, 40);
 
     switch (cols) {
       case 1:
@@ -234,7 +246,7 @@ export default function SampleImages({ job }: SampleImagesProps) {
       default:
         return 'grid-cols-3';
     }
-  }, [numSamples]);
+  }, [effectiveNumSamples]);
 
   const sampleConfig = useMemo(() => {
     if (job?.job_config) {
@@ -244,61 +256,134 @@ export default function SampleImages({ job }: SampleImagesProps) {
     return null;
   }, [job]);
 
+  const { rows, flatSampleImages } = useMemo(() => {
+    type Item = {
+      path: string | null;
+      isNoised: boolean;
+      promptIdx: number | null;
+    };
+
+    const byStep = new Map<number, { step: number; items: Item[] }>();
+    const extraImages: string[] = [];
+
+    const ensureRow = (step: number): { step: number; items: Item[] } => {
+      let row = byStep.get(step);
+      if (!row) {
+        const items: Item[] = Array.from({ length: effectiveNumSamples }).map(() => ({
+          path: null,
+          isNoised: false,
+          promptIdx: null,
+        }));
+        row = { step, items };
+        byStep.set(step, row);
+      }
+      return row;
+    };
+
+    for (const imgPath of rawSampleImages) {
+      const filename = imgPath.split(/[/\\]/).pop() || '';
+
+      const noisedMatch = filename.match(/^noised_step_(\d+)(?:_t(\d+))?\.(jpg|jpeg|png|webp)$/i);
+      if (noisedMatch) {
+        const step = parseInt(noisedMatch[1], 10);
+        if (!Number.isNaN(step)) {
+          const row = ensureRow(step);
+          if (hasNoised && row.items.length > 0) {
+            row.items[0] = { path: imgPath, isNoised: true, promptIdx: -1 };
+          }
+          continue;
+        }
+      }
+
+      const parts = filename
+        .split('.')[0]
+        .split('_')
+        .filter(p => p !== '');
+      if (parts.length === 3) {
+        const step = parseInt(parts[1], 10);
+        const promptIdx = parseInt(parts[2], 10);
+        if (!Number.isNaN(step)) {
+          const row = ensureRow(step);
+          const colOffset = hasNoised ? 1 : 0;
+          const colIdx = colOffset + (Number.isNaN(promptIdx) ? 0 : promptIdx);
+          if (colIdx >= 0 && colIdx < row.items.length) {
+            row.items[colIdx] = { path: imgPath, isNoised: false, promptIdx: Number.isNaN(promptIdx) ? null : promptIdx };
+          }
+          continue;
+        }
+      }
+
+      extraImages.push(imgPath);
+    }
+
+    const sortedSteps = Array.from(byStep.keys()).sort((a, b) => a - b);
+    const rows = sortedSteps.map(step => byStep.get(step)!).filter(Boolean);
+
+    for (const imgPath of extraImages) {
+      const items: Item[] = Array.from({ length: effectiveNumSamples }).map(() => ({
+        path: null,
+        isNoised: false,
+        promptIdx: null,
+      }));
+      items[0] = { path: imgPath, isNoised: false, promptIdx: null };
+      rows.push({ step: -1, items });
+    }
+
+    const flatSampleImages: string[] = [];
+    for (const row of rows) {
+      for (const item of row.items) {
+        if (item.path) {
+          flatSampleImages.push(item.path);
+        }
+      }
+    }
+
+    return { rows, flatSampleImages };
+  }, [rawSampleImages, effectiveNumSamples, hasNoised]);
+
   // scroll to bottom on first load of samples
   useEffect(() => {
-    if (status === 'success' && sampleImages.length > 0 && !didFirstScroll.current) {
+    if (status === 'success' && flatSampleImages.length > 0 && !didFirstScroll.current) {
       didFirstScroll.current = true;
       setTimeout(() => {
         scrollToBottom();
       }, 100);
     }
-  }, [status, sampleImages.length]);
+  }, [status, flatSampleImages.length]);
 
   return (
     <div ref={containerRef} className="absolute top-[80px] left-0 right-0 bottom-0 overflow-y-auto">
       <div className="pb-4">
         {PageInfoContent}
-        {sampleImages && (
+        {rows.length > 0 && (
           <div className={`grid ${gridColsClass} gap-1`}>
-            {sampleImages.map((sample: string, idx: number) => {
-              // Compute current group (groups are size = numSamples)
-              const groupIndex = Math.floor(idx / numSamples);
-              const groupStart = groupIndex * numSamples;
-              const groupEnd = Math.min(groupStart + numSamples, sampleImages.length);
-              const groupSize = groupEnd - groupStart;
-              const isEndOfGroup = idx === groupEnd - 1;
-
-              // Only enforce a MIN of 3 when the group's planned width is < 3
-              const MIN_COLS = 3;
-              const shouldPad = numSamples < MIN_COLS && groupSize < MIN_COLS;
-              const padsNeeded = shouldPad ? MIN_COLS - groupSize : 0;
-
-              return (
-                <div key={sample} className="contents">
-                  <SampleImageCard
-                    imageUrl={sample}
-                    numSamples={numSamples}
-                    sampleImages={sampleImages}
-                    alt="Sample Image"
-                    onClick={() => setSelectedSamplePath(sample)}
-                    observerRoot={containerRef.current}
-                  />
-
-                  {isEndOfGroup &&
-                    padsNeeded > 0 &&
-                    Array.from({ length: padsNeeded }).map((_, i) => (
-                      <div key={`pad-${groupIndex}-${i}`} className="invisible" />
-                    ))}
-                </div>
-              );
-            })}
+            {rows.map((row, rowIdx) =>
+              row.items.map((item, colIdx) => {
+                if (!item.path) {
+                  return <div key={`placeholder-${rowIdx}-${colIdx}`} className="invisible" />;
+                }
+                const sample = item.path;
+                return (
+                  <div key={sample} className="contents">
+                    <SampleImageCard
+                      imageUrl={sample}
+                      numSamples={effectiveNumSamples}
+                      sampleImages={flatSampleImages}
+                      alt="Sample Image"
+                      onClick={() => setSelectedSamplePath(sample)}
+                      observerRoot={containerRef.current}
+                    />
+                  </div>
+                );
+              }),
+            )}
           </div>
         )}
       </div>
       <SampleImageViewer
         imgPath={selectedSamplePath}
-        numSamples={numSamples}
-        sampleImages={sampleImages}
+        numSamples={effectiveNumSamples}
+        sampleImages={flatSampleImages}
         onChange={setPath => setSelectedSamplePath(setPath)}
         sampleConfig={sampleConfig}
         refreshSampleImages={refreshSampleImages}

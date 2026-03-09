@@ -194,6 +194,7 @@ export interface SampleItem {
 export interface SampleConfig {
   sampler: string;
   sample_every: number;
+  sample_noised?: boolean;
   width: number;
   height: number;
   prompts?: string[];
