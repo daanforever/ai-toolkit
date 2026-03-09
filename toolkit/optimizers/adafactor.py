@@ -304,7 +304,7 @@ class Adafactor(torch.optim.Optimizer):
             target = (cap_lr - min_lr) / 2
             prev = param_state.get("lr_previous", 0.0)
             gap = target - prev
-            new_lr = prev + update_rms + cap_lr * eps1 + gap * eps1
+            new_lr = prev + cap_lr * eps1 + gap * eps1
             new_lr = max(min_lr, min(new_lr, cap_lr))
 
             if new_lr > target:
