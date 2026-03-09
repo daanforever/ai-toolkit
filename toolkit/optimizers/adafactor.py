@@ -262,39 +262,59 @@ class Adafactor(torch.optim.Optimizer):
         In adaptive mode (relative_step=True), computes LR from three normalized coefficients:
           - weight: relative gap of this param vs group max RMS. Small weights -> ~1, largest -> eps1.
           - activity: gradient RMS vs its historical max. Range [0, ~1].
-          - protection: safety factor preventing update from exceeding weight magnitude.
+          - protection: safety factor preventing update from exceeding parameter magnitude.
+            When param_rms ≈ 0 (e.g. LoRA init), collapses to ~0 and dominates lr suppression.
 
-        Warmup phase (warmup_init=True): uses higher effective_min_lr = max(min_lr, cap_lr * eps1)
-        to bootstrap small weights. Auto-disabled when group_rms_max >= cap_lr * eps1.
+        Warmup phase (warmup_init=True): raises effective_min_lr = max(min_lr, cap_lr * eps1)
+        to counteract protection suppression for near-zero params. Auto-disabled when
+        group_rms_max >= cap_lr * eps1.
 
         Returns:
             float: learning rate for this parameter
         """
-        cap_lr     = param_group["lr"]
-        min_lr     = param_group["min_lr"]
-        eps0       = param_group["eps"][0]
-        eps1       = param_group["eps"][1]
-        param_rms  = param_state["RMS"].item()
+        # Extract LR config parameters
+        cap_lr     = param_group["lr"]          # Maximum (cap) learning rate
+        min_lr     = param_group["min_lr"]      # Minimum learning rate
+        eps0       = param_group["eps"][0]      # Small constant for numerical stability (division guard)
+        eps1       = param_group["eps"][1]      # Parameter scale regularization constant
+        param_rms  = param_state["RMS"].item()  # Current parameter RMS magnitude
 
         if not param_group["relative_step"]:
+            # Manual LR mode: use fixed learning rate from config
             new_lr = cap_lr
             if param_group["scale_parameter"]:
+                # Scale LR by parameter magnitude for better adaptation to parameter scale
                 new_lr *= max(eps1, param_rms)
         else:
-            grad_rms     = param_state["grad_rms"].item()
-            grad_rms_max = param_state["grad_rms_max"].item()
-            group_rms_max = param_group.get("_group_rms_max", torch.tensor(eps1)).item()
+            # Adaptive LR mode: compute LR from gradient and parameter statistics
+            grad_rms     = param_state["grad_rms"].item()       # Current gradient RMS
+            grad_rms_max = param_state["grad_rms_max"].item()   # Historical max gradient RMS
+            group_rms_max = param_group.get("_group_rms_max", torch.tensor(eps1)).item()  # Group-level max parameter RMS
 
+            # weight: Prioritize smaller parameters (inverse weighting by relative size)
+            # Range: [eps1, ~1]. Larger params get smaller weight (closer to eps1), smaller params get ~1
             weight     = max(eps1, (group_rms_max - param_rms) / (group_rms_max + eps0))
+            
+            # activity: Current gradient magnitude relative to historical max
+            # Range: [0, ~1]. Measures how active/important this parameter's gradient is right now
             activity   = grad_rms / (grad_rms_max + eps0)
+            
+            # protection: Safety factor preventing update from exceeding parameter magnitude.
+            # Range: [0, 1]. Lower when gradients are large relative to parameter size.
+            # Critical: when param_rms ≈ 0 (e.g. freshly initialized LoRA), collapses to
+            # eps0 / (grad_rms + eps0) ≈ 0, strongly suppressing lr for near-zero params.
             protection = min(1.0, max(param_rms, eps0) / (grad_rms + eps0))
 
+            # Combine all three factors to get adaptive learning rate
             new_lr = cap_lr * weight * activity * protection
 
+        # Warmup floor: when warmup_init=True, raise min lr to counteract protection
+        # suppression for near-zero params (e.g. LoRA init where param_rms ≈ 0).
         if param_group.get("warmup_init", False):
             effective_min_lr = max(min_lr, cap_lr * eps1)
         else:
             effective_min_lr = min_lr
+            
         new_lr = max(effective_min_lr, min(new_lr, cap_lr))
         param_state["lr_previous"] = new_lr
         return new_lr
