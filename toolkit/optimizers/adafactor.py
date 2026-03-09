@@ -216,9 +216,9 @@ class Adafactor(torch.optim.Optimizer):
             group["lr"] = max(group["eps"][0], self._lr)
             group["lr_smoothing_rate"] = self._lr_smoothing_rate
             group["rms_max_decay_rate"] = self._rms_max_decay_rate
-            # Normalize _group_rms_max if present (old checkpoints may not have it)
-            if "_group_rms_max" in group and not isinstance(group["_group_rms_max"], torch.Tensor):
-                group["_group_rms_max"] = torch.tensor(group["_group_rms_max"], dtype=torch.float32)
+            # Normalize group_rms_max if present (old checkpoints may not have it)
+            if "group_rms_max" in group and not isinstance(group["group_rms_max"], torch.Tensor):
+                group["group_rms_max"] = torch.tensor(group["group_rms_max"], dtype=torch.float32)
         # Normalize state from old checkpoints: update_rms_max/update_rms must be tensors for step().
         for group in self.param_groups:
             for param in group["params"]:
@@ -256,28 +256,31 @@ class Adafactor(torch.optim.Optimizer):
 
     def _get_lr(self, param_group, param_state):
         """
-        Compute adaptive learning rate for a parameter.
+        Compute per-parameter learning rate.
 
-        In manual LR mode (relative_step=False), returns group["lr"] optionally scaled by param RMS.
-        In adaptive mode (relative_step=True), computes LR from three normalized coefficients:
-          - weight: relative gap of this param vs group max RMS. Small weights -> ~1, largest -> eps1.
-          - activity: gradient RMS vs its historical max. Range [0, ~1].
-          - protection: safety factor preventing update from exceeding parameter magnitude.
-            When param_rms ≈ 0 (e.g. LoRA init), collapses to ~0 and dominates lr suppression.
+        Manual mode (relative_step=False):
+          Returns group["lr"]. If scale_parameter=True, multiplies by max(eps1, param_rms).
 
-        Warmup phase (warmup_init=True): raises effective_min_lr = max(min_lr, cap_lr * eps1)
-        to counteract protection suppression for near-zero params. Auto-disabled when
-        group_rms_max >= cap_lr * eps1.
+        Adaptive mode (relative_step=True):
+          new_lr = (cap_lr + cap_lr * weight) * protection, then clamped to [min_lr, cap_lr].
+          - weight: max(eps0, (group_rms_max - param_rms) / (group_rms_max + eps0)). In [eps0, 1].
+            Smaller params (vs group max) get weight closer to 1; largest param gets weight eps0.
+          - protection: min(1, param_rms / (grad_rms + eps0)). Limits step size relative to param
+            magnitude; when param_rms ≈ 0 (e.g. LoRA init), protection ≈ 0 and suppresses LR.
+
+        Warmup (warmup_init=True, requires relative_step=True):
+          Overrides new_lr with prev + update_rms + cap_lr*eps1 + gap*eps1, where
+          target = (cap_lr - min_lr) / 2 and gap = target - prev. Warmup is disabled when new_lr > target.
 
         Returns:
             float: learning rate for this parameter
         """
         # Extract LR config parameters
-        cap_lr     = param_group["lr"]          # Maximum (cap) learning rate
-        min_lr     = param_group["min_lr"]      # Minimum learning rate
-        eps0       = param_group["eps"][0]      # Small constant for numerical stability (division guard)
-        eps1       = param_group["eps"][1]      # Parameter scale regularization constant
-        param_rms  = param_state["RMS"].item()  # Current parameter RMS magnitude
+        cap_lr     = param_group["lr"]              # Maximum (cap) learning rate
+        min_lr     = param_group["min_lr"]          # Minimum learning rate
+        eps0       = param_group["eps"][0]          # Small constant for numerical stability (division guard)
+        eps1       = param_group["eps"][1]          # Parameter scale regularization constant
+        param_rms  = param_state["RMS"].item()      # Current parameter RMS magnitude
 
         if not param_group["relative_step"]:
             # Manual LR mode: use fixed learning rate from config
@@ -287,35 +290,25 @@ class Adafactor(torch.optim.Optimizer):
                 new_lr *= max(eps1, param_rms)
         else:
             # Adaptive LR mode: compute LR from gradient and parameter statistics
-            grad_rms     = param_state["grad_rms"].item()       # Current gradient RMS
-            grad_rms_max = param_state["grad_rms_max"].item()   # Historical max gradient RMS
-            group_rms_max = param_group.get("_group_rms_max", torch.tensor(eps1)).item()  # Group-level max parameter RMS
+            grad_rms      = param_state["grad_rms"].item()        # Current gradient RMS
+            group_rms_max = param_group.get("group_rms_max", torch.tensor(eps1)).item()  # Group-level max parameter RMS
+            update_rms    = param_state.get("update_rms", torch.tensor(0.0)).item()      # Previous update RMS
 
-            # weight: Prioritize smaller parameters (inverse weighting by relative size)
-            # Range: [eps1, ~1]. Larger params get smaller weight (closer to eps1), smaller params get ~1
-            weight     = max(eps1, (group_rms_max - param_rms) / (group_rms_max + eps0))
-            
-            # activity: Current gradient magnitude relative to historical max
-            # Range: [0, ~1]. Measures how active/important this parameter's gradient is right now
-            activity   = grad_rms / (grad_rms_max + eps0)
-            
-            # protection: Safety factor preventing update from exceeding parameter magnitude.
-            # Range: [0, 1]. Lower when gradients are large relative to parameter size.
-            # Critical: when param_rms ≈ 0 (e.g. freshly initialized LoRA), collapses to
-            # eps0 / (grad_rms + eps0) ≈ 0, strongly suppressing lr for near-zero params.
-            protection = min(1.0, max(param_rms, eps0) / (grad_rms + eps0))
+            weight        = max(eps0, (group_rms_max - param_rms) / (group_rms_max + eps0))
+            protection    = min(1.0, param_rms / (grad_rms + eps0))
 
-            # Combine all three factors to get adaptive learning rate
-            new_lr = cap_lr * weight * activity * protection
+            new_lr = (cap_lr + cap_lr * weight) * protection
 
-        # Warmup floor: when warmup_init=True, raise min lr to counteract protection
-        # suppression for near-zero params (e.g. LoRA init where param_rms ≈ 0).
         if param_group.get("warmup_init", False):
-            effective_min_lr = max(min_lr, cap_lr * eps1)
-        else:
-            effective_min_lr = min_lr
+            target = (cap_lr - min_lr) / 2
+            prev = param_state.get("lr_previous", 0.0)
+            gap = target - prev
+            new_lr = prev + update_rms + cap_lr * eps1 + gap * eps1
+
+            if new_lr > target:
+                param_group["warmup_init"] = False
             
-        new_lr = max(effective_min_lr, min(new_lr, cap_lr))
+        new_lr = max(min_lr, min(new_lr, cap_lr))
         param_state["lr_previous"] = new_lr
         return new_lr
 
@@ -405,13 +398,8 @@ class Adafactor(torch.optim.Optimizer):
 
         for group in self.param_groups:
             # Decay group_rms_max once per step
-            if "_group_rms_max" in group:
-                group["_group_rms_max"] = group["_group_rms_max"] * group["rms_max_decay_rate"]
-
-            # Warmup termination: weights grown enough for protection to work reliably
-            if group.get("warmup_init", False) and "_group_rms_max" in group:
-                if group["_group_rms_max"].item() >= group["lr"] * group["eps"][1]:
-                    group["warmup_init"] = False
+            if "group_rms_max" in group:
+                group["group_rms_max"] = group["group_rms_max"] * group["rms_max_decay_rate"]
 
             for p in group["params"]:
                 if p.grad is None or not p.requires_grad:
@@ -479,11 +467,11 @@ class Adafactor(torch.optim.Optimizer):
                         state["rms_max"] * group["rms_max_decay_rate"], state["RMS"]
                     )
                 # Update group running max
-                if "_group_rms_max" not in group:
-                    group["_group_rms_max"] = state["RMS"].clone().detach()
+                if "group_rms_max" not in group:
+                    group["group_rms_max"] = state["RMS"].clone().detach()
                 else:
-                    group["_group_rms_max"] = torch.maximum(
-                        group["_group_rms_max"], state["RMS"]
+                    group["group_rms_max"] = torch.maximum(
+                        group["group_rms_max"], state["RMS"]
                     )
                 # Store grad_rms and grad_rms_max as 0-dim tensors (same path as update_rms/update_rms_max).
                 state["grad_rms"] = self._rms(grad)
