@@ -10,6 +10,7 @@ from PIL import Image
 from toolkit.samplers.custom_flowmatch_sampler import (
     CustomFlowMatchEulerDiscreteScheduler,
 )
+from toolkit.util.debug import memory_debug, is_debug_enabled
 
 from . import forward as fwd_mod
 
@@ -104,18 +105,33 @@ class ZImageDiffSynthPipelineWrapper:
         sigmas, timesteps = _get_diffsynth_scheduler(num_inference_steps)
         timesteps = timesteps.to(device)
 
-        for progress_id in range(len(timesteps)):
-            t = timesteps[progress_id].unsqueeze(0).expand(latents.shape[0])
-            if guidance_scale <= 1.0 or not prompt_embeds or not negative_prompt_embeds:
-                cond_emb = prompt_embeds[0] if prompt_embeds else None
-                noise_pred = fwd_mod.run_forward(dit, latents, t, cond_emb)
-            else:
-                cond_emb = prompt_embeds[0]
-                uncond_emb = negative_prompt_embeds[0]
-                pred_cond = fwd_mod.run_forward(dit, latents, t, cond_emb)
-                pred_uncond = fwd_mod.run_forward(dit, latents, t, uncond_emb)
-                noise_pred = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
-            latents = _step_scheduler(sigmas, timesteps, noise_pred, t[0], latents, device)
+        # When debug logging is enabled, wrap the full sampling loop in a
+        # memory_debug context so that peak VRAM for z_image_diffsynth
+        # generation can be compared directly against the baseline z_image
+        # pipeline.
+        def _run_sampling_loop():
+            nonlocal latents
+            for progress_id in range(len(timesteps)):
+                t = timesteps[progress_id].unsqueeze(0).expand(latents.shape[0])
+                if guidance_scale <= 1.0 or not prompt_embeds or not negative_prompt_embeds:
+                    cond_emb = prompt_embeds[0] if prompt_embeds else None
+                    noise_pred = fwd_mod.run_forward(dit, latents, t, cond_emb)
+                else:
+                    cond_emb = prompt_embeds[0]
+                    uncond_emb = negative_prompt_embeds[0]
+                    pred_cond = fwd_mod.run_forward(dit, latents, t, cond_emb)
+                    pred_uncond = fwd_mod.run_forward(dit, latents, t, uncond_emb)
+                    noise_pred = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
+                latents = _step_scheduler(sigmas, timesteps, noise_pred, t[0], latents, device)
+
+        if is_debug_enabled():
+            with memory_debug(
+                lambda msg: print(msg),
+                "zimage_diffsynth sampling loop",
+            ):
+                _run_sampling_loop()
+        else:
+            _run_sampling_loop()
 
         vae = self.vae
         decoder = getattr(vae, "vae_decoder", vae)
