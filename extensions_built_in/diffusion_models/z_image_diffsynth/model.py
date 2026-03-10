@@ -254,27 +254,47 @@ class ZImageDiffSynthModel(BaseModel):
         generator: torch.Generator,
         extra: dict,
     ):
-        sc = self.get_bucket_divisibility()
-        gen_config.width = int(gen_config.width // sc * sc)
-        gen_config.height = int(gen_config.height // sc * sc)
-        cond = conditional_embeds.text_embeds
-        uncond = unconditional_embeds.text_embeds
-        if isinstance(cond, torch.Tensor) and len(cond.shape) == 3:
-            cond = [cond[i] for i in range(cond.shape[0])]
-        if isinstance(uncond, torch.Tensor) and len(uncond.shape) == 3:
-            uncond = [uncond[i] for i in range(uncond.shape[0])]
-        img = pipeline(
-            prompt_embeds=cond,
-            negative_prompt_embeds=uncond,
-            height=gen_config.height,
-            width=gen_config.width,
-            num_inference_steps=gen_config.num_inference_steps,
-            guidance_scale=gen_config.guidance_scale,
-            latents=gen_config.latents,
-            generator=generator,
-            **extra,
-        ).images[0]
-        return img
+        def _run_generation():
+            sc = self.get_bucket_divisibility()
+            gen_config.width = int(gen_config.width // sc * sc)
+            gen_config.height = int(gen_config.height // sc * sc)
+            cond = conditional_embeds.text_embeds
+            uncond = unconditional_embeds.text_embeds
+            if isinstance(cond, torch.Tensor) and len(cond.shape) == 3:
+                cond = [cond[i] for i in range(cond.shape[0])]
+            if isinstance(uncond, torch.Tensor) and len(uncond.shape) == 3:
+                uncond = [uncond[i] for i in range(uncond.shape[0])]
+            img = pipeline(
+                prompt_embeds=cond,
+                negative_prompt_embeds=uncond,
+                height=gen_config.height,
+                width=gen_config.width,
+                num_inference_steps=gen_config.num_inference_steps,
+                guidance_scale=gen_config.guidance_scale,
+                latents=gen_config.latents,
+                generator=generator,
+                **extra,
+            ).images[0]
+            return img
+
+        use_sampling_transformer = (
+            self._sampling_transformer is not None
+            and isinstance(self.device_torch, torch.device)
+            and self.device_torch.type == "cuda"
+        )
+
+        if not use_sampling_transformer:
+            return _run_generation()
+
+        try:
+            if self._raw_dit is not None:
+                self._raw_dit.to("cpu")
+            self._sampling_transformer.to(self.device_torch)
+            return _run_generation()
+        finally:
+            self._sampling_transformer.to("cpu")
+            if self._raw_dit is not None:
+                self._raw_dit.to(self.device_torch)
 
     def generate_images(
         self,
@@ -282,6 +302,12 @@ class ZImageDiffSynthModel(BaseModel):
         sampler=None,
     ):
         saved_network = None
+        use_sampling_transformer = (
+            hasattr(self, "_sampling_transformer")
+            and self._sampling_transformer is not None
+            and isinstance(self.device_torch, torch.device)
+            and self.device_torch.type == "cuda"
+        )
         try:
             if (
                 hasattr(self, "_sampling_transformer")
@@ -293,7 +319,19 @@ class ZImageDiffSynthModel(BaseModel):
             ):
                 saved_network = self.network
                 self.network = self._sampling_network
-            return super().generate_images(image_configs, sampler)
+
+            if not use_sampling_transformer:
+                return super().generate_images(image_configs, sampler)
+
+            try:
+                if self._raw_dit is not None:
+                    self._raw_dit.to("cpu")
+                self._sampling_transformer.to(self.device_torch)
+                return super().generate_images(image_configs, sampler)
+            finally:
+                self._sampling_transformer.to("cpu")
+                if self._raw_dit is not None:
+                    self._raw_dit.to(self.device_torch)
         finally:
             if saved_network is not None:
                 self.network = saved_network
