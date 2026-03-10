@@ -138,6 +138,12 @@ class ZImageDiffSynthModel(BaseModel):
         def log(msg):
             self.print_and_status_update(msg)
 
+        # Same as z_image: qfloat8 is not compatible with quantize path; use float8
+        if getattr(self.model_config, "quantize", False) and getattr(
+            self.model_config, "qtype", None
+        ) == "qfloat8":
+            self.model_config.qtype = "float8"
+
         with memory_debug(self.print_and_status_update, "Load components"):
             components = loader_mod.load_components(
                 model_path,
@@ -459,3 +465,7 @@ class ZImageDiffSynthModel(BaseModel):
 
     def convert_lora_weights_before_load(self, state_dict):
         return lora_mod.convert_lora_weights_before_load(state_dict)
+
+    def convert_accuracy_recovery_weights_before_load(self, state_dict):
+        """Used by quantize_model when loading the ARA so LoRASpecialNetwork.load_weights matches keys."""
+        return lora_mod.convert_accuracy_recovery_weights_before_load(state_dict)
