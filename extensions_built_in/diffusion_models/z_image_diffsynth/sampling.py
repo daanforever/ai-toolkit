@@ -1,4 +1,6 @@
 # Sampling/generation pipeline for Z-Image DiffSynth (wrapper with .images for compatibility).
+# When sampling_name_or_path points to a diffusers-format checkpoint, we use ZImagePipeline
+# (same as z_image) so the same checkpoint gives the same quality.
 
 import os
 import sys
@@ -170,25 +172,43 @@ class _ImagesOutput:
         self.images = images
 
 
-def get_generation_pipeline(sd_model) -> ZImageDiffSynthPipelineWrapper:
-    """Build pipeline wrapper for sd_model (ZImageDiffSynthModel). Uses sampling transformer if set."""
-    # Use raw DiT for inference (model_fn_z_image_turbo expects real DiT with t_embedder, etc.)
+def get_generation_pipeline(sd_model):
+    """Build pipeline for sd_model (ZImageDiffSynthModel). Uses sampling transformer if set.
+    When sampling is a diffusers-format checkpoint, returns ZImagePipeline (same as z_image)
+    so quality matches. Otherwise returns ZImageDiffSynthPipelineWrapper (DiffSynth DiT)."""
+    from toolkit.accelerator import unwrap_model
+
+    # Same sampling path as z_image: diffusers ZImageTransformer2DModel + ZImagePipeline
+    if getattr(sd_model, "_sampling_is_diffusers", False) and getattr(
+        sd_model, "_sampling_transformer", None
+    ) is not None:
+        from diffusers import ZImagePipeline
+        scheduler = CustomFlowMatchEulerDiscreteScheduler(**scheduler_config)
+        vae = getattr(sd_model.vae, "vae_decoder", sd_model.vae)
+        te = sd_model.text_encoder[0] if isinstance(sd_model.text_encoder, list) else sd_model.text_encoder
+        tok = sd_model.tokenizer[0] if isinstance(sd_model.tokenizer, list) else sd_model.tokenizer
+        if te is None:
+            from toolkit.unloader import FakeTextEncoder
+            te = FakeTextEncoder(device=sd_model.device_torch, dtype=sd_model.torch_dtype)
+        return ZImagePipeline(
+            scheduler=scheduler,
+            text_encoder=unwrap_model(te),
+            tokenizer=tok,
+            vae=unwrap_model(vae),
+            transformer=unwrap_model(sd_model._sampling_transformer),
+        )
+
+    # DiffSynth path: ZImageDiT + model_fn_z_image_turbo
     sampling_dit = getattr(sd_model, "_sampling_transformer", None)
     raw_dit = getattr(sd_model, "_raw_dit", None)
     dit = sampling_dit if sampling_dit is not None else raw_dit
     if dit is None:
         dit = sd_model.model
-    # Unwrap _DiTUnetWrapper so pipeline gets raw DiT (DiffSynth model_fn expects it)
     if isinstance(dit, torch.nn.Module) and "dit" in getattr(dit, "_modules", {}):
         dit = dit._modules["dit"]
     vae = sd_model.vae
-    if hasattr(vae, "decode"):
-        vae_decoder = vae
-    else:
-        vae_decoder = vae.vae_decoder if hasattr(vae, "vae_decoder") else vae
+    vae_decoder = vae if hasattr(vae, "decode") else (vae.vae_decoder if hasattr(vae, "vae_decoder") else vae)
     tokenizer = sd_model.tokenizer[0] if isinstance(sd_model.tokenizer, list) else sd_model.tokenizer
-    # When text_encoder is unloaded (e.g. unload_text_encoder=True), it can be an empty list (zdiffsynth has pipeline=None).
-    # Use a fake text encoder for the pipeline so sampling still works with cached/precomputed prompt_embeds.
     if isinstance(sd_model.text_encoder, list):
         text_encoder = sd_model.text_encoder[0] if len(sd_model.text_encoder) > 0 else None
     else:
@@ -196,7 +216,6 @@ def get_generation_pipeline(sd_model) -> ZImageDiffSynthPipelineWrapper:
     if text_encoder is None:
         from toolkit.unloader import FakeTextEncoder
         text_encoder = FakeTextEncoder(device=sd_model.device_torch, dtype=sd_model.torch_dtype)
-    from toolkit.accelerator import unwrap_model
     return ZImageDiffSynthPipelineWrapper(
         dit=unwrap_model(dit),
         vae=unwrap_model(vae_decoder),

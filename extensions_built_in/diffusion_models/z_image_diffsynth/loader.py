@@ -116,14 +116,31 @@ def load_components(
             log_fn(msg)
 
     # 1) Sampling transformer first when configured (VRAM control)
+    # When sampling_name_or_path points to the same diffusers-style checkpoint as z_image uses,
+    # we must load it as ZImageTransformer2DModel and run it with ZImagePipeline (same as z_image).
+    # Otherwise we load as DiffSynth ZImageDiT and use model_fn_z_image_turbo.
     sampling_dit = None
+    sampling_is_diffusers = False
     if sampling_transformer_path:
         sampling_transformer_path = normalize_path(sampling_transformer_path)
         sp_transformer_folder = os.path.join(sampling_transformer_path, "transformer")
         if not os.path.isdir(sp_transformer_folder):
             sp_transformer_folder = sampling_transformer_path
-        log("Loading sampling transformer (DiT)")
-        sampling_dit = load_dit_from_folder(sp_transformer_folder, dtype, device)
+        try:
+            from extensions_built_in.diffusion_models.z_image.loading import (
+                load_zimage_transformer_from_shards,
+            )
+            log("Loading sampling transformer (diffusers ZImage format)")
+            sampling_dit = load_zimage_transformer_from_shards(
+                sp_transformer_folder,
+                subfolder=None,
+                torch_dtype=dtype,
+                device=device,
+            )
+            sampling_is_diffusers = True
+        except (ValueError, FileNotFoundError, OSError, RuntimeError):
+            log("Loading sampling transformer (DiT)")
+            sampling_dit = load_dit_from_folder(sp_transformer_folder, dtype, device)
         if quantize_transformer and base_model is not None:
             log("Quantizing sampling transformer")
             if is_debug_enabled():
@@ -203,4 +220,5 @@ def load_components(
         "vae_wrapper": vae_wrapper,
         "dit": dit,
         "sampling_dit": sampling_dit,
+        "sampling_is_diffusers": sampling_is_diffusers,
     }

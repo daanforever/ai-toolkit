@@ -179,6 +179,7 @@ class ZImageDiffSynthModel(BaseModel):
         self.vae = components["vae_wrapper"]
         self.text_encoder = [components["text_encoder"]]
         self.tokenizer = [components["tokenizer"]]
+        self._sampling_is_diffusers = components.get("sampling_is_diffusers", False)
         sampling_dit = components.get("sampling_dit")
         if sampling_dit is not None:
             # Apply same refiner disabling as main DiT so structure and LoRA names match.
@@ -191,9 +192,14 @@ class ZImageDiffSynthModel(BaseModel):
                         setattr(sampling_dit, _ref_name, torch.nn.ModuleList([]))
                     except Exception:
                         pass
-        # Wrap sampling DiT in the same wrapper as main so LoRA module names match
-        # (main uses _DiTUnetWrapper → "dit.noise_refiner..."; unwrapped would be "noise_refiner...").
-        self._sampling_transformer = _DiTUnetWrapper(sampling_dit) if sampling_dit is not None else None
+        # When sampling is diffusers ZImageTransformer2DModel, use as-is. Otherwise wrap in _DiTUnetWrapper
+        # so LoRA module names match the main DiT.
+        if sampling_dit is not None and self._sampling_is_diffusers:
+            self._sampling_transformer = sampling_dit
+        elif sampling_dit is not None:
+            self._sampling_transformer = _DiTUnetWrapper(sampling_dit)
+        else:
+            self._sampling_transformer = None
 
         use_diffsynth = getattr(self.model_config, "use_diffsynth_training_loop", True)
         self.noise_scheduler = ZImageDiffSynthModel.get_train_scheduler(use_diffsynth_loop=use_diffsynth)
