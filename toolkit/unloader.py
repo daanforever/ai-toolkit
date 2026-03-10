@@ -44,18 +44,21 @@ def unload_text_encoder(model: "BaseModel"):
             pipe = model.pipeline
 
             # the pipeline stores text encoders like text_encoder, text_encoder_2, text_encoder_3, etc.
-            if hasattr(pipe, "text_encoder"):
+            if pipe is not None and hasattr(pipe, "text_encoder"):
                 te = FakeTextEncoder(device=model.device_torch, dtype=model.torch_dtype)
                 text_encoder_list.append(te)
                 pipe.text_encoder.to('cpu')
                 pipe.text_encoder = te
 
-            i = 2
-            while hasattr(pipe, f"text_encoder_{i}"):
-                te = FakeTextEncoder(device=model.device_torch, dtype=model.torch_dtype)
-                text_encoder_list.append(te)
-                setattr(pipe, f"text_encoder_{i}", te)
-                i += 1
+                i = 2
+                while hasattr(pipe, f"text_encoder_{i}"):
+                    te = FakeTextEncoder(device=model.device_torch, dtype=model.torch_dtype)
+                    text_encoder_list.append(te)
+                    setattr(pipe, f"text_encoder_{i}", te)
+                    i += 1
+            # If pipeline is None (e.g. zimage_diffsynth) we still need at least one fake so text_encoder[0] doesn't raise.
+            if not text_encoder_list:
+                text_encoder_list.append(FakeTextEncoder(device=model.device_torch, dtype=model.torch_dtype))
             model.text_encoder = text_encoder_list
         else:
             # only has a single text encoder

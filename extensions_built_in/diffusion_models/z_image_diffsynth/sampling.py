@@ -172,7 +172,15 @@ def get_generation_pipeline(sd_model) -> ZImageDiffSynthPipelineWrapper:
     else:
         vae_decoder = vae.vae_decoder if hasattr(vae, "vae_decoder") else vae
     tokenizer = sd_model.tokenizer[0] if isinstance(sd_model.tokenizer, list) else sd_model.tokenizer
-    text_encoder = sd_model.text_encoder[0] if isinstance(sd_model.text_encoder, list) else sd_model.text_encoder
+    # When text_encoder is unloaded (e.g. unload_text_encoder=True), it can be an empty list (zdiffsynth has pipeline=None).
+    # Use a fake text encoder for the pipeline so sampling still works with cached/precomputed prompt_embeds.
+    if isinstance(sd_model.text_encoder, list):
+        text_encoder = sd_model.text_encoder[0] if len(sd_model.text_encoder) > 0 else None
+    else:
+        text_encoder = sd_model.text_encoder
+    if text_encoder is None:
+        from toolkit.unloader import FakeTextEncoder
+        text_encoder = FakeTextEncoder(device=sd_model.device_torch, dtype=sd_model.torch_dtype)
     from toolkit.accelerator import unwrap_model
     return ZImageDiffSynthPipelineWrapper(
         dit=unwrap_model(dit),
