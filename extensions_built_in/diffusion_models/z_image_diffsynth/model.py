@@ -1,5 +1,6 @@
 # ZImageDiffSynthModel: BaseModel with arch "zimage_diffsynth", using DiffSynth DiT/forward and toolkit trainer.
 
+import gc
 import os
 from typing import List, Optional
 
@@ -102,6 +103,12 @@ class ZImageDiffSynthModel(BaseModel):
             self.network.to(device)
         except Exception:
             pass
+
+    def _flush_cuda(self):
+        """Release CUDA cache and run GC so VRAM is actually freed after model moves."""
+        if isinstance(self.device_torch, torch.device) and self.device_torch.type == "cuda":
+            torch.cuda.empty_cache()
+            gc.collect()
 
     def _move_sampling(self, device):
         """Move sampling components (network + transformer) to device."""
@@ -361,12 +368,14 @@ class ZImageDiffSynthModel(BaseModel):
 
         try:
             self.model.to("cpu")
+            self._flush_cuda()
             self._move_sampling(self.device_torch)
             return _run_generation()
         finally:
             self._move_sampling("cpu")
             self.model.to(self.device_torch)
             self._move_main_network(self.device_torch)
+            self._flush_cuda()
 
     def generate_images(
         self,
@@ -397,6 +406,7 @@ class ZImageDiffSynthModel(BaseModel):
 
             try:
                 self.model.to("cpu")
+                self._flush_cuda()
                 self._move_sampling(self.device_torch)
                 return super().generate_images(image_configs, sampler)
             finally:
@@ -405,6 +415,7 @@ class ZImageDiffSynthModel(BaseModel):
                 self._move_sampling("cpu")
                 self.model.to(self.device_torch)
                 self._move_main_network(self.device_torch)
+                self._flush_cuda()
         finally:
             # Restore when we swapped but returned early (use_sampling_transformer
             # was False), so the inner finally never ran.
