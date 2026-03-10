@@ -140,8 +140,9 @@ def load_components(
         log("Quantizing transformer")
         quantize_model(base_model, dit)
         flush()
-    # Keep main DiT on CPU after (optional) quantization; training/device
-    # presets will move it to the appropriate device when needed.
+    # Move main DiT to CPU after (optional) quantization to reduce VRAM
+    # usage during setup; training/device presets and call-sites will move
+    # it back to the appropriate device when actually used.
     dit.to("cpu")
     flush()
 

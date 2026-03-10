@@ -19,7 +19,7 @@ import tempfile
 
 # Re-run with venv Python if venv exists and we're not already using it
 _REPO_ROOT = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
+    os.path.join(os.path.dirname(__file__), "..", "..", "..")
 )
 if sys.platform == "win32":
     _venv_python = os.path.join(_REPO_ROOT, "venv", "Scripts", "python.exe")

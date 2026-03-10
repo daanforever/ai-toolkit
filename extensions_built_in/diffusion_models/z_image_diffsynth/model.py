@@ -150,6 +150,21 @@ class ZImageDiffSynthModel(BaseModel):
         text_embeddings: PromptEmbeds,
         **kwargs,
     ):
+        # Ensure DiT weights live on the same device as the latents we are
+        # about to run on. During training the device-state presets will
+        # already have moved the wrapper (and inner DiT) to the correct
+        # device; for one-off calls like the smoke test this also brings a
+        # freshly-loaded, CPU-resident DiT onto self.device_torch.
+        if isinstance(latent_model_input, torch.Tensor):
+            target_device = latent_model_input.device
+        else:
+            target_device = self.device_torch
+        try:
+            self._raw_dit.to(target_device)
+        except Exception:
+            # If for some reason .to(...) is not supported on the inner DiT,
+            # fall back to its current placement and let the error surface.
+            pass
         # Z-Image DiffSynth DiT is trained on latent-space tensors with a fixed
         # channel count (e.g. 16). If we accidentally receive 3‑channel BCHW
         # tensors here (RGB-like), they will eventually hit dit.all_x_embedder
