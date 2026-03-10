@@ -1,0 +1,154 @@
+# Sampling/generation pipeline for Z-Image DiffSynth (wrapper with .images for compatibility).
+
+import os
+import sys
+from typing import List, Optional
+import torch
+import numpy as np
+from PIL import Image
+
+from toolkit.samplers.custom_flowmatch_sampler import (
+    CustomFlowMatchEulerDiscreteScheduler,
+)
+
+from . import forward as fwd_mod
+
+scheduler_config = {
+    "num_train_timesteps": 1000,
+    "use_dynamic_shifting": False,
+    "shift": 3.0,
+}
+
+
+def _get_diffsynth_scheduler(num_inference_steps: int, denoising_strength: float = 1.0):
+    """Z-Image timestep schedule (DiffSynth set_timesteps_z_image style)."""
+    sigma_min = 0.0
+    sigma_max = 1.0
+    shift = 3.0
+    num_train_timesteps = 1000
+    sigma_start = sigma_min + (sigma_max - sigma_min) * denoising_strength
+    sigmas = torch.linspace(sigma_start, sigma_min, num_inference_steps + 1)[:-1]
+    sigmas = shift * sigmas / (1 + (shift - 1) * sigmas)
+    timesteps = sigmas * num_train_timesteps
+    return sigmas, timesteps
+
+
+def _step_scheduler(sigmas, timesteps, model_output, timestep, sample, device):
+    """Euler step: prev_sample = sample + model_output * (sigma_next - sigma)."""
+    if isinstance(timestep, torch.Tensor):
+        timestep = timestep.cpu()
+    timestep_id = torch.argmin((timesteps - timestep).abs())
+    sigma = sigmas[timestep_id].to(device=device, dtype=sample.dtype)
+    if timestep_id + 1 >= len(timesteps):
+        sigma_next = torch.tensor(0.0, device=sigmas.device, dtype=sigmas.dtype)
+    else:
+        sigma_next = sigmas[timestep_id + 1].to(device=device, dtype=sample.dtype)
+    prev_sample = sample + model_output * (sigma_next - sigma)
+    return prev_sample
+
+
+class ZImageDiffSynthPipelineWrapper:
+    """Wrapper that mimics pipeline(prompt_embeds=..., ...).images for toolkit compatibility."""
+
+    def __init__(self, dit, vae, tokenizer, text_encoder, device, dtype):
+        self.dit = dit
+        self.vae = vae
+        self.tokenizer = tokenizer
+        self.text_encoder = text_encoder
+        self.device = device
+        self.dtype = dtype
+
+    @torch.no_grad()
+    def __call__(
+        self,
+        prompt_embeds: Optional[List[torch.Tensor]] = None,
+        negative_prompt_embeds: Optional[List[torch.Tensor]] = None,
+        height: int = 1024,
+        width: int = 1024,
+        num_inference_steps: int = 8,
+        guidance_scale: float = 1.0,
+        latents: Optional[torch.Tensor] = None,
+        generator: Optional[torch.Generator] = None,
+        **kwargs,
+    ):
+        device = self.device
+        dtype = self.dtype
+        dit = self.dit
+        if next(dit.parameters()).device != device:
+            dit = dit.to(device)
+
+        if prompt_embeds is None:
+            prompt_embeds = []
+        if negative_prompt_embeds is None:
+            negative_prompt_embeds = []
+        if isinstance(prompt_embeds, torch.Tensor):
+            prompt_embeds = [prompt_embeds[i] for i in range(prompt_embeds.shape[0])]
+        if isinstance(negative_prompt_embeds, torch.Tensor):
+            negative_prompt_embeds = [negative_prompt_embeds[i] for i in range(negative_prompt_embeds.shape[0])]
+
+        batch = 1
+        if prompt_embeds:
+            batch = len(prompt_embeds)
+        ch = 16
+        h, w = height // 8, width // 8
+        if latents is None:
+            latents = torch.randn(
+                (batch, ch, h, w),
+                device=device,
+                dtype=dtype,
+                generator=generator,
+            )
+        else:
+            latents = latents.to(device=device, dtype=dtype)
+
+        sigmas, timesteps = _get_diffsynth_scheduler(num_inference_steps)
+        timesteps = timesteps.to(device)
+
+        for progress_id in range(len(timesteps)):
+            t = timesteps[progress_id].unsqueeze(0).expand(latents.shape[0])
+            if guidance_scale <= 1.0 or not prompt_embeds or not negative_prompt_embeds:
+                cond_emb = prompt_embeds[0] if prompt_embeds else None
+                noise_pred = fwd_mod.run_forward(dit, latents, t, cond_emb)
+            else:
+                cond_emb = prompt_embeds[0]
+                uncond_emb = negative_prompt_embeds[0]
+                pred_cond = fwd_mod.run_forward(dit, latents, t, cond_emb)
+                pred_uncond = fwd_mod.run_forward(dit, latents, t, uncond_emb)
+                noise_pred = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
+            latents = _step_scheduler(sigmas, timesteps, noise_pred, t[0], latents, device)
+
+        if hasattr(self.vae, "decode"):
+            image = self.vae.decode(latents).sample
+        else:
+            image = self.vae.decode(latents)
+        image = (image / 2 + 0.5).clamp(0, 1)
+        image = image.cpu().float().numpy()
+        image = (image.transpose(0, 2, 3, 1) * 255).round().astype(np.uint8)
+        images = [Image.fromarray(img) for img in image]
+        return _ImagesOutput(images)
+
+
+class _ImagesOutput:
+    def __init__(self, images: List[Image.Image]):
+        self.images = images
+
+
+def get_generation_pipeline(sd_model) -> ZImageDiffSynthPipelineWrapper:
+    """Build pipeline wrapper for sd_model (ZImageDiffSynthModel). Uses sampling transformer if set."""
+    dit = getattr(sd_model, "_sampling_transformer", None) or sd_model.model
+    vae = sd_model.vae
+    if hasattr(vae, "decode"):
+        vae_decoder = vae
+    else:
+        vae_decoder = vae.vae_decoder if hasattr(vae, "vae_decoder") else vae
+    tokenizer = sd_model.tokenizer[0] if isinstance(sd_model.tokenizer, list) else sd_model.tokenizer
+    text_encoder = sd_model.text_encoder[0] if isinstance(sd_model.text_encoder, list) else sd_model.text_encoder
+    from toolkit.accelerator import unwrap_model
+    return ZImageDiffSynthPipelineWrapper(
+        dit=unwrap_model(dit),
+        vae=unwrap_model(vae_decoder),
+        tokenizer=tokenizer,
+        text_encoder=unwrap_model(text_encoder),
+        device=sd_model.device_torch,
+        dtype=sd_model.torch_dtype,
+    )
