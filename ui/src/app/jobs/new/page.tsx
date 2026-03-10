@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { defaultJobConfig, defaultDatasetConfig, migrateJobConfig } from './jobConfig';
 import { jobTypeOptions } from './options';
@@ -36,6 +36,7 @@ export default function TrainingForm() {
 
   const [jobConfig, setJobConfig] = useNestedState<JobConfig>(objectCopy(defaultJobConfig));
   const [status, setStatus] = useState<'idle' | 'saving' | 'success' | 'error'>('idle');
+  const advancedJobConfigRef = useRef<{ getConfig: () => JobConfig | null } | null>(null);
 
   useEffect(() => {
     if (!isSettingsLoaded) return;
@@ -104,12 +105,17 @@ export default function TrainingForm() {
     if (status === 'saving') return;
     setStatus('saving');
 
+    const configToSave =
+      showAdvancedView && advancedJobConfigRef.current?.getConfig
+        ? advancedJobConfigRef.current.getConfig() ?? jobConfig
+        : jobConfig;
+
     apiClient
       .post('/api/jobs', {
         id: runId,
-        name: jobConfig.config.name,
+        name: configToSave.config.name,
         gpu_ids: gpuIDs,
-        job_config: jobConfig,
+        job_config: configToSave,
       })
       .then(res => {
         setStatus('success');
@@ -220,6 +226,7 @@ export default function TrainingForm() {
           <AdvancedJob
             jobConfig={jobConfig}
             setJobConfig={setJobConfig}
+            configRef={advancedJobConfigRef}
             status={status}
             handleSubmit={handleSubmit}
             runId={runId}

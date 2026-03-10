@@ -7,6 +7,19 @@ import type { editor } from 'monaco-editor';
 import { Settings } from '@/hooks/useSettings';
 import { migrateJobConfig } from './jobConfig';
 
+function normalizeParsedConfig(parsed: JobConfig, trainingFolder: string): JobConfig {
+  try {
+    parsed.config.process[0].sqlite_db_path = './aitk_db.db';
+    parsed.config.process[0].training_folder = trainingFolder;
+    parsed.config.process[0].device = 'cuda';
+    parsed.config.process[0].performance_log_every = 10;
+  } catch (e) {
+    console.warn(e);
+  }
+  migrateJobConfig(parsed);
+  return parsed;
+}
+
 type Props = {
   jobConfig: JobConfig;
   setJobConfig: (value: any, key?: string) => void;
@@ -18,6 +31,7 @@ type Props = {
   gpuList: any;
   datasetOptions: any;
   settings: Settings;
+  configRef?: React.MutableRefObject<{ getConfig: () => JobConfig | null } | null>;
 };
 
 const isDev = process.env.NODE_ENV === 'development';
@@ -34,13 +48,33 @@ const yamlConfig: YAML.DocumentOptions &
   directives: true,
 };
 
-export default function AdvancedJob({ jobConfig, setJobConfig, settings }: Props) {
+export default function AdvancedJob({ jobConfig, setJobConfig, settings, configRef }: Props) {
   const [editorValue, setEditorValue] = useState<string>('');
   const lastJobConfigUpdateStringRef = useRef('');
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
 
   // Track if the editor has been mounted
   const isEditorMounted = useRef(false);
+
+  // Expose getConfig so parent can read current editor content when saving in Advanced view
+  useEffect(() => {
+    if (!configRef) return;
+    configRef.current = {
+      getConfig: () => {
+        const raw = editorRef.current?.getModel()?.getValue();
+        if (raw == null || raw.trim() === '') return null;
+        try {
+          const parsed = YAML.parse(raw) as JobConfig;
+          return normalizeParsedConfig(parsed, settings.TRAINING_FOLDER);
+        } catch {
+          return null;
+        }
+      },
+    };
+    return () => {
+      configRef.current = null;
+    };
+  }, [configRef, settings.TRAINING_FOLDER]);
 
   // Handler for editor mounting
   const handleEditorDidMount: OnMount = editor => {
@@ -100,24 +134,13 @@ export default function AdvancedJob({ jobConfig, setJobConfig, settings }: Props
     if (value === undefined) return;
 
     try {
-      const parsed = YAML.parse(value);
+      const parsed = YAML.parse(value) as JobConfig;
       // Don't update jobConfig if the change came from the editor itself
       // to avoid a circular update loop
       if (JSON.stringify(parsed) !== lastJobConfigUpdateStringRef.current) {
-        lastJobConfigUpdateStringRef.current = JSON.stringify(parsed);
-
-        // We have to ensure certain things are always set
-        try {
-          // parsed.config.process[0].type = 'ui_trainer';
-          parsed.config.process[0].sqlite_db_path = './aitk_db.db';
-          parsed.config.process[0].training_folder = settings.TRAINING_FOLDER;
-          parsed.config.process[0].device = 'cuda';
-          parsed.config.process[0].performance_log_every = 10;
-        } catch (e) {
-          console.warn(e);
-        }
-        migrateJobConfig(parsed);
-        setJobConfig(parsed);
+        const normalized = normalizeParsedConfig(parsed, settings.TRAINING_FOLDER);
+        lastJobConfigUpdateStringRef.current = JSON.stringify(normalized);
+        setJobConfig(normalized);
       }
     } catch (e) {
       // Don't update on parsing errors
