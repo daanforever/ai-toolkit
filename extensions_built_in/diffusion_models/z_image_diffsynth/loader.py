@@ -12,6 +12,7 @@ from diffusers import AutoencoderKL
 
 from toolkit.paths import normalize_path
 from toolkit.util.quantize import quantize, get_qtype, quantize_model
+from toolkit.util.debug import is_debug_enabled
 from toolkit.basic import flush
 from optimum.quanto import freeze
 
@@ -125,6 +126,18 @@ def load_components(
         sampling_dit = load_dit_from_folder(sp_transformer_folder, dtype, device)
         if quantize_transformer and base_model is not None:
             log("Quantizing sampling transformer")
+            if is_debug_enabled():
+                ara = getattr(
+                    base_model.model_config, "accuracy_recovery_adapter", None
+                )
+                if ara:
+                    log(
+                        f"[z_image_diffsynth ARA] Applying accuracy recovery adapter to sampling transformer: {ara}"
+                    )
+                else:
+                    log(
+                        "[z_image_diffsynth ARA] Quantizing sampling transformer without ARA (accuracy_recovery_adapter not set)"
+                    )
             quantize_model(base_model, sampling_dit)
             flush()
         sampling_dit.to("cpu")
@@ -138,6 +151,18 @@ def load_components(
     dit = load_dit_from_folder(transformer_folder, dtype, device)
     if quantize_transformer and base_model is not None:
         log("Quantizing transformer")
+        if is_debug_enabled():
+            ara = getattr(
+                base_model.model_config, "accuracy_recovery_adapter", None
+            )
+            if ara:
+                log(
+                    f"[z_image_diffsynth ARA] Applying accuracy recovery adapter to main transformer: {ara}"
+                )
+            else:
+                log(
+                    "[z_image_diffsynth ARA] Quantizing main transformer without ARA (accuracy_recovery_adapter not set)"
+                )
         quantize_model(base_model, dit)
         flush()
     # Move main DiT to CPU after (optional) quantization to reduce VRAM

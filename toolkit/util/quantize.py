@@ -257,6 +257,11 @@ def quantize_model(
         )
         network.force_to(base_model.device_torch, dtype=base_model.torch_dtype)
         network._update_torch_multiplier()
+        # Some architectures (e.g. zimage_diffsynth) need keys in lora_transformer_xxx form for load_weights
+        if hasattr(base_model, "convert_accuracy_recovery_weights_before_load"):
+            lora_state_dict = base_model.convert_accuracy_recovery_weights_before_load(
+                lora_state_dict
+            )
         network.load_weights(lora_state_dict)
         network.eval()
         network.is_active = True
