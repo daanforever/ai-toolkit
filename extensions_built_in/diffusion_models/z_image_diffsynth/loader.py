@@ -11,7 +11,8 @@ from transformers import AutoTokenizer, Qwen3ForCausalLM
 from diffusers import AutoencoderKL
 
 from toolkit.paths import normalize_path
-from toolkit.util.quantize import quantize, get_qtype
+from toolkit.util.quantize import quantize, get_qtype, quantize_model
+from toolkit.basic import flush
 from optimum.quanto import freeze
 
 from .vae_wrapper import DiffSynthVAEWrapper
@@ -94,6 +95,8 @@ def load_components(
     quantize_te: bool = False,
     qtype_te: str = "float8",
     sampling_transformer_path: Optional[str] = None,
+    quantize: bool = False,
+    base_model: Optional[Any] = None,
 ) -> dict:
     """
     Load tokenizer, text_encoder, vae, dit (and optionally sampling dit) from paths.
@@ -120,7 +123,12 @@ def load_components(
             sp_transformer_folder = sampling_transformer_path
         log("Loading sampling transformer (DiT)")
         sampling_dit = load_dit_from_folder(sp_transformer_folder, dtype, device)
+        if quantize and base_model is not None:
+            log("Quantizing sampling transformer")
+            quantize_model(base_model, sampling_dit)
+            flush()
         sampling_dit.to("cpu")
+        flush()
 
     # 2) Main DiT
     transformer_folder = os.path.join(model_path, "transformer")
@@ -128,6 +136,10 @@ def load_components(
         transformer_folder = model_path
     log("Loading transformer (DiT)")
     dit = load_dit_from_folder(transformer_folder, dtype, device)
+    if quantize and base_model is not None:
+        log("Quantizing transformer")
+        quantize_model(base_model, dit)
+        flush()
     dit.to(device)
 
     # 3) Tokenizer & text encoder (same as z_image)
@@ -141,6 +153,7 @@ def load_components(
         log("Quantizing text encoder")
         quantize(text_encoder, weights=get_qtype(qtype_te or "float8"))
         freeze(text_encoder)
+        flush()
 
     # 4) VAE (single AutoencoderKL, wrap as encoder+decoder interface)
     log("Loading VAE")

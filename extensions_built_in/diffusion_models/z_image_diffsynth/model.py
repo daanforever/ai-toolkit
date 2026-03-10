@@ -10,9 +10,7 @@ from toolkit.models.base_model import BaseModel
 from toolkit.prompt_utils import PromptEmbeds
 from toolkit.samplers.custom_flowmatch_sampler import CustomFlowMatchEulerDiscreteScheduler
 from toolkit.accelerator import unwrap_model
-from toolkit.util.quantize import quantize_model
 from toolkit.paths import normalize_path
-from toolkit.basic import flush
 from toolkit.util.debug import memory_debug, is_debug_enabled
 
 from . import loader as loader_mod
@@ -82,6 +80,8 @@ class ZImageDiffSynthModel(BaseModel):
                 quantize_te=getattr(self.model_config, "quantize_te", False),
                 qtype_te=getattr(self.model_config, "qtype_te", "float8"),
                 sampling_transformer_path=sampling_path,
+                quantize=getattr(self.model_config, "quantize", False),
+                base_model=self,
             )
 
         self.model = components["dit"]
@@ -89,15 +89,6 @@ class ZImageDiffSynthModel(BaseModel):
         self.text_encoder = [components["text_encoder"]]
         self.tokenizer = [components["tokenizer"]]
         self._sampling_transformer = components.get("sampling_dit")
-
-        if self.model_config.quantize:
-            self.print_and_status_update("Quantizing transformer")
-            quantize_model(self, self.model)
-            flush()
-        if self._sampling_transformer is not None and self.model_config.quantize:
-            self.print_and_status_update("Quantizing sampling transformer")
-            quantize_model(self, self._sampling_transformer)
-            flush()
 
         self.noise_scheduler = ZImageDiffSynthModel.get_train_scheduler()
         self.pipeline = None
