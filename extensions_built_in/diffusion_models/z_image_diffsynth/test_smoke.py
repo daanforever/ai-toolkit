@@ -155,6 +155,22 @@ def main():
                 _log("  | " + line)
     _log("2. OK (Loaded.)")
 
+    _log("2c. VAE wrapper has nn.Module interface (.to, .parameters) ...")
+    try:
+        vae = sd.vae
+        if isinstance(vae, list):
+            vae = vae[0]
+        assert hasattr(vae, "to"), "VAE must have .to() for trainer (e.g. vae.to(device))"
+        assert callable(getattr(vae, "to")), "VAE.to must be callable"
+        assert hasattr(vae, "parameters"), "VAE must have .parameters()"
+        # Actually call .to() to ensure it doesn't raise (e.g. DiffSynthVAEWrapper as nn.Module)
+        vae.to(device)
+        _log("2c. OK")
+    except Exception as e:
+        _log(f"2c. FAILED: {e}")
+        traceback.print_exc()
+        sys.exit(1)
+
     # Regression: load with quantize_te=True (ensures loader does not shadow quantize -> "bool not callable")
     if os.environ.get("ZIMAGE_DIFFSYNTH_TEST_QUANTIZE_TE", "").strip() == "1":
         _log("2b. Regression: load with quantize_te=True (no 'bool' callable error) ...")

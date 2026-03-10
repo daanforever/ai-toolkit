@@ -4,10 +4,13 @@ from typing import Optional
 import torch
 
 
-class DiffSynthVAEWrapper:
-    """Wraps vae_encoder and vae_decoder (or a single AutoencoderKL) as one object with .encode()/.decode()."""
+class DiffSynthVAEWrapper(torch.nn.Module):
+    """Wraps vae_encoder and vae_decoder (or a single AutoencoderKL) as one object with .encode()/.decode().
+    Subclasses nn.Module so .to(), .parameters(), .train(), .eval(), etc. work for the trainer and pipeline.
+    """
 
     def __init__(self, vae_encoder, vae_decoder=None):
+        super().__init__()
         self.vae_encoder = vae_encoder
         self.vae_decoder = vae_decoder if vae_decoder is not None else vae_encoder
 
