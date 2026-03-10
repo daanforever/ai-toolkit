@@ -247,26 +247,13 @@ class ZImageDiffSynthModel(BaseModel):
         # When debug logging is enabled, wrap the forward call in a memory_debug
         # context so that VRAM usage can be compared with the baseline z_image
         # implementation without affecting behaviour otherwise.
-        if is_debug_enabled():
-            with memory_debug(
-                self.print_and_status_update,
-                "zimage_diffsynth get_noise_prediction forward",
-            ):
-                noise_pred = forward_mod.run_forward(
-                    self._raw_dit,
-                    latent_model_input,
-                    timestep,
-                    text_embeds,
-                    use_gradient_checkpointing=use_gradient_checkpointing,
-                )
-        else:
-            noise_pred = forward_mod.run_forward(
-                self._raw_dit,
-                latent_model_input,
-                timestep,
-                text_embeds,
-                use_gradient_checkpointing=use_gradient_checkpointing,
-            )
+        noise_pred = forward_mod.run_forward(
+            self._raw_dit,
+            latent_model_input,
+            timestep,
+            text_embeds,
+            use_gradient_checkpointing=use_gradient_checkpointing,
+        )
         return noise_pred
 
     def get_prompt_embeds(self, prompt: str) -> PromptEmbeds:
