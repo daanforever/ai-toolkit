@@ -117,10 +117,16 @@ class ZImageDiffSynthPipelineWrapper:
                 noise_pred = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
             latents = _step_scheduler(sigmas, timesteps, noise_pred, t[0], latents, device)
 
-        if hasattr(self.vae, "decode"):
-            image = self.vae.decode(latents).sample
+        vae = self.vae
+        decoder = getattr(vae, "vae_decoder", vae)
+        if hasattr(decoder, "parameters") and next(decoder.parameters(), None) is not None:
+            if next(decoder.parameters()).device != device:
+                decoder.to(device)
+        if hasattr(vae, "decode"):
+            out = vae.decode(latents)
+            image = out.sample if hasattr(out, "sample") else out
         else:
-            image = self.vae.decode(latents)
+            image = vae.decode(latents)
         image = (image / 2 + 0.5).clamp(0, 1)
         image = image.cpu().float().numpy()
         image = (image.transpose(0, 2, 3, 1) * 255).round().astype(np.uint8)

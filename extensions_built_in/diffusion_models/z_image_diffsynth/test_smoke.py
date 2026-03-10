@@ -12,6 +12,7 @@ Example (PowerShell, from repo root):
 import io
 import os
 import sys
+import tempfile
 
 # Re-run with venv Python if venv exists and we're not already using it
 _REPO_ROOT = os.path.abspath(
@@ -84,7 +85,7 @@ def main():
 
     sampling_path = (
         os.environ.get("ZIMAGE_DIFFSYNTH_SAMPLING_PATH", "").strip()
-        or DEFAULT_ZIMAGE_SAMPLING_PATH
+        # or DEFAULT_ZIMAGE_SAMPLING_PATH
         or None
     )
     if sampling_path and not os.path.isdir(sampling_path):
@@ -195,7 +196,9 @@ def main():
         from toolkit.config_modules import GenerateImageConfig
         gen_config = GenerateImageConfig(
             width=256, height=256, num_inference_steps=4,
-            guidance_scale=1.0, prompt="a cat", negative_prompt=""
+            guidance_scale=1.0, prompt="a cat", negative_prompt="",
+            output_folder=os.path.join(tempfile.gettempdir(), "z_image_diffsynth_smoke"),
+            output_ext="png",
         )
         uncond = sd.get_prompt_embeds("")
         gen = torch.Generator(device=device).manual_seed(42)
