@@ -108,7 +108,10 @@ class ZImageDiffSynthModel(BaseModel):
         self.vae = components["vae_wrapper"]
         self.text_encoder = [components["text_encoder"]]
         self.tokenizer = [components["tokenizer"]]
-        self._sampling_transformer = components.get("sampling_dit")
+        sampling_dit = components.get("sampling_dit")
+        # Wrap sampling DiT in the same wrapper as main so LoRA module names match
+        # (main uses _DiTUnetWrapper → "dit.noise_refiner..."; unwrapped would be "noise_refiner...").
+        self._sampling_transformer = _DiTUnetWrapper(sampling_dit) if sampling_dit is not None else None
 
         self.noise_scheduler = ZImageDiffSynthModel.get_train_scheduler()
         self.pipeline = None

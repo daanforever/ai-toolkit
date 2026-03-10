@@ -147,6 +147,9 @@ def get_generation_pipeline(sd_model) -> ZImageDiffSynthPipelineWrapper:
     dit = sampling_dit if sampling_dit is not None else raw_dit
     if dit is None:
         dit = sd_model.model
+    # Unwrap _DiTUnetWrapper so pipeline gets raw DiT (DiffSynth model_fn expects it)
+    if isinstance(dit, torch.nn.Module) and "dit" in getattr(dit, "_modules", {}):
+        dit = dit._modules["dit"]
     vae = sd_model.vae
     if hasattr(vae, "decode"):
         vae_decoder = vae

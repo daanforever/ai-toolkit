@@ -196,6 +196,80 @@ def main():
     else:
         _log("2b. Skipped (set ZIMAGE_DIFFSYNTH_TEST_ALSO_NO_QUANT=1 to run unquantized load)")
 
+    # 2d. LoRA name consistency: when using sampling transformer, main and sampling LoRA networks
+    # must use the same lora_name for each module so share_parameters_with() does not raise
+    # "lora name mismatch: lora_unet_noise_refiner_0_attention_to_q vs lora_unet_dit_noise_refiner_0_attention_to_q"
+    if getattr(sd, "_sampling_transformer", None) is not None:
+        _log("2d. LoRA name consistency (main vs sampling transformer) ...")
+        try:
+            from toolkit.config_modules import NetworkConfig
+            from toolkit.lora_special import LoRASpecialNetwork
+
+            network_config = NetworkConfig(
+                type="lora",
+                linear=4,
+                linear_alpha=1.0,
+                transformer_only=True,
+                network_kwargs={},
+            )
+            network_kwargs = dict(network_config.network_kwargs)
+            if hasattr(sd, "target_lora_modules"):
+                network_kwargs["target_lin_modules"] = sd.target_lora_modules
+            common = dict(
+                text_encoder=sd.text_encoder,
+                lora_dim=network_config.linear,
+                multiplier=1.0,
+                alpha=network_config.linear_alpha,
+                train_unet=True,
+                train_text_encoder=False,
+                conv_lora_dim=network_config.conv,
+                conv_alpha=network_config.conv_alpha,
+                is_sdxl=False,
+                is_v2=False,
+                is_v3=False,
+                is_pixart=False,
+                is_auraflow=False,
+                is_flux=False,
+                is_lumina2=False,
+                is_ssd=False,
+                is_vega=False,
+                dropout=network_config.dropout,
+                rank_dropout=network_config.rank_dropout,
+                module_dropout=network_config.module_dropout,
+                use_text_encoder_1=True,
+                use_text_encoder_2=True,
+                use_bias=False,
+                is_lorm=False,
+                network_config=network_config,
+                network_type=network_config.type,
+                transformer_only=network_config.transformer_only,
+                is_transformer=getattr(sd, "is_transformer", True),
+                base_model=sd,
+                **network_kwargs,
+            )
+            main_network = LoRASpecialNetwork(
+                unet=sd.get_model_to_train(),
+                **common,
+            )
+            sampling_network = LoRASpecialNetwork(
+                unet=sd._sampling_transformer,
+                **common,
+            )
+            sampling_network.share_parameters_with(main_network)
+            _log("2d. OK (LoRA names match; share_parameters_with succeeded)")
+        except AssertionError as e:
+            if "lora name mismatch" in str(e):
+                _log(f"2d. FAILED: LoRA name mismatch between main and sampling transformer: {e}")
+                traceback.print_exc()
+                sys.exit(1)
+            raise
+        except Exception as e:
+            _log(f"2d. FAILED: {e}")
+            traceback.print_exc()
+            sys.exit(1)
+    else:
+        _log("2d. Skipped (no sampling transformer; set ZIMAGE_DIFFSYNTH_SAMPLING_PATH to test LoRA name consistency)")
+
     _log("3. get_prompt_embeds ...")
     try:
         embeds = sd.get_prompt_embeds("a cat on a mat")
