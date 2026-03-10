@@ -110,15 +110,20 @@ class ZImageDiffSynthModel(BaseModel):
         if not hasattr(self, "network") or self.network is None:
             if is_debug_enabled():
                 self.print_and_status_update(
-                    f"[zimage_diffsynth] main network is None; skipping move to {device}"
+                    f"\n[zimage_diffsynth] main network is None; skipping move to {device}"
                 )
             return
-        if is_debug_enabled():
-            self.print_and_status_update(
-                f"[zimage_diffsynth] moving main network to {device}"
-            )
+        target = device if isinstance(device, torch.device) else torch.device(device)
+        params = list(self.network.parameters())
+        current = next(iter(params)).device if params else torch.device("cpu")
+        if current == target:
+            return
         try:
             self.network.to(device)
+            if is_debug_enabled():
+                self.print_and_status_update(
+                    f"\n[zimage_diffsynth] moving main network to {device}"
+                )
         except Exception:
             pass
 
@@ -130,7 +135,22 @@ class ZImageDiffSynthModel(BaseModel):
 
     def _move_sampling(self, device):
         """Move sampling components (network + transformer) to device."""
-        if is_debug_enabled():
+        target = device if isinstance(device, torch.device) else torch.device(device)
+        need_move = False
+        if hasattr(self, "_sampling_network") and self._sampling_network is not None:
+            p = list(self._sampling_network.parameters())
+            if p and next(iter(p)).device != target:
+                need_move = True
+        if hasattr(self, "_sampling_transformer") and self._sampling_transformer is not None:
+            p = list(self._sampling_transformer.parameters())
+            if p and next(iter(p)).device != target:
+                need_move = True
+        if not need_move and not (
+            getattr(self, "_sampling_network", None) is not None
+            or getattr(self, "_sampling_transformer", None) is not None
+        ):
+            return
+        if is_debug_enabled() and need_move:
             sampling_network_state = (
                 "set" if getattr(self, "_sampling_network", None) is not None else "none"
             )
@@ -140,7 +160,7 @@ class ZImageDiffSynthModel(BaseModel):
                 else "none"
             )
             self.print_and_status_update(
-                "[zimage_diffsynth] moving sampling components to "
+                "\n[zimage_diffsynth] moving sampling components to "
                 f"{device} (sampling_network={sampling_network_state}, "
                 f"sampling_transformer={sampling_transformer_state})"
             )
@@ -416,7 +436,7 @@ class ZImageDiffSynthModel(BaseModel):
         try:
             if is_debug_enabled():
                 self.print_and_status_update(
-                    "[zimage_diffsynth] standalone sampling: moving main transformer to "
+                    "\n[zimage_diffsynth] standalone sampling: moving main transformer to "
                     "CPU and sampling transformer to GPU"
                 )
             self.model.to("cpu", dtype=self.torch_dtype)
@@ -426,7 +446,7 @@ class ZImageDiffSynthModel(BaseModel):
         finally:
             if is_debug_enabled():
                 self.print_and_status_update(
-                    "[zimage_diffsynth] standalone sampling: restoring main "
+                    "\n[zimage_diffsynth] standalone sampling: restoring main "
                     "transformer to GPU and sampling transformer to CPU"
                 )
             self._move_sampling("cpu")
@@ -461,7 +481,7 @@ class ZImageDiffSynthModel(BaseModel):
             if use_sampling:
                 if is_debug_enabled():
                     self.print_and_status_update(
-                        "[zimage_diffsynth] batch generate: enabling sampling transformer "
+                        "\n[zimage_diffsynth] batch generate: enabling sampling transformer "
                         "on GPU and using sampling network"
                     )
                 self._sampling_in_batch_generate = True
@@ -471,7 +491,7 @@ class ZImageDiffSynthModel(BaseModel):
                 if use_sampling:
                     if is_debug_enabled():
                         self.print_and_status_update(
-                            "[zimage_diffsynth] batch generate: restoring main "
+                            "\n[zimage_diffsynth] batch generate: restoring main "
                             "transformer to GPU and moving sampling transformer to CPU"
                         )
                     self._sampling_in_batch_generate = False
