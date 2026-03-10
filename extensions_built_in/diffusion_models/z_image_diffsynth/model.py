@@ -27,6 +27,24 @@ scheduler_config = {
 }
 
 
+class _DiTUnetWrapper(torch.nn.Module):
+    """Wraps ZImageDiT so that .config.patch_size exists for BatchProcessor / timestep scheduling.
+    Forwards all other attributes and calls to the inner DiT."""
+
+    def __init__(self, dit):
+        super().__init__()
+        self.dit = dit
+        self.config = type("_Config", (), {"patch_size": 2})()
+
+    def forward(self, *args, **kwargs):
+        return self.dit(*args, **kwargs)
+
+    def __getattr__(self, name):
+        if name in ("dit", "config"):
+            return object.__getattribute__(self, name)
+        return getattr(self.dit, name)
+
+
 class ZImageDiffSynthModel(BaseModel):
     arch = "zimage_diffsynth"
     is_flow_matching = True
@@ -45,6 +63,7 @@ class ZImageDiffSynthModel(BaseModel):
         super().__init__(
             device, model_config, dtype, custom_pipeline, noise_scheduler, **kwargs
         )
+        self._raw_dit = None
         self._sampling_transformer = None
         self._sampling_network = None
 
@@ -84,7 +103,8 @@ class ZImageDiffSynthModel(BaseModel):
                 base_model=self,
             )
 
-        self.model = components["dit"]
+        self._raw_dit = components["dit"]
+        self.model = _DiTUnetWrapper(self._raw_dit)
         self.vae = components["vae_wrapper"]
         self.text_encoder = [components["text_encoder"]]
         self.tokenizer = [components["tokenizer"]]
@@ -114,8 +134,9 @@ class ZImageDiffSynthModel(BaseModel):
         text_embeds = text_embeddings.text_embeds
         if isinstance(text_embeds, torch.Tensor) and len(text_embeds.shape) == 3:
             text_embeds = [text_embeds[i] for i in range(text_embeds.shape[0])]
+        # Pass raw DiT to DiffSynth model_fn (expects real DiT with t_embedder, etc.)
         noise_pred = forward_mod.run_forward(
-            self.model,
+            self._raw_dit,
             latent_model_input,
             timestep,
             text_embeds,
@@ -127,7 +148,14 @@ class ZImageDiffSynthModel(BaseModel):
         te = self.text_encoder[0]
         tok = self.tokenizer[0]
         if next(te.parameters()).device != self.device_torch:
-            te.to(self.device_torch)
+            try:
+                te.to(self.device_torch)
+            except RuntimeError as e:
+                if "Couldn't swap" in str(e) or "swap_tensors" in str(e):
+                    # Quantized TE: .to() can fail when already on device or shared storage
+                    pass
+                else:
+                    raise
         return prompt_encoding_mod.encode_prompt(
             tok,
             te,
@@ -206,6 +234,8 @@ class ZImageDiffSynthModel(BaseModel):
     def save_model(self, output_path, meta, save_dtype):
         import torch
         dit = unwrap_model(self.model)
+        if hasattr(dit, "dit"):
+            dit = dit.dit
         save_dir = os.path.join(output_path, "transformer")
         os.makedirs(save_dir, exist_ok=True)
         from safetensors.torch import save_file

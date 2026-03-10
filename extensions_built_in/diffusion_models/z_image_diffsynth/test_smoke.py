@@ -2,11 +2,11 @@
 Smoke test for Z-Image DiffSynth: import, load model, prompt encoding, forward, generation pipeline.
 Run from repo root. If venv exists, the script will use it automatically (no need to activate).
 
+By default the test runs with quantized DiT and quantized text encoder (quantize=True, quantize_te=True)
+to reduce VRAM and match typical usage. Set ZIMAGE_DIFFSYNTH_TEST_NO_QUANT=1 to run without quantization.
+
 Paths: use env ZIMAGE_DIFFSYNTH_MODEL_PATH and optionally ZIMAGE_DIFFSYNTH_SAMPLING_PATH.
 If unset, defaults from the plan are used (see DEFAULT_* below). Override via env if needed.
-
-Regression: set ZIMAGE_DIFFSYNTH_TEST_QUANTIZE_TE=1 to run load with quantize_te=True
-(checks that loader does not shadow quantize() with the bool param — "bool object is not callable").
 
 Example (PowerShell, from repo root):
   python -m extensions_built_in.diffusion_models.z_image_diffsynth.test_smoke
@@ -88,7 +88,7 @@ def main():
 
     sampling_path = (
         os.environ.get("ZIMAGE_DIFFSYNTH_SAMPLING_PATH", "").strip()
-        # or DEFAULT_ZIMAGE_SAMPLING_PATH
+        or DEFAULT_ZIMAGE_SAMPLING_PATH
         or None
     )
     if sampling_path and not os.path.isdir(sampling_path):
@@ -103,14 +103,16 @@ def main():
     except Exception:
         traceback.print_exc()
         sys.exit(1)
+    no_quant = os.environ.get("ZIMAGE_DIFFSYNTH_TEST_NO_QUANT", "").strip() == "1"
     model_config_dict = {
         "name_or_path": model_path,
         "arch": "zimage_diffsynth",
-        "quantize": False,
-        "quantize_te": False,
+        "quantize": not no_quant,
+        "quantize_te": not no_quant,
     }
     if sampling_path:
         model_config_dict["sampling_name_or_path"] = sampling_path
+    _log(f"   quantize (DiT)={model_config_dict['quantize']}, quantize_te={model_config_dict['quantize_te']}")
 
     model_config = ModelConfig(**model_config_dict)
     ModelClass = get_model_class(model_config)
@@ -171,28 +173,28 @@ def main():
         traceback.print_exc()
         sys.exit(1)
 
-    # Regression: load with quantize_te=True (ensures loader does not shadow quantize -> "bool not callable")
-    if os.environ.get("ZIMAGE_DIFFSYNTH_TEST_QUANTIZE_TE", "").strip() == "1":
-        _log("2b. Regression: load with quantize_te=True (no 'bool' callable error) ...")
+    # Optional: run a second load without quantization (to test unquantized path)
+    if os.environ.get("ZIMAGE_DIFFSYNTH_TEST_ALSO_NO_QUANT", "").strip() == "1":
+        _log("2b. Optional: load again without quantization ...")
         try:
-            cfg_qt = {
+            cfg_noq = {
                 "name_or_path": model_path,
                 "arch": "zimage_diffsynth",
                 "quantize": False,
-                "quantize_te": True,
+                "quantize_te": False,
             }
             if sampling_path:
-                cfg_qt["sampling_name_or_path"] = sampling_path
-            model_config_qt = ModelConfig(**cfg_qt)
-            sd_qt = ModelClass(device, model_config_qt, dtype="bf16")
-            sd_qt.load_model()
+                cfg_noq["sampling_name_or_path"] = sampling_path
+            model_config_noq = ModelConfig(**cfg_noq)
+            sd_noq = ModelClass(device, model_config_noq, dtype="bf16")
+            sd_noq.load_model()
             _log("2b. OK")
         except Exception as e:
             _log(f"2b. FAILED: {e}")
             traceback.print_exc()
             sys.exit(1)
     else:
-        _log("2b. Skipped (set ZIMAGE_DIFFSYNTH_TEST_QUANTIZE_TE=1 to run)")
+        _log("2b. Skipped (set ZIMAGE_DIFFSYNTH_TEST_ALSO_NO_QUANT=1 to run unquantized load)")
 
     _log("3. get_prompt_embeds ...")
     try:

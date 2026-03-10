@@ -141,7 +141,12 @@ class _ImagesOutput:
 
 def get_generation_pipeline(sd_model) -> ZImageDiffSynthPipelineWrapper:
     """Build pipeline wrapper for sd_model (ZImageDiffSynthModel). Uses sampling transformer if set."""
-    dit = getattr(sd_model, "_sampling_transformer", None) or sd_model.model
+    # Use raw DiT for inference (model_fn_z_image_turbo expects real DiT with t_embedder, etc.)
+    sampling_dit = getattr(sd_model, "_sampling_transformer", None)
+    raw_dit = getattr(sd_model, "_raw_dit", None)
+    dit = sampling_dit if sampling_dit is not None else raw_dit
+    if dit is None:
+        dit = sd_model.model
     vae = sd_model.vae
     if hasattr(vae, "decode"):
         vae_decoder = vae

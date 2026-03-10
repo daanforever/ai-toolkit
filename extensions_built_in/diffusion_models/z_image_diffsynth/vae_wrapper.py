@@ -14,6 +14,11 @@ class DiffSynthVAEWrapper(torch.nn.Module):
         self.vae_encoder = vae_encoder
         self.vae_decoder = vae_decoder if vae_decoder is not None else vae_encoder
 
+    @property
+    def device(self) -> torch.device:
+        """Device of the first parameter (expected by base_model save_device_state / set_device_state)."""
+        return next(self.parameters()).device
+
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         if hasattr(self.vae_encoder, "encode"):
             # diffusers AutoencoderKL
