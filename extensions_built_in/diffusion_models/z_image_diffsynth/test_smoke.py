@@ -457,6 +457,34 @@ def main():
         traceback.print_exc()
         sys.exit(1)
 
+    # 4e. Batch path in model_fn_z_image_turbo: B>1, list of prompt_embeds, no control_context
+    #     -> single dit.forward(all_image, timestep, all_cap_feats) and return (B, C, H, W).
+    _log("4e. get_noise_prediction with batch size 2 (model_fn_z_image_turbo batch path) ...")
+    try:
+        from extensions_built_in.diffusion_models.z_image_diffsynth import prompt_encoding as prompt_encoding_mod
+
+        B, C, H, W = 2, 16, 64, 64
+        latent_b2 = torch.randn(B, C, H, W, device=device, dtype=sd.torch_dtype)
+        timestep_b = torch.tensor([500], device=device, dtype=torch.float32)
+        batch_embeds = prompt_encoding_mod.encode_prompt(
+            sd.tokenizer[0],
+            sd.text_encoder[0],
+            ["a cat on a mat", "a dog in the sun"],
+            sd.device_torch,
+            sd.torch_dtype,
+        )
+        with torch.no_grad():
+            pred_b = sd.get_noise_prediction(latent_b2, timestep_b, batch_embeds)
+        assert pred_b.shape == (B, C, H, W), (
+            f"batch noise_pred shape must be ({B}, {C}, {H}, {W}), got {pred_b.shape}"
+        )
+        _log(f"   batch noise_pred shape: {pred_b.shape}")
+    except Exception:
+        _log("   FAILED in step 4e (get_noise_prediction batch path):")
+        traceback.print_exc()
+        sys.exit(1)
+    _log("4e. OK")
+
     _log("5. get_generation_pipeline ...")
     try:
         pipeline = sd.get_generation_pipeline()
