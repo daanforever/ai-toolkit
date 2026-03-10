@@ -16,12 +16,16 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
     """
 
     def __init__(self, process_id, job, config, **kwargs):
+        # Let DiffusionTrainer / SDTrainer do their normal initialization first.
         super().__init__(process_id, job, config, **kwargs)
 
         tc = self.train_config
 
         # Always train Z-Image in flow-matching mode with 1000 train timesteps.
-        tc.noise_scheduler = "flowmatch"
+        # We let ZImageDiffSynthModel.get_train_scheduler() provide the actual
+        # DiffSynth-compatible scheduler via BaseSDTrainProcess when
+        # train_config.noise_scheduler is None.
+        tc.noise_scheduler = None
         tc.num_train_timesteps = getattr(tc, "num_train_timesteps", 1000) or 1000
 
         # Use MSE loss on rectified-flow target (noise - latents) as in DiffSynth.
@@ -36,9 +40,19 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
         tc.snr_gamma = None
         tc.min_snr_gamma = None
 
+    def hook_after_sd_init_before_load(self):
+        """
+        Called from BaseSDTrainProcess immediately after self.sd is constructed,
+        but before sd.load_model(). We use this hook to mark the model as
+        flow-matching while preserving DiffusionTrainer's existing behavior.
+        """
+        # Preserve DiffusionTrainer logic (status updates, hooks, etc.)
+        super().hook_after_sd_init_before_load()
+
         # Make sure the model is treated as flow-matching by SDTrainer logic.
-        if hasattr(self.sd, "is_flow_matching"):
-            self.sd.is_flow_matching = True
+        sd = getattr(self, "sd", None)
+        if sd is not None and hasattr(sd, "is_flow_matching"):
+            sd.is_flow_matching = True
 
 
 class ZImageDiffSynthTrainerExtension(Extension):

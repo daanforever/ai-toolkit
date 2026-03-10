@@ -382,6 +382,60 @@ def main():
         traceback.print_exc()
     _log("6. OK (or skipped)")
 
+    _log("7. ZImageDiffSynthTrainer wiring (train_config & is_flow_matching) ...")
+    try:
+        from types import SimpleNamespace
+        from extensions_built_in.sd_trainer.DiffusionTrainer import DiffusionTrainer
+        from extensions_built_in.diffusion_models.z_image_diffsynth.trainer import (
+            ZImageDiffSynthTrainer,
+        )
+
+        # Patch DiffusionTrainer.__init__ so we can exercise the trainer's
+        # initialization logic without constructing a full Job / datasets.
+        orig_init = DiffusionTrainer.__init__
+        try:
+            def _fake_init(self, process_id, job, config, **kwargs):
+                # Minimal fields used by ZImageDiffSynthTrainer.__init__
+                self.train_config = SimpleNamespace(
+                    noise_scheduler="placeholder",
+                    num_train_timesteps=None,
+                    loss_type=None,
+                    timestep_type=None,
+                    linear_timesteps=True,
+                    linear_timesteps2=True,
+                    snr_gamma=1.0,
+                    min_snr_gamma=1.0,
+                    dtype="bf16",
+                )
+
+            DiffusionTrainer.__init__ = _fake_init  # type: ignore[assignment]
+
+            trainer = ZImageDiffSynthTrainer(0, None, {})
+            tc = trainer.train_config
+            # After trainer init, config must be hard-wired for DiffSynth Z-Image.
+            assert tc.noise_scheduler is None, "trainer must leave noise_scheduler=None to use model.get_train_scheduler()"
+            assert tc.num_train_timesteps == 1000, "num_train_timesteps must default to 1000"
+            assert tc.loss_type == "mse", "loss_type must be mse"
+            assert tc.timestep_type == "linear", "timestep_type must be linear"
+            assert tc.linear_timesteps is False, "linear_timesteps must be False"
+            assert tc.linear_timesteps2 is False, "linear_timesteps2 must be False"
+            assert tc.snr_gamma is None, "snr_gamma must be disabled (None)"
+            assert tc.min_snr_gamma is None, "min_snr_gamma must be disabled (None)"
+
+            # Now exercise the hook that marks sd as flow-matching once it exists.
+            fake_sd = SimpleNamespace(is_flow_matching=False)
+            trainer.sd = fake_sd
+            trainer.hook_after_sd_init_before_load()
+            assert getattr(trainer.sd, "is_flow_matching", False) is True, "sd.is_flow_matching must be True after hook"
+        finally:
+            DiffusionTrainer.__init__ = orig_init  # type: ignore[assignment]
+        _log("7. OK")
+    except Exception:
+        _log("   FAILED in step 7 (ZImageDiffSynthTrainer wiring):")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
     _log("Done.")
 
 
