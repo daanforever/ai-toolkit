@@ -32,6 +32,20 @@ class DiffSynthZImageSchedulerAdapter(torch.nn.Module):
         )
         self.config = type("_Config", (), {"num_train_timesteps": 1000})()
 
+    def scale_model_input(self, sample: torch.Tensor, timestep: torch.Tensor) -> torch.Tensor:
+        """
+        Match the interface expected by BaseModel.predict_noise and SDTrainer.
+
+        DiffSynth's FlowMatchScheduler operates directly in the data space, so
+        no additional scaling is required here. If the wrapped scheduler
+        defines its own scale_model_input we delegate to it; otherwise we
+        return the sample unchanged (same behavior as CustomFlowMatchEulerDiscreteScheduler).
+        """
+        inner = getattr(self._scheduler, "scale_model_input", None)
+        if callable(inner):
+            return inner(sample, timestep)
+        return sample
+
     def set_timesteps(self, num_train_timesteps=1000, device=None, **kwargs):
         self._scheduler.set_timesteps(num_train_timesteps, denoising_strength=1.0, training=True, **kwargs)
         self.timesteps = self._scheduler.timesteps

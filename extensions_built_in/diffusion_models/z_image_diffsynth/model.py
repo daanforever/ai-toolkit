@@ -47,12 +47,16 @@ class _DiTUnetWrapper(torch.nn.Module):
             return self._modules["_inner_dit"]
         if name in ("_inner_dit", "config"):
             return object.__getattribute__(self, name)
-        # base_model.save_device_state() expects unet.device / unet.training; inner DiT may not have .device
+        # base_model.save_device_state() and predict_noise expect unet.device / unet.training / unet.dtype;
+        # inner DiT may not expose these directly.
         if name == "device":
             params = list(self._modules["_inner_dit"].parameters())
             return next(iter(params)).device if params else torch.device("cpu")
         if name == "training":
             return self._modules["_inner_dit"].training
+        if name == "dtype":
+            params = list(self._modules["_inner_dit"].parameters())
+            return next(iter(params)).dtype if params else torch.float32
         return getattr(self._modules["_inner_dit"], name)
 
 

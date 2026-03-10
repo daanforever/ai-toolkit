@@ -352,6 +352,29 @@ def main():
         sys.exit(1)
     _log("4. OK")
 
+    _log("4b. BaseModel.predict_noise uses noise_scheduler.scale_model_input ...")
+    try:
+        # This exercises the same code path as SDTrainer / BaseSDTrainProcess,
+        # where BaseModel.predict_noise calls self.noise_scheduler.scale_model_input
+        # via its internal scale_model_input() helper. Our DiffSynthZImageSchedulerAdapter
+        # must therefore implement scale_model_input with a compatible signature.
+        B, C, H, W = 1, 16, 64, 64
+        latent = torch.randn(B, C, H, W, device=device, dtype=sd.torch_dtype)
+        timestep = torch.tensor([500], device=device, dtype=torch.float32)
+        with torch.no_grad():
+            pred2 = sd.predict_noise(
+                latents=latent,
+                text_embeddings=embeds,
+                timestep=timestep,
+                is_input_scaled=False,
+            )
+        _log(f"   predict_noise output shape: {pred2.shape}")
+    except Exception:
+        _log("   FAILED in step 4b (predict_noise / scale_model_input):")
+        traceback.print_exc()
+        sys.exit(1)
+    _log("4b. OK")
+
     _log("5. get_generation_pipeline ...")
     try:
         pipeline = sd.get_generation_pipeline()
