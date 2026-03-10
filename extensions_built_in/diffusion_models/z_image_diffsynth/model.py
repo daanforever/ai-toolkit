@@ -140,10 +140,23 @@ class ZImageDiffSynthModel(BaseModel):
                 base_model=self,
             )
 
-        # Use the full DiffSynth DiT including noise_refiner / context_refiner
-        # so that VRAM usage matches the original architecture; this allows us
-        # to measure the true memory footprint of the complete model.
+        # Use the full DiffSynth DiT but optionally disable context_refiner to
+        # reduce VRAM usage while keeping the primary noise_refiner stack
+        # active for training quality.
         self._raw_dit = components["dit"]
+        if hasattr(self._raw_dit, "context_refiner"):
+            try:
+                import torch
+
+                # Replace context_refiner with an empty ModuleList so that any
+                # code iterating over it still works, but the refinement stack
+                # becomes a no-op.
+                self._raw_dit.context_refiner = torch.nn.ModuleList([])
+                self.print_and_status_update("Disabled DiT module: context_refiner")
+            except Exception:
+                # If replacement fails, continue with the original module to
+                # avoid breaking the model.
+                pass
         self.model = _DiTUnetWrapper(self._raw_dit)
         self.vae = components["vae_wrapper"]
         self.text_encoder = [components["text_encoder"]]
@@ -425,10 +438,9 @@ class ZImageDiffSynthModel(BaseModel):
         return "zimage_diffsynth"
 
     def get_transformer_block_names(self) -> Optional[List[str]]:
-        # Expose all main DiT stacks so that LoRA / tooling can attach to
-        # layers, noise_refiner and context_refiner, matching the original
-        # DiffSynth architecture.
-        return ["layers", "noise_refiner", "context_refiner"]
+        # Expose main DiT layers and noise_refiner for LoRA / tooling. The
+        # context_refiner stack is disabled to save VRAM.
+        return ["layers", "noise_refiner"]
 
     def convert_lora_weights_before_save(self, state_dict):
         return lora_mod.convert_lora_weights_before_save(state_dict)
