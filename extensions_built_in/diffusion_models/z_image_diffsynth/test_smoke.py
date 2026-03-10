@@ -445,6 +445,48 @@ def main():
         traceback.print_exc()
         sys.exit(1)
 
+    _log("8. decode_latents channel handling (3-channel vs latent space) ...")
+    try:
+        # 8a. 3-channel tensors (RGB-like) must bypass the VAE decoder and be
+        # treated as already-decoded images. This matches the behavior needed
+        # when SDTrainer.train_single_accumulation calls sd.decode_latents on
+        # pixel-space tensors for preview.
+        rgb = torch.randn(
+            1,
+            3,
+            320,
+            480,
+            device=sd.device_torch,
+            dtype=sd.torch_dtype,
+        )
+        out_rgb = sd.decode_latents(rgb)
+        assert out_rgb.shape == rgb.shape, "decode_latents(3ch) must preserve shape"
+        assert (
+            out_rgb.dtype == sd.torch_dtype
+        ), "decode_latents(3ch) must cast to sd.torch_dtype"
+
+        # 8b. Latent-space tensors (C != 3, e.g. 16) should still go through the
+        # VAE path without raising, to keep the usual decode_latents behavior.
+        latents = torch.randn(
+            1,
+            16,
+            40,
+            60,
+            device=sd.device_torch,
+            dtype=sd.torch_dtype,
+        )
+        out_latents = sd.decode_latents(latents)
+        assert out_latents.dim() == 4 and out_latents.shape[1] in (
+            3,
+            4,
+        ), "decode_latents(latents) must produce image-like tensor"
+        _log("8. OK")
+    except Exception:
+        _log("   FAILED in step 8 (decode_latents channel handling):")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
     _log("Done.")
 
 

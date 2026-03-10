@@ -190,6 +190,35 @@ class ZImageDiffSynthModel(BaseModel):
     def get_generation_pipeline(self):
         return sampling_mod.get_generation_pipeline(self)
 
+    def decode_latents(
+        self,
+        latents: torch.Tensor,
+        device=None,
+        dtype=None,
+    ):
+        """
+        Decode latents for preview / sampling.
+
+        For the DiffSynth Z-Image training loop we sometimes operate directly in
+        pixel space (flow-matching on RGB images). In that case SDTrainer passes
+        tensors with 3 channels here when saving noised-input previews. Feeding
+        those through the VAE decoder (which expects latent_channels, e.g. 16)
+        triggers a channel-mismatch error.
+
+        To keep previews working without affecting the main training path, we
+        treat 3-channel inputs as already-decoded images and only apply a dtype /
+        device cast. For true latents (latent_channels, e.g. 16) we fall back to
+        the BaseModel implementation which uses the wrapped VAE.
+        """
+        if latents.dim() == 4 and latents.shape[1] == 3:
+            if device is None:
+                device = self.device
+            if dtype is None:
+                dtype = self.torch_dtype
+            return latents.to(device, dtype=dtype)
+
+        return super().decode_latents(latents, device=device, dtype=dtype)
+
     def generate_single_image(
         self,
         pipeline,
