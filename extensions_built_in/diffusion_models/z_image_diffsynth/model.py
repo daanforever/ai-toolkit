@@ -199,11 +199,15 @@ class ZImageDiffSynthModel(BaseModel):
                 f"{device} (sampling_network={sampling_network_state}, "
                 f"sampling_transformer={sampling_transformer_state})"
             )
-        if hasattr(self, "_sampling_network") and self._sampling_network is not None:
-            try:
-                self._sampling_network.to(device)
-            except Exception:
-                pass
+        # Do not move _sampling_network to CPU: it shares weights with the main network
+        # (LoRA applied to the same base). When we later call network.to(cuda) for the main
+        # network, the sampling network effectively ends up on GPU again, so moving it to
+        # CPU is useless and adds extra copy overhead.
+        # if hasattr(self, "_sampling_network") and self._sampling_network is not None:
+        #     try:
+        #         self._sampling_network.to(device)
+        #     except Exception:
+        #         pass
         if hasattr(self, "_sampling_transformer") and self._sampling_transformer is not None:
             try:
                 self._sampling_transformer.to(device)
