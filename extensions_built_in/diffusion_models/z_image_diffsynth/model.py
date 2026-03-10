@@ -140,23 +140,16 @@ class ZImageDiffSynthModel(BaseModel):
                 base_model=self,
             )
 
-        # Use the full DiffSynth DiT but optionally disable context_refiner to
-        # reduce VRAM usage while keeping the primary noise_refiner stack
-        # active for training quality.
+        # Disable refiner stacks to reduce VRAM; replace with empty ModuleList
+        # so code that iterates over them (e.g. model_fn_z_image_turbo) still runs.
         self._raw_dit = components["dit"]
-        if hasattr(self._raw_dit, "context_refiner"):
-            try:
-                import torch
-
-                # Replace context_refiner with an empty ModuleList so that any
-                # code iterating over it still works, but the refinement stack
-                # becomes a no-op.
-                self._raw_dit.context_refiner = torch.nn.ModuleList([])
-                self.print_and_status_update("Disabled DiT module: context_refiner")
-            except Exception:
-                # If replacement fails, continue with the original module to
-                # avoid breaking the model.
-                pass
+        for _ref_name in ("noise_refiner", "context_refiner"):
+            if hasattr(self._raw_dit, _ref_name):
+                try:
+                    setattr(self._raw_dit, _ref_name, torch.nn.ModuleList([]))
+                    self.print_and_status_update(f"Disabled DiT module: {_ref_name}")
+                except Exception:
+                    pass
         self.model = _DiTUnetWrapper(self._raw_dit)
         self.vae = components["vae_wrapper"]
         self.text_encoder = [components["text_encoder"]]
@@ -438,9 +431,8 @@ class ZImageDiffSynthModel(BaseModel):
         return "zimage_diffsynth"
 
     def get_transformer_block_names(self) -> Optional[List[str]]:
-        # Expose main DiT layers and noise_refiner for LoRA / tooling. The
-        # context_refiner stack is disabled to save VRAM.
-        return ["layers", "noise_refiner"]
+        # Only main DiT layers; noise_refiner and context_refiner are disabled for VRAM.
+        return ["layers"]
 
     def convert_lora_weights_before_save(self, state_dict):
         return lora_mod.convert_lora_weights_before_save(state_dict)
