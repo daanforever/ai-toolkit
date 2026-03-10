@@ -424,6 +424,39 @@ def main():
         traceback.print_exc()
         sys.exit(1)
 
+    # 4d. SNR weighting (min_snr_gamma) after runtime params update / "data loaders recreated".
+    # The adapter must support get_all_snr and apply_snr_weight without alphas_cumprod.
+    _log("4d. noise_scheduler supports SNR weighting (get_all_snr, apply_snr_weight, min_snr_gamma) ...")
+    try:
+        from toolkit.train_tools import get_all_snr, apply_snr_weight
+
+        noise_scheduler = sd.noise_scheduler
+        assert noise_scheduler is not None, "sd.noise_scheduler must be set"
+        # Simulate runtime update: min_snr_gamma from UI/DB (e.g. 5.0) with data loaders recreated
+        min_snr_gamma = 5.0
+        all_snr = get_all_snr(noise_scheduler, device)
+        assert all_snr is not None and all_snr.dim() == 1, "get_all_snr must return 1d tensor"
+        assert all_snr.shape[0] == 1000, "get_all_snr must return 1000 timesteps"
+        # apply_snr_weight as in SDTrainer.calculate_loss
+        batch_size = 2
+        loss = torch.ones(batch_size, device=device, dtype=torch.float32)
+        timesteps = torch.tensor([1, 500], device=device, dtype=torch.long)
+        weighted = apply_snr_weight(loss, timesteps, noise_scheduler, min_snr_gamma)
+        assert weighted.shape == loss.shape, "apply_snr_weight must preserve shape"
+        _log("4d. OK (adapter supports min_snr_gamma after data loaders recreated)")
+    except AttributeError as e:
+        if "alphas_cumprod" in str(e):
+            _log(
+                f"4d. FAILED: scheduler missing compute_snr/alphas_cumprod support: {e}"
+            )
+            traceback.print_exc()
+            sys.exit(1)
+        raise
+    except Exception:
+        _log("   FAILED in step 4d (SNR weighting / data loaders recreated):")
+        traceback.print_exc()
+        sys.exit(1)
+
     _log("5. get_generation_pipeline ...")
     try:
         pipeline = sd.get_generation_pipeline()

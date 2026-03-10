@@ -89,3 +89,17 @@ class DiffSynthZImageSchedulerAdapter(torch.nn.Module):
             (tt.unsqueeze(0) - timesteps.unsqueeze(1)).abs(), dim=1
         )
         return tw[indices]
+
+    def compute_snr(self) -> torch.Tensor:
+        """
+        Compute SNR for each timestep for flow matching (min_snr_gamma / SNR weighting).
+        Used by get_all_snr() when runtime params change (e.g. data loaders recreated).
+        Same convention as CustomFlowMatchEulerDiscreteScheduler: t in [0,1],
+        SNR = (1-t)^2 / (t^2 + eps).
+        """
+        num = self.config.num_train_timesteps
+        device = self.timesteps.device if hasattr(self.timesteps, "device") else torch.device("cpu")
+        t = torch.linspace(0.0, 1.0, num, device=device, dtype=torch.float32)
+        epsilon = 1e-8
+        snr = ((1.0 - t) ** 2) / (t ** 2 + epsilon)
+        return snr
