@@ -103,13 +103,18 @@ class ZImageDiffSynthModel(BaseModel):
         except Exception:
             pass
 
-    def _move_sampling_network(self, device):
-        if not hasattr(self, "_sampling_network") or self._sampling_network is None:
-            return
-        try:
-            self._sampling_network.to(device)
-        except Exception:
-            pass
+    def _move_sampling(self, device):
+        """Move sampling components (network + transformer) to device."""
+        if hasattr(self, "_sampling_network") and self._sampling_network is not None:
+            try:
+                self._sampling_network.to(device)
+            except Exception:
+                pass
+        if hasattr(self, "_sampling_transformer") and self._sampling_transformer is not None:
+            try:
+                self._sampling_transformer.to(device)
+            except Exception:
+                pass
 
     def load_model(self):
         dtype = self.torch_dtype
@@ -181,7 +186,7 @@ class ZImageDiffSynthModel(BaseModel):
         self.noise_scheduler = ZImageDiffSynthModel.get_train_scheduler(use_diffsynth_loop=use_diffsynth)
         self.pipeline = None
         self._move_main_network("cpu")
-        self._move_sampling_network("cpu")
+        self._move_sampling("cpu")
         self.print_and_status_update("Model loaded")
 
     def get_model_to_train(self):
@@ -208,7 +213,7 @@ class ZImageDiffSynthModel(BaseModel):
         else:
             target_device = self.device_torch
         try:
-            self._raw_dit.to(target_device)
+            self.model.to(target_device)
         except Exception:
             # If for some reason .to(...) is not supported on the inner DiT,
             # fall back to its current placement and let the error surface.
@@ -355,17 +360,12 @@ class ZImageDiffSynthModel(BaseModel):
             return _run_generation()
 
         try:
-            if self._raw_dit is not None:
-                self._raw_dit.to("cpu")
-            self._move_main_network("cpu")
-            self._move_sampling_network(self.device_torch)
-            self._sampling_transformer.to(self.device_torch)
+            self.model.to("cpu")
+            self._move_sampling(self.device_torch)
             return _run_generation()
         finally:
-            self._sampling_transformer.to("cpu")
-            self._move_sampling_network("cpu")
-            if self._raw_dit is not None:
-                self._raw_dit.to(self.device_torch)
+            self._move_sampling("cpu")
+            self.model.to(self.device_torch)
             self._move_main_network(self.device_torch)
 
     def generate_images(
@@ -396,23 +396,15 @@ class ZImageDiffSynthModel(BaseModel):
                 return super().generate_images(image_configs, sampler)
 
             try:
-                if self._raw_dit is not None:
-                    self._raw_dit.to("cpu")
-                # self._move_main_network("cpu")
-                self._move_sampling_network(self.device_torch)
-                self._sampling_transformer.to(self.device_torch)
+                self.model.to("cpu")
+                self._move_sampling(self.device_torch)
                 return super().generate_images(image_configs, sampler)
             finally:
-                # Restore main network reference before device moves so that
-                # _move_main_network(device_torch) moves the real main network
-                # (LoRA) back to GPU, not the sampling network.
                 if saved_network is not None:
                     self.network = saved_network
-                self._sampling_transformer.to("cpu")
-                self._move_sampling_network("cpu")
-                if self._raw_dit is not None:
-                    self._raw_dit.to(self.device_torch)
-                # self._move_main_network(self.device_torch)
+                self._move_sampling("cpu")
+                self.model.to(self.device_torch)
+                self._move_main_network(self.device_torch)
         finally:
             # Restore when we swapped but returned early (use_sampling_transformer
             # was False), so the inner finally never ran.
