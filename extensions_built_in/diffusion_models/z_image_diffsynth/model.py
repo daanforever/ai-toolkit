@@ -89,6 +89,10 @@ class ZImageDiffSynthModel(BaseModel):
         self._raw_dit = None
         self._sampling_transformer = None
         self._sampling_network = None
+        # When True, generate_single_image is being called from our own
+        # generate_images override, so device moves for sampling/main
+        # transformers are handled once per batch instead of per prompt.
+        self._sampling_in_batch_generate = False
         # Enable gradient checkpointing by default for DiffSynth DiT to
         # reduce peak VRAM usage during training forwards.
         self.gradient_checkpointing = True
@@ -152,6 +156,8 @@ class ZImageDiffSynthModel(BaseModel):
             self.model_config.qtype = "float8"
 
         with memory_debug(self.print_and_status_update, "Load components"):
+            model_kwargs = getattr(self.model_config, "model_kwargs", None) or {}
+            sampling_loader_mode = model_kwargs.get("sampling_loader", "auto")
             components = loader_mod.load_components(
                 model_path,
                 base_path,
@@ -163,6 +169,7 @@ class ZImageDiffSynthModel(BaseModel):
                 sampling_transformer_path=sampling_path,
                 quantize_transformer=getattr(self.model_config, "quantize", False),
                 base_model=self,
+                sampling_loader_mode=sampling_loader_mode,
             )
 
         # Optionally disable refiner stacks via model.model_kwargs to reduce VRAM
@@ -381,7 +388,11 @@ class ZImageDiffSynthModel(BaseModel):
             and self.device_torch.type == "cuda"
         )
 
-        if not use_sampling_transformer:
+        # If there is no dedicated sampling transformer or we are already in a
+        # batched generate_images call that has moved the sampling/main
+        # networks to the correct devices once, just run generation without
+        # additional device juggling.
+        if (not use_sampling_transformer) or self._sampling_in_batch_generate:
             return _run_generation()
 
         try:
@@ -408,6 +419,11 @@ class ZImageDiffSynthModel(BaseModel):
             and self.device_torch.type == "cuda"
         )
         try:
+            # Mark that we are in a batched generate_images call so that
+            # generate_single_image can skip per-prompt device moves when a
+            # sampling transformer is used.
+            self._sampling_in_batch_generate = True
+
             if (
                 hasattr(self, "_sampling_transformer")
                 and self._sampling_transformer is not None
@@ -435,6 +451,9 @@ class ZImageDiffSynthModel(BaseModel):
                 self._move_main_network(self.device_torch)
                 self._flush_cuda()
         finally:
+            # Always reset batch flag even if we returned early or hit an error.
+            self._sampling_in_batch_generate = False
+
             # Restore when we swapped but returned early (use_sampling_transformer
             # was False), so the inner finally never ran.
             if saved_network is not None:
