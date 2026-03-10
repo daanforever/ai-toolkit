@@ -398,7 +398,7 @@ class ZImageDiffSynthModel(BaseModel):
             try:
                 if self._raw_dit is not None:
                     self._raw_dit.to("cpu")
-                self._move_main_network("cpu")
+                # self._move_main_network("cpu")
                 self._move_sampling_network(self.device_torch)
                 self._sampling_transformer.to(self.device_torch)
                 return super().generate_images(image_configs, sampler)
@@ -412,7 +412,7 @@ class ZImageDiffSynthModel(BaseModel):
                 self._move_sampling_network("cpu")
                 if self._raw_dit is not None:
                     self._raw_dit.to(self.device_torch)
-                self._move_main_network(self.device_torch)
+                # self._move_main_network(self.device_torch)
         finally:
             # Restore when we swapped but returned early (use_sampling_transformer
             # was False), so the inner finally never ran.
