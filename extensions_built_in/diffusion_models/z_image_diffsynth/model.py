@@ -89,9 +89,8 @@ class ZImageDiffSynthModel(BaseModel):
         self._raw_dit = None
         self._sampling_transformer = None
         self._sampling_network = None
-        # When True, generate_single_image is being called from our own
-        # generate_images override, so device moves for sampling/main
-        # transformers are handled once per batch instead of per prompt.
+        # When True, we are inside our generate_images(); device moves are done
+        # once there (main→CPU, sampling→GPU before loop; restore in finally).
         self._sampling_in_batch_generate = False
         # Enable gradient checkpointing by default for DiffSynth DiT to
         # reduce peak VRAM usage during training forwards.
@@ -109,7 +108,15 @@ class ZImageDiffSynthModel(BaseModel):
 
     def _move_main_network(self, device):
         if not hasattr(self, "network") or self.network is None:
+            if is_debug_enabled():
+                self.print_and_status_update(
+                    f"[zimage_diffsynth] main network is None; skipping move to {device}"
+                )
             return
+        if is_debug_enabled():
+            self.print_and_status_update(
+                f"[zimage_diffsynth] moving main network to {device}"
+            )
         try:
             self.network.to(device)
         except Exception:
@@ -123,6 +130,20 @@ class ZImageDiffSynthModel(BaseModel):
 
     def _move_sampling(self, device):
         """Move sampling components (network + transformer) to device."""
+        if is_debug_enabled():
+            sampling_network_state = (
+                "set" if getattr(self, "_sampling_network", None) is not None else "none"
+            )
+            sampling_transformer_state = (
+                "set"
+                if getattr(self, "_sampling_transformer", None) is not None
+                else "none"
+            )
+            self.print_and_status_update(
+                "[zimage_diffsynth] moving sampling components to "
+                f"{device} (sampling_network={sampling_network_state}, "
+                f"sampling_transformer={sampling_transformer_state})"
+            )
         if hasattr(self, "_sampling_network") and self._sampling_network is not None:
             try:
                 self._sampling_network.to(device)
@@ -359,7 +380,7 @@ class ZImageDiffSynthModel(BaseModel):
         generator: torch.Generator,
         extra: dict,
     ):
-        def _run_generation():
+        def _run():
             sc = self.get_bucket_divisibility()
             gen_config.width = int(gen_config.width // sc * sc)
             gen_config.height = int(gen_config.height // sc * sc)
@@ -369,7 +390,7 @@ class ZImageDiffSynthModel(BaseModel):
                 cond = [cond[i] for i in range(cond.shape[0])]
             if isinstance(uncond, torch.Tensor) and len(uncond.shape) == 3:
                 uncond = [uncond[i] for i in range(uncond.shape[0])]
-            img = pipeline(
+            return pipeline(
                 prompt_embeds=cond,
                 negative_prompt_embeds=uncond,
                 height=gen_config.height,
@@ -380,29 +401,36 @@ class ZImageDiffSynthModel(BaseModel):
                 generator=generator,
                 **extra,
             ).images[0]
-            return img
 
-        use_sampling_transformer = (
+        use_sampling = (
             self._sampling_transformer is not None
             and isinstance(self.device_torch, torch.device)
             and self.device_torch.type == "cuda"
         )
-
-        # If there is no dedicated sampling transformer or we are already in a
-        # batched generate_images call that has moved the sampling/main
-        # networks to the correct devices once, just run generation without
-        # additional device juggling.
-        if (not use_sampling_transformer) or self._sampling_in_batch_generate:
-            return _run_generation()
-
+        if not use_sampling:
+            return _run()
+        # Batch path: BaseModel already moved main→CPU, sampling→GPU once; no per-prompt moves.
+        if self._sampling_in_batch_generate:
+            return _run()
+        # Standalone path (e.g. smoke test): move sampling to GPU, main to CPU, then restore after.
         try:
-            self.model.to("cpu")
+            if is_debug_enabled():
+                self.print_and_status_update(
+                    "[zimage_diffsynth] standalone sampling: moving main transformer to "
+                    "CPU and sampling transformer to GPU"
+                )
+            self.model.to("cpu", dtype=self.torch_dtype)
             self._flush_cuda()
             self._move_sampling(self.device_torch)
-            return _run_generation()
+            return _run()
         finally:
+            if is_debug_enabled():
+                self.print_and_status_update(
+                    "[zimage_diffsynth] standalone sampling: restoring main "
+                    "transformer to GPU and sampling transformer to CPU"
+                )
             self._move_sampling("cpu")
-            self.model.to(self.device_torch)
+            self.model.to(self.device_torch, dtype=self.torch_dtype)
             self._move_main_network(self.device_torch)
             self._flush_cuda()
 
@@ -412,18 +440,13 @@ class ZImageDiffSynthModel(BaseModel):
         sampler=None,
     ):
         saved_network = None
-        use_sampling_transformer = (
+        use_sampling = (
             hasattr(self, "_sampling_transformer")
             and self._sampling_transformer is not None
             and isinstance(self.device_torch, torch.device)
             and self.device_torch.type == "cuda"
         )
         try:
-            # Mark that we are in a batched generate_images call so that
-            # generate_single_image can skip per-prompt device moves when a
-            # sampling transformer is used.
-            self._sampling_in_batch_generate = True
-
             if (
                 hasattr(self, "_sampling_transformer")
                 and self._sampling_transformer is not None
@@ -435,27 +458,29 @@ class ZImageDiffSynthModel(BaseModel):
                 saved_network = self.network
                 self.network = self._sampling_network
 
-            if not use_sampling_transformer:
-                return super().generate_images(image_configs, sampler)
-
+            if use_sampling:
+                if is_debug_enabled():
+                    self.print_and_status_update(
+                        "[zimage_diffsynth] batch generate: enabling sampling transformer "
+                        "on GPU and using sampling network"
+                    )
+                self._sampling_in_batch_generate = True
             try:
-                self.model.to("cpu")
-                self._flush_cuda()
-                self._move_sampling(self.device_torch)
                 return super().generate_images(image_configs, sampler)
             finally:
-                if saved_network is not None:
-                    self.network = saved_network
-                self._move_sampling("cpu")
-                self.model.to(self.device_torch)
-                self._move_main_network(self.device_torch)
-                self._flush_cuda()
+                if use_sampling:
+                    if is_debug_enabled():
+                        self.print_and_status_update(
+                            "[zimage_diffsynth] batch generate: restoring main "
+                            "transformer to GPU and moving sampling transformer to CPU"
+                        )
+                    self._sampling_in_batch_generate = False
+                    # Restore after batch: main back on GPU, sampling back on CPU (no memory spike).
+                    self._move_sampling("cpu")
+                    self.model.to(self.device_torch, dtype=self.torch_dtype)
+                    self._move_main_network(self.device_torch)
+                    self._flush_cuda()
         finally:
-            # Always reset batch flag even if we returned early or hit an error.
-            self._sampling_in_batch_generate = False
-
-            # Restore when we swapped but returned early (use_sampling_transformer
-            # was False), so the inner finally never ran.
             if saved_network is not None:
                 self.network = saved_network
 
