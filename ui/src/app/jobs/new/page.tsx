@@ -36,7 +36,9 @@ export default function TrainingForm() {
 
   const [jobConfig, setJobConfig] = useNestedState<JobConfig>(objectCopy(defaultJobConfig));
   const [status, setStatus] = useState<'idle' | 'saving' | 'success' | 'error'>('idle');
-  const advancedJobConfigRef = useRef<{ getConfig: () => JobConfig | null } | null>(null);
+  const advancedJobConfigRef = useRef<{
+    getConfig: () => { config: JobConfig } | { error: string };
+  } | null>(null);
 
   useEffect(() => {
     if (!isSettingsLoaded) return;
@@ -105,10 +107,20 @@ export default function TrainingForm() {
     if (status === 'saving') return;
     setStatus('saving');
 
-    const configToSave =
-      showAdvancedView && advancedJobConfigRef.current?.getConfig
-        ? advancedJobConfigRef.current.getConfig() ?? jobConfig
-        : jobConfig;
+    let configToSave: JobConfig;
+    if (showAdvancedView && advancedJobConfigRef.current?.getConfig) {
+      const result = advancedJobConfigRef.current.getConfig();
+      if ('error' in result) {
+        alert(
+          `Ошибка в YAML конфиге: ${result.error}\n\nВ путях Windows используйте прямые слеши (/) или удвоенные обратные (\\\\).`,
+        );
+        setStatus('idle');
+        return;
+      }
+      configToSave = result.config;
+    } else {
+      configToSave = jobConfig;
+    }
 
     apiClient
       .post('/api/jobs', {

@@ -31,7 +31,9 @@ type Props = {
   gpuList: any;
   datasetOptions: any;
   settings: Settings;
-  configRef?: React.MutableRefObject<{ getConfig: () => JobConfig | null } | null>;
+  configRef?: React.MutableRefObject<
+    { getConfig: () => { config: JobConfig } | { error: string } } | null
+  >;
 };
 
 const isDev = process.env.NODE_ENV === 'development';
@@ -62,12 +64,14 @@ export default function AdvancedJob({ jobConfig, setJobConfig, settings, configR
     configRef.current = {
       getConfig: () => {
         const raw = editorRef.current?.getModel()?.getValue();
-        if (raw == null || raw.trim() === '') return null;
+        if (raw == null || raw.trim() === '') {
+          return { error: 'Config is empty' };
+        }
         try {
           const parsed = YAML.parse(raw) as JobConfig;
-          return normalizeParsedConfig(parsed, settings.TRAINING_FOLDER);
-        } catch {
-          return null;
+          return { config: normalizeParsedConfig(parsed, settings.TRAINING_FOLDER) };
+        } catch (e) {
+          return { error: e instanceof Error ? e.message : String(e) };
         }
       },
     };
