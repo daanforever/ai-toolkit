@@ -5,6 +5,9 @@ Run from repo root. If venv exists, the script will use it automatically (no nee
 Paths: use env ZIMAGE_DIFFSYNTH_MODEL_PATH and optionally ZIMAGE_DIFFSYNTH_SAMPLING_PATH.
 If unset, defaults from the plan are used (see DEFAULT_* below). Override via env if needed.
 
+Regression: set ZIMAGE_DIFFSYNTH_TEST_QUANTIZE_TE=1 to run load with quantize_te=True
+(checks that loader does not shadow quantize() with the bool param — "bool object is not callable").
+
 Example (PowerShell, from repo root):
   python -m extensions_built_in.diffusion_models.z_image_diffsynth.test_smoke
 """
@@ -151,6 +154,29 @@ def main():
             for line in captured.splitlines():
                 _log("  | " + line)
     _log("2. OK (Loaded.)")
+
+    # Regression: load with quantize_te=True (ensures loader does not shadow quantize -> "bool not callable")
+    if os.environ.get("ZIMAGE_DIFFSYNTH_TEST_QUANTIZE_TE", "").strip() == "1":
+        _log("2b. Regression: load with quantize_te=True (no 'bool' callable error) ...")
+        try:
+            cfg_qt = {
+                "name_or_path": model_path,
+                "arch": "zimage_diffsynth",
+                "quantize": False,
+                "quantize_te": True,
+            }
+            if sampling_path:
+                cfg_qt["sampling_name_or_path"] = sampling_path
+            model_config_qt = ModelConfig(**cfg_qt)
+            sd_qt = ModelClass(device, model_config_qt, dtype="bf16")
+            sd_qt.load_model()
+            _log("2b. OK")
+        except Exception as e:
+            _log(f"2b. FAILED: {e}")
+            traceback.print_exc()
+            sys.exit(1)
+    else:
+        _log("2b. Skipped (set ZIMAGE_DIFFSYNTH_TEST_QUANTIZE_TE=1 to run)")
 
     _log("3. get_prompt_embeds ...")
     try:

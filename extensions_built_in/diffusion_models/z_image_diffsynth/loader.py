@@ -95,7 +95,7 @@ def load_components(
     quantize_te: bool = False,
     qtype_te: str = "float8",
     sampling_transformer_path: Optional[str] = None,
-    quantize: bool = False,
+    quantize_transformer: bool = False,
     base_model: Optional[Any] = None,
 ) -> dict:
     """
@@ -123,7 +123,7 @@ def load_components(
             sp_transformer_folder = sampling_transformer_path
         log("Loading sampling transformer (DiT)")
         sampling_dit = load_dit_from_folder(sp_transformer_folder, dtype, device)
-        if quantize and base_model is not None:
+        if quantize_transformer and base_model is not None:
             log("Quantizing sampling transformer")
             quantize_model(base_model, sampling_dit)
             flush()
@@ -136,7 +136,7 @@ def load_components(
         transformer_folder = model_path
     log("Loading transformer (DiT)")
     dit = load_dit_from_folder(transformer_folder, dtype, device)
-    if quantize and base_model is not None:
+    if quantize_transformer and base_model is not None:
         log("Quantizing transformer")
         quantize_model(base_model, dit)
         flush()

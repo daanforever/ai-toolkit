@@ -80,7 +80,7 @@ class ZImageDiffSynthModel(BaseModel):
                 quantize_te=getattr(self.model_config, "quantize_te", False),
                 qtype_te=getattr(self.model_config, "qtype_te", "float8"),
                 sampling_transformer_path=sampling_path,
-                quantize=getattr(self.model_config, "quantize", False),
+                quantize_transformer=getattr(self.model_config, "quantize", False),
                 base_model=self,
             )
 
