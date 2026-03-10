@@ -19,6 +19,11 @@ class DiffSynthVAEWrapper(torch.nn.Module):
         """Device of the first parameter (expected by base_model save_device_state / set_device_state)."""
         return next(self.parameters()).device
 
+    @property
+    def dtype(self) -> torch.dtype:
+        """Dtype of the first parameter (expected by SDTrainer train_single_accumulation: vae.dtype vs vae_torch_dtype)."""
+        return next(self.parameters()).dtype
+
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         if hasattr(self.vae_encoder, "encode"):
             # diffusers AutoencoderKL

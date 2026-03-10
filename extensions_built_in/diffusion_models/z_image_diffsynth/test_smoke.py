@@ -203,6 +203,29 @@ def main():
         traceback.print_exc()
         sys.exit(1)
 
+    # 2f. VAE wrapper must have .dtype so SDTrainer.train_single_accumulation does not raise
+    #     "AttributeError: 'DiffSynthVAEWrapper' object has no attribute 'dtype'"
+    _log("2f. VAE wrapper has .dtype (train_single_accumulation checks vae.dtype vs vae_torch_dtype) ...")
+    try:
+        vae = sd.vae
+        if isinstance(vae, list):
+            vae = vae[0]
+        _ = vae.dtype
+        assert isinstance(vae.dtype, torch.dtype), "vae.dtype must be torch.dtype"
+        _log("2f. OK")
+    except AttributeError as e:
+        if "dtype" in str(e):
+            _log(
+                f"2f. FAILED: VAE wrapper missing .dtype (trainer will fail with same error): {e}"
+            )
+            traceback.print_exc()
+            sys.exit(1)
+        raise
+    except Exception as e:
+        _log(f"2f. FAILED: {e}")
+        traceback.print_exc()
+        sys.exit(1)
+
     # Optional: run a second load without quantization (to test unquantized path)
     if os.environ.get("ZIMAGE_DIFFSYNTH_TEST_ALSO_NO_QUANT", "").strip() == "1":
         _log("2b. Optional: load again without quantization ...")
