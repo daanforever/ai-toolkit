@@ -9,6 +9,7 @@ from toolkit.config_modules import GenerateImageConfig, ModelConfig
 from toolkit.models.base_model import BaseModel
 from toolkit.prompt_utils import PromptEmbeds
 from toolkit.samplers.custom_flowmatch_sampler import CustomFlowMatchEulerDiscreteScheduler
+from .scheduler_adapter import DiffSynthZImageSchedulerAdapter
 from toolkit.accelerator import unwrap_model
 from toolkit.paths import normalize_path
 from toolkit.util.debug import memory_debug, is_debug_enabled
@@ -78,7 +79,10 @@ class ZImageDiffSynthModel(BaseModel):
         self._sampling_network = None
 
     @staticmethod
-    def get_train_scheduler():
+    def get_train_scheduler(use_diffsynth_loop=True):
+        """use_diffsynth_loop=True: same timesteps/add_noise/weight as DiffSynth Z-Image.sh."""
+        if use_diffsynth_loop:
+            return DiffSynthZImageSchedulerAdapter()
         return CustomFlowMatchEulerDiscreteScheduler(**scheduler_config)
 
     def get_bucket_divisibility(self):
@@ -123,7 +127,8 @@ class ZImageDiffSynthModel(BaseModel):
         # (main uses _DiTUnetWrapper → "dit.noise_refiner..."; unwrapped would be "noise_refiner...").
         self._sampling_transformer = _DiTUnetWrapper(sampling_dit) if sampling_dit is not None else None
 
-        self.noise_scheduler = ZImageDiffSynthModel.get_train_scheduler()
+        use_diffsynth = getattr(self.model_config, "use_diffsynth_training_loop", True)
+        self.noise_scheduler = ZImageDiffSynthModel.get_train_scheduler(use_diffsynth_loop=use_diffsynth)
         self.pipeline = None
         self.print_and_status_update("Model loaded")
 
