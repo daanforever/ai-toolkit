@@ -140,20 +140,26 @@ def load_components(
         log("Quantizing transformer")
         quantize_model(base_model, dit)
         flush()
-    dit.to(device)
+    # Keep main DiT on CPU after (optional) quantization; training/device
+    # presets will move it to the appropriate device when needed.
+    dit.to("cpu")
+    flush()
 
     # 3) Tokenizer & text encoder (same as z_image)
     log("Loading tokenizer and text encoder")
     tokenizer = AutoTokenizer.from_pretrained(base_model_path, subfolder="tokenizer")
     text_encoder = Qwen3ForCausalLM.from_pretrained(
-        base_model_path, subfolder="text_encoder", torch_dtype=dtype
+        base_model_path, subfolder="text_encoder", dtype=dtype
     )
     text_encoder.to(device)
     if quantize_te:
-        log("Quantizing text encoder")
-        quantize(text_encoder, weights=get_qtype(qtype_te or "float8"))
+        qtype = get_qtype(qtype_te or "float8")
+        qtype_name = getattr(qtype, "name", str(qtype))
+        log(f"Quantizing text encoder (weights={qtype_name})")
+        quantize(text_encoder, weights=qtype)
         freeze(text_encoder)
         flush()
+        log("Text encoder quantized")
 
     # 4) VAE (single AutoencoderKL, wrap as encoder+decoder interface)
     log("Loading VAE")
