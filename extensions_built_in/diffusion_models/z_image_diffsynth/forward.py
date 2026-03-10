@@ -42,10 +42,13 @@ def run_forward(
             _, c, _, _ = latents.shape
             if c != expected_c:
                 raise RuntimeError(
-                    f\"Z-Image DiffSynth DiT expected latents with {expected_c} channels (B x {expected_c} x H x W), "
-                    f\"but got B x {c} x H x W. This typically indicates that cached latents were generated "
-                    \"with a different model/latent_space_version or that non-latent RGB tensors were cached. "
-                    \"Regenerate the dataset latents for this model or disable latent caching for this run.\"
+                    (
+                        f"Z-Image DiffSynth DiT expected latents with {expected_c} channels "
+                        f"(B x {expected_c} x H x W), but got B x {c} x H x W. "
+                        "This typically indicates that cached latents were generated with a different "
+                        "model/latent_space_version or that non-latent RGB tensors were cached. "
+                        "Regenerate the dataset latents for this model or disable latent caching for this run."
+                    )
                 )
 
     out = model_fn_z_image_turbo(
