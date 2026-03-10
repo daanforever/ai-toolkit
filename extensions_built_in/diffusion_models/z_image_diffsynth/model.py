@@ -140,11 +140,18 @@ class ZImageDiffSynthModel(BaseModel):
                 base_model=self,
             )
 
-        # Disable refiner stacks to reduce VRAM; replace with empty ModuleList
+        # Optionally disable refiner stacks via model.model_kwargs to reduce VRAM
+        # (noise_refiner ~10 GB, context_refiner ~4 GB). Replace with empty ModuleList
         # so code that iterates over them (e.g. model_fn_z_image_turbo) still runs.
+        kwargs = getattr(self.model_config, "model_kwargs", None) or {}
+        self._disable_noise_refiner = kwargs.get("disable_noise_refiner", True)
+        self._disable_context_refiner = kwargs.get("disable_context_refiner", True)
         self._raw_dit = components["dit"]
-        for _ref_name in ("noise_refiner", "context_refiner"):
-            if hasattr(self._raw_dit, _ref_name):
+        for _ref_name, _do_disable in (
+            ("noise_refiner", self._disable_noise_refiner),
+            ("context_refiner", self._disable_context_refiner),
+        ):
+            if _do_disable and hasattr(self._raw_dit, _ref_name):
                 try:
                     setattr(self._raw_dit, _ref_name, torch.nn.ModuleList([]))
                     self.print_and_status_update(f"Disabled DiT module: {_ref_name}")
@@ -155,6 +162,17 @@ class ZImageDiffSynthModel(BaseModel):
         self.text_encoder = [components["text_encoder"]]
         self.tokenizer = [components["tokenizer"]]
         sampling_dit = components.get("sampling_dit")
+        if sampling_dit is not None:
+            # Apply same refiner disabling as main DiT so structure and LoRA names match.
+            for _ref_name, _do_disable in (
+                ("noise_refiner", self._disable_noise_refiner),
+                ("context_refiner", self._disable_context_refiner),
+            ):
+                if _do_disable and hasattr(sampling_dit, _ref_name):
+                    try:
+                        setattr(sampling_dit, _ref_name, torch.nn.ModuleList([]))
+                    except Exception:
+                        pass
         # Wrap sampling DiT in the same wrapper as main so LoRA module names match
         # (main uses _DiTUnetWrapper → "dit.noise_refiner..."; unwrapped would be "noise_refiner...").
         self._sampling_transformer = _DiTUnetWrapper(sampling_dit) if sampling_dit is not None else None
@@ -431,8 +449,13 @@ class ZImageDiffSynthModel(BaseModel):
         return "zimage_diffsynth"
 
     def get_transformer_block_names(self) -> Optional[List[str]]:
-        # Only main DiT layers; noise_refiner and context_refiner are disabled for VRAM.
-        return ["layers"]
+        # Main DiT layers plus any refiner stacks that were not disabled via model_kwargs.
+        names = ["layers"]
+        if not getattr(self, "_disable_noise_refiner", True):
+            names.append("noise_refiner")
+        if not getattr(self, "_disable_context_refiner", True):
+            names.append("context_refiner")
+        return names
 
     def convert_lora_weights_before_save(self, state_dict):
         return lora_mod.convert_lora_weights_before_save(state_dict)
