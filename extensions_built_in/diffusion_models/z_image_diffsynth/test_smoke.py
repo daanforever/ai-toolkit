@@ -173,6 +173,36 @@ def main():
         traceback.print_exc()
         sys.exit(1)
 
+    # 2e. _DiTUnetWrapper must have .dit so base_model.save_device_state() does not raise
+    #     "'_DiTUnetWrapper' object has no attribute 'dit'" when accessing self.unet.device
+    _log("2e. Unet wrapper has .dit and device state preset (cache_latents) works ...")
+    try:
+        unet = sd.unet
+        assert unet is not None, "sd.unet must be set after load_model"
+        # Explicit check: wrapper used as unet must have .dit (e.g. _DiTUnetWrapper)
+        if hasattr(unet, "dit"):
+            assert getattr(unet, "dit") is not None, "sd.unet.dit must be set (inner DiT)"
+        # This is what fails in get_dataloader_from_datasets -> setup_epoch -> cache_latents_all_latents
+        # -> set_device_state_preset('cache_latents') -> save_device_state() -> self.unet.device
+        _ = unet.device
+        _ = unet.training
+        sd.set_device_state_preset("cache_latents")
+        # Restore so later steps (get_noise_prediction, etc.) still work
+        sd.restore_device_state()
+        _log("2e. OK")
+    except AttributeError as e:
+        if "dit" in str(e):
+            _log(
+                f"2e. FAILED: unet wrapper missing .dit (trainer/dataloader will fail with same error): {e}"
+            )
+            traceback.print_exc()
+            sys.exit(1)
+        raise
+    except Exception as e:
+        _log(f"2e. FAILED: {e}")
+        traceback.print_exc()
+        sys.exit(1)
+
     # Optional: run a second load without quantization (to test unquantized path)
     if os.environ.get("ZIMAGE_DIFFSYNTH_TEST_ALSO_NO_QUANT", "").strip() == "1":
         _log("2b. Optional: load again without quantization ...")

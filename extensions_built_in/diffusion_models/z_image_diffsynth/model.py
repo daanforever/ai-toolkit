@@ -29,20 +29,30 @@ scheduler_config = {
 
 class _DiTUnetWrapper(torch.nn.Module):
     """Wraps ZImageDiT so that .config.patch_size exists for BatchProcessor / timestep scheduling.
-    Forwards all other attributes and calls to the inner DiT."""
+    Forwards all other attributes and calls to the inner DiT. Uses _inner_dit so that .device/.training
+    etc. are always reachable; nn.Module stores submodules in _modules, so we read from there in
+    __getattr__ to avoid 'object has no attribute dit' after quantize."""
 
     def __init__(self, dit):
         super().__init__()
-        self.dit = dit
+        self._inner_dit = dit
         self.config = type("_Config", (), {"patch_size": 2})()
 
     def forward(self, *args, **kwargs):
-        return self.dit(*args, **kwargs)
+        return self._modules["_inner_dit"](*args, **kwargs)
 
     def __getattr__(self, name):
-        if name in ("dit", "config"):
+        if name == "dit":
+            return self._modules["_inner_dit"]
+        if name in ("_inner_dit", "config"):
             return object.__getattribute__(self, name)
-        return getattr(self.dit, name)
+        # base_model.save_device_state() expects unet.device / unet.training; inner DiT may not have .device
+        if name == "device":
+            params = list(self._modules["_inner_dit"].parameters())
+            return next(iter(params)).device if params else torch.device("cpu")
+        if name == "training":
+            return self._modules["_inner_dit"].training
+        return getattr(self._modules["_inner_dit"], name)
 
 
 class ZImageDiffSynthModel(BaseModel):
