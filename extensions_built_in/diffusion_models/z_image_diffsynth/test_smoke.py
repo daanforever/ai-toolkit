@@ -393,6 +393,7 @@ def main():
         # Patch DiffusionTrainer.__init__ so we can exercise the trainer's
         # initialization logic without constructing a full Job / datasets.
         orig_init = DiffusionTrainer.__init__
+        orig_hook = DiffusionTrainer.hook_after_sd_init_before_load
         try:
             def _fake_init(self, process_id, job, config, **kwargs):
                 # Minimal fields used by ZImageDiffSynthTrainer.__init__
@@ -408,7 +409,14 @@ def main():
                     dtype="bf16",
                 )
 
+            def _noop_hook(self):
+                # In this smoke test we only care about the ZImageDiffSynthTrainer
+                # part of the hook; the base hook relies on a full trainer setup,
+                # which our fake init does not provide.
+                return None
+
             DiffusionTrainer.__init__ = _fake_init  # type: ignore[assignment]
+            DiffusionTrainer.hook_after_sd_init_before_load = _noop_hook  # type: ignore[assignment]
 
             trainer = ZImageDiffSynthTrainer(0, None, {})
             tc = trainer.train_config
@@ -429,6 +437,7 @@ def main():
             assert getattr(trainer.sd, "is_flow_matching", False) is True, "sd.is_flow_matching must be True after hook"
         finally:
             DiffusionTrainer.__init__ = orig_init  # type: ignore[assignment]
+            DiffusionTrainer.hook_after_sd_init_before_load = orig_hook  # type: ignore[assignment]
         _log("7. OK")
     except Exception:
         _log("   FAILED in step 7 (ZImageDiffSynthTrainer wiring):")
