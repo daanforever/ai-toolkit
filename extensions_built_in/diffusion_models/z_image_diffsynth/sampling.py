@@ -92,13 +92,28 @@ class ZImageDiffSynthPipelineWrapper:
             batch = len(prompt_embeds)
         ch = 16
         h, w = height // 8, width // 8
+        # Ensure that the random latents and the RNG generator share the same
+        # device. Torch requires that a CUDA generator is only used when the
+        # tensor is also allocated on CUDA; otherwise it raises
+        # "Expected a 'cuda' device type for generator but found 'cpu'".
         if latents is None:
+            rand_device = device
+            gen_device = None
+            if generator is not None and hasattr(generator, "device"):
+                try:
+                    gen_device = torch.device(generator.device)
+                except Exception:
+                    gen_device = None
+            if gen_device is not None and gen_device.type != device.type:
+                rand_device = gen_device
             latents = torch.randn(
                 (batch, ch, h, w),
-                device=device,
+                device=rand_device,
                 dtype=dtype,
                 generator=generator,
             )
+            if rand_device != device:
+                latents = latents.to(device=device, dtype=dtype)
         else:
             latents = latents.to(device=device, dtype=dtype)
 

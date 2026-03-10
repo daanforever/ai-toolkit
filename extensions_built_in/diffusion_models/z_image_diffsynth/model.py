@@ -403,12 +403,19 @@ class ZImageDiffSynthModel(BaseModel):
                 self._sampling_transformer.to(self.device_torch)
                 return super().generate_images(image_configs, sampler)
             finally:
+                # Restore main network reference before device moves so that
+                # _move_main_network(device_torch) moves the real main network
+                # (LoRA) back to GPU, not the sampling network.
+                if saved_network is not None:
+                    self.network = saved_network
                 self._sampling_transformer.to("cpu")
                 self._move_sampling_network("cpu")
                 if self._raw_dit is not None:
                     self._raw_dit.to(self.device_torch)
                 self._move_main_network(self.device_torch)
         finally:
+            # Restore when we swapped but returned early (use_sampling_transformer
+            # was False), so the inner finally never ran.
             if saved_network is not None:
                 self.network = saved_network
 
