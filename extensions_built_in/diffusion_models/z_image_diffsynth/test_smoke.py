@@ -375,6 +375,34 @@ def main():
         sys.exit(1)
     _log("4b. OK")
 
+    _log("4c. get_noise_prediction with 3-channel input should fail clearly ...")
+    try:
+        # Construct a fake 3-channel tensor that mimics RGB pixel input.
+        # For Z-Image DiffSynth, the DiT and its VAE expect latent-space
+        # tensors with in_channels (e.g. 16). Passing 3 channels should now
+        # trigger our explicit channel-mismatch guard instead of a Quanto
+        # matmul shape error deep inside the DiT.
+        B, C_bad, H, W = 1, 3, 64, 64
+        latent_rgb = torch.randn(B, C_bad, H, W, device=device, dtype=sd.torch_dtype)
+        try:
+            with torch.no_grad():
+                _ = sd.get_noise_prediction(latent_rgb, timestep, embeds)
+            _log("   4c. FAILED: expected channel-mismatch error but get_noise_prediction succeeded")
+            sys.exit(1)
+        except RuntimeError as e:
+            msg = str(e)
+            # The exact wording is implementation-defined, but it must mention
+            # channels / latents so users are not left with a raw matmul error.
+            if ("channels" in msg and "latent" in msg) or "expected latents with" in msg:
+                _log("4c. OK (3-channel input produces clear channel-mismatch error)")
+            else:
+                _log(f"   4c. FAILED: RuntimeError message not clear enough: {msg!r}")
+                sys.exit(1)
+    except Exception:
+        _log("   FAILED in step 4c (3-channel get_noise_prediction guard):")
+        traceback.print_exc()
+        sys.exit(1)
+
     _log("5. get_generation_pipeline ...")
     try:
         pipeline = sd.get_generation_pipeline()

@@ -150,6 +150,28 @@ class ZImageDiffSynthModel(BaseModel):
         text_embeddings: PromptEmbeds,
         **kwargs,
     ):
+        # Z-Image DiffSynth DiT is trained on latent-space tensors with a fixed
+        # channel count (e.g. 16). If we accidentally receive 3‑channel BCHW
+        # tensors here (RGB-like), they will eventually hit dit.all_x_embedder
+        # with the wrong input dimension and cause an opaque Quanto matmul error.
+        #
+        # Guard early and surface a clear message that points to likely causes:
+        # - cached latents created by another model / latent_space_version
+        # - RGB tensors cached as "latents" by external tools.
+        if isinstance(latent_model_input, torch.Tensor) and latent_model_input.dim() == 4:
+            in_channels = getattr(self._raw_dit, "in_channels", None)
+            if in_channels is not None:
+                c = latent_model_input.shape[1]
+                if c != in_channels:
+                    raise RuntimeError(
+                        f"Z-Image DiffSynth DiT expected latents with {in_channels} channels "
+                        f"(B x {in_channels} x H x W), but got B x {c} x H x W instead. "
+                        "This usually means your dataset latent cache was created with a different "
+                        "model/latent_space_version or that RGB tensors were saved as latents. "
+                        "Please disable cache_latents/cache_latents_to_disk for this dataset or "
+                        "regenerate latents using the current zimage_diffsynth model."
+                    )
+
         use_gradient_checkpointing = getattr(
             self, "gradient_checkpointing", False
         )

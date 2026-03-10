@@ -29,6 +29,25 @@ def run_forward(
 
     # model_fn_z_image_turbo expects: latents (BCHW or list), timestep 0..1000, prompt_embeds (list or tensor)
     # It unwraps list to single; timestep is 1000 - timestep inside. We pass timestep in 0..1000.
+    #
+    # Before calling into the DiffSynth code, enforce that the incoming latents
+    # have the channel count the DiT was configured for. If, for example, 3‑channel
+    # RGB tensors reach this point instead of 16‑channel VAE latents, patchify
+    # will produce tokens of size 12 and hit dit.all_x_embedder[\"2-1\"] with a
+    # 64x3840 weight matrix, causing a confusing Quanto matmul error. Failing
+    # here with a clear message makes the problem debuggable.
+    if isinstance(latents, torch.Tensor) and latents.dim() == 4:
+        expected_c = getattr(dit, "in_channels", None)
+        if expected_c is not None:
+            _, c, _, _ = latents.shape
+            if c != expected_c:
+                raise RuntimeError(
+                    f\"Z-Image DiffSynth DiT expected latents with {expected_c} channels (B x {expected_c} x H x W), "
+                    f\"but got B x {c} x H x W. This typically indicates that cached latents were generated "
+                    \"with a different model/latent_space_version or that non-latent RGB tensors were cached. "
+                    \"Regenerate the dataset latents for this model or disable latent caching for this run.\"
+                )
+
     out = model_fn_z_image_turbo(
         dit,
         latents=latents,
