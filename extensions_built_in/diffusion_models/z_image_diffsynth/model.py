@@ -81,6 +81,9 @@ class ZImageDiffSynthModel(BaseModel):
         self._raw_dit = None
         self._sampling_transformer = None
         self._sampling_network = None
+        # Enable gradient checkpointing by default for DiffSynth DiT to
+        # reduce peak VRAM usage during training forwards.
+        self.gradient_checkpointing = True
 
     @staticmethod
     def get_train_scheduler(use_diffsynth_loop=True):
@@ -137,6 +140,9 @@ class ZImageDiffSynthModel(BaseModel):
                 base_model=self,
             )
 
+        # Use the full DiffSynth DiT including noise_refiner / context_refiner
+        # so that VRAM usage matches the original architecture; this allows us
+        # to measure the true memory footprint of the complete model.
         self._raw_dit = components["dit"]
         self.model = _DiTUnetWrapper(self._raw_dit)
         self.vae = components["vae_wrapper"]
@@ -419,6 +425,9 @@ class ZImageDiffSynthModel(BaseModel):
         return "zimage_diffsynth"
 
     def get_transformer_block_names(self) -> Optional[List[str]]:
+        # Expose all main DiT stacks so that LoRA / tooling can attach to
+        # layers, noise_refiner and context_refiner, matching the original
+        # DiffSynth architecture.
         return ["layers", "noise_refiner", "context_refiner"]
 
     def convert_lora_weights_before_save(self, state_dict):

@@ -44,6 +44,27 @@ TOOLKIT_ROOT = _REPO_ROOT
 if TOOLKIT_ROOT not in sys.path:
     sys.path.insert(0, TOOLKIT_ROOT)
 
+# Enable toolkit debug / memory_debug output by default so that this smoke test
+# always prints CUDA / RAM usage for key steps (load_model, get_noise_prediction,
+# etc.). An optional environment variable allows overriding the default.
+try:
+    from types import SimpleNamespace
+    from toolkit.util.debug import set_debug_config
+
+    _debug_flag = os.environ.get("ZIMAGE_DIFFSYNTH_DEBUG", "").strip()
+    if _debug_flag:
+        # Treat any non-empty value other than an explicit "0"/"false" as True.
+        _enabled = _debug_flag not in ("0", "false", "False")
+    else:
+        # Default: enable debug so memory_debug contexts in the model print
+        # VRAM/RAM stats during this smoke test.
+        _enabled = True
+    set_debug_config(SimpleNamespace(debug=_enabled))
+except Exception:
+    # Debug configuration is optional; if toolkit.util.debug is unavailable or
+    # misconfigured, continue without failing the smoke test.
+    pass
+
 
 def _log(msg):
     """Print and flush so output appears immediately (helps when script fails mid-run)."""
