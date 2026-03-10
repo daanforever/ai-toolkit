@@ -92,6 +92,22 @@ class ZImageDiffSynthModel(BaseModel):
     def get_bucket_divisibility(self):
         return 16 * 2
 
+    def _move_main_network(self, device):
+        if not hasattr(self, "network") or self.network is None:
+            return
+        try:
+            self.network.to(device)
+        except Exception:
+            pass
+
+    def _move_sampling_network(self, device):
+        if not hasattr(self, "_sampling_network") or self._sampling_network is None:
+            return
+        try:
+            self._sampling_network.to(device)
+        except Exception:
+            pass
+
     def load_model(self):
         dtype = self.torch_dtype
         device = self.device_torch
@@ -134,6 +150,8 @@ class ZImageDiffSynthModel(BaseModel):
         use_diffsynth = getattr(self.model_config, "use_diffsynth_training_loop", True)
         self.noise_scheduler = ZImageDiffSynthModel.get_train_scheduler(use_diffsynth_loop=use_diffsynth)
         self.pipeline = None
+        self._move_main_network("cpu")
+        self._move_sampling_network("cpu")
         self.print_and_status_update("Model loaded")
 
     def get_model_to_train(self):
@@ -186,6 +204,8 @@ class ZImageDiffSynthModel(BaseModel):
                         "Please disable cache_latents/cache_latents_to_disk for this dataset or "
                         "regenerate latents using the current zimage_diffsynth model."
                     )
+
+        self._move_main_network(target_device)
 
         use_gradient_checkpointing = getattr(
             self, "gradient_checkpointing", False
@@ -304,12 +324,16 @@ class ZImageDiffSynthModel(BaseModel):
         try:
             if self._raw_dit is not None:
                 self._raw_dit.to("cpu")
+            self._move_main_network("cpu")
+            self._move_sampling_network(self.device_torch)
             self._sampling_transformer.to(self.device_torch)
             return _run_generation()
         finally:
             self._sampling_transformer.to("cpu")
+            self._move_sampling_network("cpu")
             if self._raw_dit is not None:
                 self._raw_dit.to(self.device_torch)
+            self._move_main_network(self.device_torch)
 
     def generate_images(
         self,
@@ -341,12 +365,16 @@ class ZImageDiffSynthModel(BaseModel):
             try:
                 if self._raw_dit is not None:
                     self._raw_dit.to("cpu")
+                self._move_main_network("cpu")
+                self._move_sampling_network(self.device_torch)
                 self._sampling_transformer.to(self.device_torch)
                 return super().generate_images(image_configs, sampler)
             finally:
                 self._sampling_transformer.to("cpu")
+                self._move_sampling_network("cpu")
                 if self._raw_dit is not None:
                     self._raw_dit.to(self.device_torch)
+                self._move_main_network(self.device_torch)
         finally:
             if saved_network is not None:
                 self.network = saved_network
