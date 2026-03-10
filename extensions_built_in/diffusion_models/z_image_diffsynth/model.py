@@ -133,6 +133,41 @@ class ZImageDiffSynthModel(BaseModel):
             torch.cuda.empty_cache()
             gc.collect()
 
+    def _log_device_state(self, label: str):
+        """Log device of key modules (for debug). Only runs when config.debug is enabled."""
+        if not is_debug_enabled():
+            return
+
+        def _device_str(obj):
+            if obj is None:
+                return "None"
+            try:
+                p = next(obj.parameters(), None)
+                return str(p.device) if p is not None else "no_params"
+            except Exception:
+                try:
+                    return str(getattr(obj, "device", "?"))
+                except Exception:
+                    return "?"
+
+        te = self.text_encoder
+        if isinstance(te, list):
+            te_dev = ",".join(_device_str(e) for e in (te or []))
+        else:
+            te_dev = _device_str(te)
+
+        parts = [
+            f"model={_device_str(self.model)}",
+            f"network={_device_str(getattr(self, "network", None))}",
+            f"sampling_transformer={_device_str(getattr(self, "_sampling_transformer", None))}",
+            f"sampling_network={_device_str(getattr(self, "_sampling_network", None))}",
+            f"vae={_device_str(self.vae)}",
+            f"text_encoder={te_dev}",
+        ]
+        self.print_and_status_update(
+            f"\n[DEBUG zimage_diffsynth device state] {label}: " + ", ".join(parts)
+        )
+
     def _move_sampling(self, device):
         """Move sampling components (network + transformer) to device."""
         target = device if isinstance(device, torch.device) else torch.device(device)
@@ -496,10 +531,23 @@ class ZImageDiffSynthModel(BaseModel):
                         )
                     self._sampling_in_batch_generate = False
                     # Restore after batch: main back on GPU, sampling back on CPU (no memory spike).
-                    self._move_sampling("cpu")
-                    self.model.to(self.device_torch, dtype=self.torch_dtype)
-                    self._move_main_network(self.device_torch)
-                    self._flush_cuda()
+                    if is_debug_enabled():
+                        with memory_debug(
+                            self.print_and_status_update,
+                            "zimage_diffsynth after batch restore",
+                        ):
+                            self._move_sampling("cpu")
+                            self.model.to(self.device_torch, dtype=self.torch_dtype)
+                            self._move_main_network(self.device_torch)
+                            self._flush_cuda()
+                    else:
+                        self._move_sampling("cpu")
+                        self.model.to(self.device_torch, dtype=self.torch_dtype)
+                        self._move_main_network(self.device_torch)
+                        self._flush_cuda()
+                    if isinstance(self.device_torch, torch.device) and self.device_torch.type == "cuda":
+                        torch.cuda.synchronize()
+                    self._log_device_state("after batch restore")
         finally:
             if saved_network is not None:
                 self.network = saved_network
