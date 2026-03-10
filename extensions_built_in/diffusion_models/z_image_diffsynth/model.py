@@ -267,6 +267,13 @@ class ZImageDiffSynthModel(BaseModel):
                     pass
         self.model = _DiTUnetWrapper(self._raw_dit)
         self.vae = components["vae_wrapper"]
+        # For zimage_diffsynth VAE is needed on GPU during both training and sampling.
+        # Move it to the target VAE device immediately so save_device_state() records
+        # GPU as the baseline device and restore_device_state() keeps it there.
+        try:
+            self.vae.to(self.vae_device_torch)
+        except Exception:
+            pass
         self.text_encoder = [components["text_encoder"]]
         self.tokenizer = [components["tokenizer"]]
         self._sampling_is_diffusers = components.get("sampling_is_diffusers", False)
