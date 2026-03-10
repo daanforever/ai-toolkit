@@ -62,6 +62,13 @@ class _DiTUnetWrapper(torch.nn.Module):
 
 
 class ZImageDiffSynthModel(BaseModel):
+    """Z-Image DiffSynth: flow-matching DiT with optional diffusers-format sampling transformer.
+
+    Config sampling params (from SampleConfig / GenerateImageConfig) are used as follows:
+    - sample_steps → gen_config.num_inference_steps (passed to pipeline)
+    - guidance_scale → gen_config.guidance_scale (passed to pipeline)
+    - sampler: use \"flowmatch\"; the pipeline always uses flow-match Euler (no scheduler swap).
+    """
     arch = "zimage_diffsynth"
     is_flow_matching = True
     is_transformer = True
@@ -192,11 +199,10 @@ class ZImageDiffSynthModel(BaseModel):
                         setattr(sampling_dit, _ref_name, torch.nn.ModuleList([]))
                     except Exception:
                         pass
-        # When sampling is diffusers ZImageTransformer2DModel, use as-is. Otherwise wrap in _DiTUnetWrapper
-        # so LoRA module names match the main DiT.
-        if sampling_dit is not None and self._sampling_is_diffusers:
-            self._sampling_transformer = sampling_dit
-        elif sampling_dit is not None:
+        # Always wrap sampling DiT in _DiTUnetWrapper so LoRA module names match the main model
+        # (main uses _DiTUnetWrapper → lora_unet__inner_dit_*). For diffusers sampling we unwrap
+        # when building ZImagePipeline in get_generation_pipeline.
+        if sampling_dit is not None:
             self._sampling_transformer = _DiTUnetWrapper(sampling_dit)
         else:
             self._sampling_transformer = None

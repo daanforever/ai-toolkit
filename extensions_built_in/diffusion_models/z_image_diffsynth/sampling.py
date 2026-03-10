@@ -190,12 +190,15 @@ def get_generation_pipeline(sd_model):
         if te is None:
             from toolkit.unloader import FakeTextEncoder
             te = FakeTextEncoder(device=sd_model.device_torch, dtype=sd_model.torch_dtype)
+        # Sampling transformer is wrapped in _DiTUnetWrapper for LoRA name match; ZImagePipeline needs raw transformer
+        tr = sd_model._sampling_transformer
+        tr = getattr(tr, "_inner_dit", getattr(tr, "dit", tr))
         return ZImagePipeline(
             scheduler=scheduler,
             text_encoder=unwrap_model(te),
             tokenizer=tok,
             vae=unwrap_model(vae),
-            transformer=unwrap_model(sd_model._sampling_transformer),
+            transformer=unwrap_model(tr),
         )
 
     # DiffSynth path: ZImageDiT + model_fn_z_image_turbo
