@@ -109,6 +109,8 @@ class TimestepSampler:
         max_noise_steps: int,
         num_train_timesteps: int,
     ) -> torch.Tensor:
+        # FlowMatch (e.g. CustomFlowMatchEulerDiscreteScheduler) uses timesteps that run from high noise to low
+        # noise in reverse index order, so smaller indices here can correspond to noisier states compared to DDPM.
         ntt = self.train_config.num_train_timesteps
         orig_timesteps = torch.rand((batch_size,), device=latents.device)
 

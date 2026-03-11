@@ -16,9 +16,12 @@ class TimestepDistributionLogger:
     Used to verify timestep sampling behavior during training.
     """
 
-    def __init__(self, train_config: Any, logging_config: Any) -> None:
+    def __init__(self, train_config: Any, logging_config: Any, sd: Optional[Any] = None) -> None:
         self.train_config = train_config
         self.logging_config = logging_config
+        # Optional Stable Diffusion model reference; when provided, we can
+        # introspect the actual noise_scheduler instance for debug printing.
+        self.sd = sd
         self._collected_indices: List[Any] = []
         self._collected_timesteps: List[float] = []
 
@@ -94,6 +97,20 @@ class TimestepDistributionLogger:
         print_acc(f"Config:")
         print_acc(f"  content_or_style: {content_or_style}")
         print_acc(f"  noise_scheduler: {self.train_config.noise_scheduler}")
+        # When sd is available, also show the concrete noise scheduler type
+        # used by the model (e.g. DiffSynthZImageSchedulerAdapter), since it
+        # can differ from the string stored in train_config.noise_scheduler.
+        scheduler_type: Optional[str] = None
+        sd = getattr(self, "sd", None)
+        if sd is not None:
+            noise_scheduler = getattr(sd, "noise_scheduler", None)
+            if noise_scheduler is not None:
+                try:
+                    scheduler_type = type(noise_scheduler).__name__
+                except Exception:
+                    scheduler_type = str(type(noise_scheduler))
+        if scheduler_type is not None:
+            print_acc(f"  noise_scheduler_obj: {scheduler_type}")
         print_acc(f"  timestep_type: {self.train_config.timestep_type}")
         print_acc(f"  num_train_timesteps: {self.train_config.num_train_timesteps}")
         print_acc(f"  min_denoising_steps: {min_noise_steps}")

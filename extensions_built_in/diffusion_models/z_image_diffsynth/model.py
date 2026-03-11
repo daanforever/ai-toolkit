@@ -107,25 +107,26 @@ class ZImageDiffSynthModel(BaseModel):
         return 16 * 2
 
     def _move_main_network(self, device):
-        if not hasattr(self, "network") or self.network is None:
-            if is_debug_enabled():
-                self.print_and_status_update(
-                    f"\n[zimage_diffsynth] main network is None; skipping move to {device}"
-                )
-            return
-        target = device if isinstance(device, torch.device) else torch.device(device)
-        params = list(self.network.parameters())
-        current = next(iter(params)).device if params else torch.device("cpu")
-        if current == target:
-            return
-        try:
-            self.network.to(device)
-            if is_debug_enabled():
-                self.print_and_status_update(
-                    f"\n[zimage_diffsynth] moving main network to {device}"
-                )
-        except Exception:
-            pass
+        # if not hasattr(self, "network") or self.network is None:
+        #     if is_debug_enabled():
+        #         self.print_and_status_update(
+        #             f"\n[zimage_diffsynth] main network is None; skipping move to {device}"
+        #         )
+        #     return
+        # target = device if isinstance(device, torch.device) else torch.device(device)
+        # params = list(self.network.parameters())
+        # current = next(iter(params)).device if params else torch.device("cpu")
+        # if current == target:
+        #     return
+        # try:
+        #     self.network.to(device)
+        #     if is_debug_enabled():
+        #         self.print_and_status_update(
+        #             f"\n[zimage_diffsynth] moving main network to {device}"
+        #         )
+        # except Exception:
+        #     pass
+        pass
 
     def _flush_cuda(self):
         """Release CUDA cache and run GC so VRAM is actually freed after model moves."""

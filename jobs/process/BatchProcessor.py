@@ -323,7 +323,9 @@ class GeneralBatchProcessor:
             if is_debug_enabled() and (self.p.logging_config.log_every or 0) > 0:
                 if self._timestep_debug_logger is None:
                     self._timestep_debug_logger = TimestepDistributionLogger(
-                        self.p.train_config, self.p.logging_config
+                        self.p.train_config,
+                        self.p.logging_config,
+                        sd=self.p.sd,
                     )
                 self._timestep_debug_logger.collect(
                     timestep_indices, timesteps, content_or_style,
