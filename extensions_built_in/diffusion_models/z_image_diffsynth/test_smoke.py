@@ -530,6 +530,8 @@ def main():
         try:
             def _fake_init(self, process_id, job, config, **kwargs):
                 # Minimal fields used by ZImageDiffSynthTrainer.__init__
+                # and the smoke test itself.
+                self.config = config
                 self.train_config = SimpleNamespace(
                     noise_scheduler="placeholder",
                     num_train_timesteps=None,
@@ -551,19 +553,46 @@ def main():
             DiffusionTrainer.__init__ = _fake_init  # type: ignore[assignment]
             DiffusionTrainer.hook_after_sd_init_before_load = _noop_hook  # type: ignore[assignment]
 
+            # 7a. Default behaviour (no flag or flag True): must hard-wire DiffSynth config.
             trainer = ZImageDiffSynthTrainer(0, None, {})
             tc = trainer.train_config
             # After trainer init, config must be hard-wired for DiffSynth Z-Image.
             assert tc.noise_scheduler is None, "trainer must leave noise_scheduler=None to use model.get_train_scheduler()"
             assert tc.num_train_timesteps == 1000, "num_train_timesteps must default to 1000"
-            assert tc.loss_type == "mse", "loss_type must be mse"
-            assert tc.timestep_type == "linear", "timestep_type must be linear"
-            assert tc.linear_timesteps is False, "linear_timesteps must be False"
-            assert tc.linear_timesteps2 is False, "linear_timesteps2 must be False"
-            assert tc.snr_gamma is None, "snr_gamma must be disabled (None)"
-            assert tc.min_snr_gamma is None, "min_snr_gamma must be disabled (None)"
+            assert tc.loss_type == "mse", "loss_type must be mse when use_diffsynth_training_loop is True/default"
+            assert tc.timestep_type == "linear", "timestep_type must be linear when use_diffsynth_training_loop is True/default"
+            assert tc.linear_timesteps is False, "linear_timesteps must be False when use_diffsynth_training_loop is True/default"
+            assert tc.linear_timesteps2 is False, "linear_timesteps2 must be False when use_diffsynth_training_loop is True/default"
+            assert tc.snr_gamma is None, "snr_gamma must be disabled (None) when use_diffsynth_training_loop is True/default"
+            assert tc.min_snr_gamma is None, "min_snr_gamma must be disabled (None) when use_diffsynth_training_loop is True/default"
 
-            # Now exercise the hook that marks sd as flow-matching once it exists.
+            # 7b. When use_diffsynth_training_loop is explicitly False in model_kwargs,
+            # trainer must *not* override timestep_type / loss / SNR settings.
+            cfg_with_flag = {
+                "process": [
+                    {
+                        "model": {
+                            "model_kwargs": {
+                                "use_diffsynth_training_loop": False,
+                            }
+                        }
+                    }
+                ]
+            }
+            trainer2 = ZImageDiffSynthTrainer(0, None, cfg_with_flag)
+            tc2 = trainer2.train_config
+            assert tc2.noise_scheduler is None, "trainer must still leave noise_scheduler=None when use_diffsynth_training_loop is False"
+            assert tc2.num_train_timesteps == 1000, "num_train_timesteps must still default to 1000 when use_diffsynth_training_loop is False"
+            # From _fake_init defaults: loss_type/timestep_type remain None, linear_timesteps* and SNR flags unchanged.
+            assert tc2.loss_type is None, "loss_type must not be forced when use_diffsynth_training_loop is False"
+            assert tc2.timestep_type is None, "timestep_type must not be forced when use_diffsynth_training_loop is False"
+            assert tc2.linear_timesteps is True, "linear_timesteps must not be overridden when use_diffsynth_training_loop is False"
+            assert tc2.linear_timesteps2 is True, "linear_timesteps2 must not be overridden when use_diffsynth_training_loop is False"
+            assert tc2.snr_gamma == 1.0, "snr_gamma must not be overridden when use_diffsynth_training_loop is False"
+            assert tc2.min_snr_gamma == 1.0, "min_snr_gamma must not be overridden when use_diffsynth_training_loop is False"
+
+            # Now exercise the hook that marks sd as flow-matching once it exists
+            # (behaviour is independent of the flag).
             fake_sd = SimpleNamespace(is_flow_matching=False)
             trainer.sd = fake_sd
             trainer.hook_after_sd_init_before_load()

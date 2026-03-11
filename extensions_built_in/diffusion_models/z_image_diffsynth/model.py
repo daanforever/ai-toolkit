@@ -303,7 +303,17 @@ class ZImageDiffSynthModel(BaseModel):
         else:
             self._sampling_transformer = None
 
-        use_diffsynth = getattr(self.model_config, "use_diffsynth_training_loop", True)
+        # Decide whether to use the original DiffSynth training loop behaviour.
+        # Flag lives in model_kwargs for this model; default is True so that
+        # existing configs (without the flag) keep DiffSynth-compatible behaviour.
+        use_diffsynth = True
+        try:
+            model_kwargs = getattr(self.model_config, "model_kwargs", {}) or {}
+            use_diffsynth = model_kwargs.get("use_diffsynth_training_loop", True)
+        except Exception:
+            # On any unexpected shape, keep default True.
+            use_diffsynth = True
+
         self.noise_scheduler = ZImageDiffSynthModel.get_train_scheduler(use_diffsynth_loop=use_diffsynth)
         self.pipeline = None
         self._move_main_network("cpu")

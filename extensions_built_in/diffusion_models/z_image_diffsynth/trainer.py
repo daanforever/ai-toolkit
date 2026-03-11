@@ -21,6 +21,26 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
 
         tc = self.train_config
 
+        # Decide whether to use the original DiffSynth training loop behaviour.
+        # Default is True for backwards compatibility; when model_kwargs contains
+        # use_diffsynth_training_loop: false we fall back to the generic toolkit
+        # behaviour (respect timestep_type, content_or_style, SNR settings, etc.).
+        use_diffsynth_training_loop = True
+        cfg = getattr(self, "config", None)
+        if isinstance(cfg, dict):
+            try:
+                processes = cfg.get("process") or cfg.get("processes") or []
+                if processes:
+                    model_cfg = processes[0].get("model", {}) or {}
+                    model_kwargs = model_cfg.get("model_kwargs", {}) or {}
+                    use_diffsynth_training_loop = model_kwargs.get(
+                        "use_diffsynth_training_loop", True
+                    )
+            except Exception:
+                # On any unexpected shape, keep the default (True) so existing
+                # configs and smoke tests remain unchanged.
+                use_diffsynth_training_loop = True
+
         # Always train Z-Image in flow-matching mode with 1000 train timesteps.
         # We let ZImageDiffSynthModel.get_train_scheduler() provide the actual
         # DiffSynth-compatible scheduler via BaseSDTrainProcess when
@@ -28,17 +48,18 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
         tc.noise_scheduler = None
         tc.num_train_timesteps = getattr(tc, "num_train_timesteps", 1000) or 1000
 
-        # Use MSE loss on rectified-flow target (noise - latents) as in DiffSynth.
-        tc.loss_type = "mse"
+        if use_diffsynth_training_loop:
+            # Use MSE loss on rectified-flow target (noise - latents) as in DiffSynth.
+            tc.loss_type = "mse"
 
-        # Let our FlowMatch scheduler control weighting; keep timesteps linear.
-        tc.timestep_type = "linear"
-        tc.linear_timesteps = False
-        tc.linear_timesteps2 = False
+            # Let our FlowMatch scheduler control weighting; keep timesteps linear.
+            tc.timestep_type = "linear"
+            tc.linear_timesteps = False
+            tc.linear_timesteps2 = False
 
-        # Disable SNR re-weighting — DiffSynth already applies its own weighting.
-        tc.snr_gamma = None
-        tc.min_snr_gamma = None
+            # Disable SNR re-weighting — DiffSynth already applies its own weighting.
+            tc.snr_gamma = None
+            tc.min_snr_gamma = None
 
     def hook_after_sd_init_before_load(self):
         """
