@@ -262,15 +262,8 @@ class Adafactor(torch.optim.Optimizer):
           Returns group["lr"]. If scale_parameter=True, multiplies by max(eps1, param_rms).
 
         Adaptive mode (relative_step=True):
-          new_lr = (base_lr + base_lr * weight) * protection, then clamped to [min_lr, base_lr].
-          - weight: max(eps0, (group_rms_max - param_rms) / (group_rms_max + eps0)). In [eps0, 1].
-            Smaller params (vs group max) get weight closer to 1; largest param gets weight eps0.
-          - protection: min(1, param_rms / (grad_rms + eps0)). Limits step size relative to param
-            magnitude; when param_rms ≈ 0 (e.g. LoRA init), protection ≈ 0 and suppresses LR.
 
         Warmup (warmup_init=True, requires relative_step=True):
-          Overrides new_lr with prev + update_rms + base_lr*eps1 + gap*eps1, where
-          target = (base_lr - min_lr) / 2 and gap = target - prev. Warmup is disabled when new_lr > target.
 
         Returns:
             float: learning rate for this parameter
@@ -294,18 +287,17 @@ class Adafactor(torch.optim.Optimizer):
             group_rms_max = param_group.get("group_rms_max", torch.tensor(eps1)).item()  # Group-level max parameter RMS
             update_rms    = param_state.get("update_rms", torch.tensor(0.0)).item()      # Previous update RMS
 
-            # Smaller params (vs group max) get weight closer to 1
-            # largest param gets weight ≈ eps0
-            # LR = base_lr * (1 + weight) ∈ [base_lr, 2*base_lr] to favor small-scale params (e.g. LoRA).
-            weight = max(eps0, (group_rms_max - param_rms) / (group_rms_max + eps0))
-            new_lr = base_lr * (1 + weight)
+            # Smaller params (vs group max) gets more learning rate
+            # largest param gets base learning rate
+            ratio = max(eps0, (group_rms_max - param_rms) / (group_rms_max + eps0))
+            new_lr = base_lr * (1 + min_lr * ratio)
 
         if param_group.get("warmup_init", False):
-            target = (base_lr - min_lr) / 2
+            target = base_lr * 0.8
             prev = param_state.get("lr_previous", 0.0)
             gap = target - prev
             new_lr = prev + base_lr * eps1 + gap * eps1
-            new_lr = max(min_lr, min(new_lr, base_lr))
+            new_lr = max(base_lr * 0.1, min(new_lr, base_lr * 0.8))
 
             if new_lr > target:
                 param_group["warmup_init"] = False
