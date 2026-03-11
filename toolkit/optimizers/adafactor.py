@@ -275,6 +275,12 @@ class Adafactor(torch.optim.Optimizer):
         eps1       = param_group["eps"][1]          # Parameter scale regularization constant
         param_rms  = param_state["RMS"].item()      # Current parameter RMS magnitude
 
+        # Track base_lr changes and activate warmup when change > 10%
+        base_lr_prev = param_group.get("base_lr_previous", base_lr)
+        param_group["base_lr_previous"] = base_lr
+        if base_lr_prev > 0 and abs(base_lr - base_lr_prev) / base_lr_prev > 0.1:
+            param_group["warmup_init"] = True
+
         if not param_group["relative_step"]:
             # Manual LR mode: use fixed learning rate from config
             new_lr = base_lr
@@ -296,12 +302,19 @@ class Adafactor(torch.optim.Optimizer):
             target = base_lr * 0.8
             prev = param_state.get("lr_previous", 0.0)
             gap = target - prev
-            new_lr = prev + base_lr * eps1 + gap * eps1
-            new_lr = max(base_lr * 0.1, min(new_lr, base_lr * 0.8))
 
-            if new_lr > target:
-                param_group["warmup_init"] = False
-            
+            # Bidirectional warmup: move lr toward target (up or down)
+            new_lr = prev + base_lr * eps1 + gap * eps1
+
+            if target > prev:  # Increasing
+                new_lr = max(base_lr * 0.1, min(new_lr, base_lr * 0.8))
+                if new_lr >= target * 0.99:
+                    param_group["warmup_init"] = False
+            else:  # Decreasing
+                new_lr = max(target, min(new_lr, prev))
+                if new_lr <= target * 1.01:
+                    param_group["warmup_init"] = False
+
         param_state["lr_previous"] = new_lr
         return new_lr
 
