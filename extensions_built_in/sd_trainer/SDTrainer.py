@@ -936,6 +936,15 @@ class SDTrainer(BaseSDTrainProcess):
             loss = loss.mean([1, 2, 3, 4])
         else:
             loss = loss.mean([1, 2, 3])
+
+        # Log files with high loss for debugging
+        if is_debug_enabled() and batch.file_items is not None:
+            for i, file_item in enumerate(batch.file_items):
+                if i < loss.shape[0]:
+                    item_loss = loss[i].item()
+                    if item_loss > 1.0:
+                        print(f"\n[High Loss] Step {self.step_num}: {file_item.path} loss={item_loss:.4f}")
+
         # apply loss multiplier before prior loss
         # multiply by our mask
         try:
