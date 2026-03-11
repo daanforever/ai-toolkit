@@ -49,6 +49,7 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
         tc.num_train_timesteps = getattr(tc, "num_train_timesteps", 1000) or 1000
 
         if use_diffsynth_training_loop:
+            self.print("ZImage DiffSynth: using DiffSynth training loop (linear timesteps, MSE, no SNR reweighting).")
             # Use MSE loss on rectified-flow target (noise - latents) as in DiffSynth.
             tc.loss_type = "mse"
 
@@ -60,6 +61,8 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
             # Disable SNR re-weighting — DiffSynth already applies its own weighting.
             tc.snr_gamma = None
             tc.min_snr_gamma = None
+        else:
+            self.print("ZImage DiffSynth: not using DiffSynth training loop (respecting train_config: timestep_type, content_or_style, SNR).")
 
     def hook_after_sd_init_before_load(self):
         """
