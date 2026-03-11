@@ -34,7 +34,7 @@ export async function PATCH(
 
   const lr = body.lr;
   if (lr !== undefined) {
-    if (typeof lr !== 'number' || !Number.isFinite(lr) || lr <= 0) {
+    if (typeof lr !== 'number' || !Number.isFinite(lr)) {
       return NextResponse.json(
         { error: 'lr must be a positive number' },
         { status: 400 }
@@ -45,7 +45,7 @@ export async function PATCH(
 
   const minLr = body.min_lr;
   if (minLr !== undefined) {
-    if (typeof minLr !== 'number' || !Number.isFinite(minLr) || minLr <= 0) {
+    if (typeof minLr !== 'number' || !Number.isFinite(minLr)) {
       return NextResponse.json(
         { error: 'min_lr must be a positive number' },
         { status: 400 }
@@ -67,7 +67,7 @@ export async function PATCH(
 
   const gaussianStd = body.gaussian_std;
   if (gaussianStd !== undefined) {
-    if (typeof gaussianStd !== 'number' || !Number.isFinite(gaussianStd) || gaussianStd <= 0) {
+    if (typeof gaussianStd !== 'number' || !Number.isFinite(gaussianStd)) {
       return NextResponse.json(
         { error: 'gaussian_std must be a positive number' },
         { status: 400 }
@@ -119,7 +119,7 @@ export async function PATCH(
     }
     for (let i = 0; i < networkWeights.length; i++) {
       const w = networkWeights[i];
-      if (typeof w !== 'number' || !Number.isFinite(w) || w <= 0) {
+      if (typeof w !== 'number' || !Number.isFinite(w)) {
         return NextResponse.json(
           { error: `network_weights[${i}] must be a positive number` },
           { status: 400 }
