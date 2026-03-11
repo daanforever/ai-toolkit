@@ -37,6 +37,7 @@ from toolkit.train_tools import precondition_model_outputs_flow_match
 from toolkit.models.diffusion_feature_extraction import DiffusionFeatureExtractor, load_dfe
 from toolkit.util.debug import memory_debug, is_debug_enabled
 from toolkit.util.losses import wavelet_loss, stepped_loss
+from toolkit.util.tensorboard_timestep_weights import log_timestep_weights
 from extensions_built_in.sd_trainer.gaussian_timestep_weights import evaluate_gaussian_timestep
 import torch.nn.functional as F
 from toolkit.unloader import unload_text_encoder
@@ -842,6 +843,11 @@ class SDTrainer(BaseSDTrainProcess):
                 elif len(loss.shape) == 5:
                     timestep_weight = timestep_weight.view(-1, 1, 1, 1, 1).detach()
                 loss = loss * timestep_weight
+                if self.writer is not None and self.accelerator.is_main_process:
+                    log_timestep_weights(
+                        self.writer, self.step_num, timesteps, timestep_weight,
+                        log_every=getattr(self.logging_config, "log_every", None),
+                    )
             elif self.train_config.timestep_type == "gaussian":
                 ntt = self.sd.noise_scheduler.config.num_train_timesteps
                 timestep_weight = evaluate_gaussian_timestep(
@@ -857,6 +863,11 @@ class SDTrainer(BaseSDTrainProcess):
                 elif len(loss.shape) == 5:
                     timestep_weight = timestep_weight.view(-1, 1, 1, 1, 1).detach()
                 loss = loss * timestep_weight
+                if self.writer is not None and self.accelerator.is_main_process:
+                    log_timestep_weights(
+                        self.writer, self.step_num, timesteps, timestep_weight,
+                        log_every=getattr(self.logging_config, "log_every", None),
+                    )
             elif self.train_config.content_or_style == 'fixed_cycle' and self.train_config.fixed_cycle_weight_peak_timesteps:
                 # fixed_cycle: weight loss by Gaussian peaks at fixed_cycle_weight_peak_timesteps (e.g. 500, 375), mean-normalized
                 peaks = self.train_config.fixed_cycle_weight_peak_timesteps
@@ -873,6 +884,11 @@ class SDTrainer(BaseSDTrainProcess):
                 elif len(loss.shape) == 5:
                     timestep_weight = timestep_weight.view(-1, 1, 1, 1, 1).detach()
                 loss = loss * timestep_weight
+                if self.writer is not None and self.accelerator.is_main_process:
+                    log_timestep_weights(
+                        self.writer, self.step_num, timesteps, timestep_weight,
+                        log_every=getattr(self.logging_config, "log_every", None),
+                    )
 
         if self.train_config.do_prior_divergence and prior_pred is not None:
             loss = loss + (torch.nn.functional.mse_loss(pred.float(), prior_pred.float(), reduction="none") * -1.0)
