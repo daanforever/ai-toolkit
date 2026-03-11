@@ -130,8 +130,9 @@ class ZImageDiffSynthModel(BaseModel):
     def _flush_cuda(self):
         """Release CUDA cache and run GC so VRAM is actually freed after model moves."""
         if isinstance(self.device_torch, torch.device) and self.device_torch.type == "cuda":
-            torch.cuda.empty_cache()
             gc.collect()
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
 
     def _log_device_state(self, label: str):
         """Log device of key modules (for debug). Only runs when config.debug is enabled."""
@@ -550,14 +551,12 @@ class ZImageDiffSynthModel(BaseModel):
                             self._move_sampling("cpu")
                             self.model.to(self.device_torch, dtype=self.torch_dtype)
                             self._move_main_network(self.device_torch)
-                            self._flush_cuda()
                     else:
                         self._move_sampling("cpu")
                         self.model.to(self.device_torch, dtype=self.torch_dtype)
                         self._move_main_network(self.device_torch)
-                        self._flush_cuda()
-                    if isinstance(self.device_torch, torch.device) and self.device_torch.type == "cuda":
-                        torch.cuda.synchronize()
+                    
+                    self._flush_cuda()
                     self._log_device_state("after batch restore")
         finally:
             if saved_network is not None:

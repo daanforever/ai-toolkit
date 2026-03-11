@@ -40,6 +40,15 @@ def unload_text_encoder(model: "BaseModel"):
 
     if model.text_encoder is not None:
         if isinstance(model.text_encoder, list):
+            # Move all existing encoders to CPU so GPU memory is actually freed
+            # (required when pipeline is None, e.g. zimage_diffsynth; also ensures
+            # text_encoder_2, text_encoder_3 etc. are off GPU when using pipeline)
+            for encoder in model.text_encoder:
+                try:
+                    encoder.to("cpu")
+                except Exception:
+                    pass
+
             text_encoder_list = []
             pipe = model.pipeline
 
@@ -47,7 +56,6 @@ def unload_text_encoder(model: "BaseModel"):
             if pipe is not None and hasattr(pipe, "text_encoder"):
                 te = FakeTextEncoder(device=model.device_torch, dtype=model.torch_dtype)
                 text_encoder_list.append(te)
-                pipe.text_encoder.to('cpu')
                 pipe.text_encoder = te
 
                 i = 2
@@ -61,7 +69,13 @@ def unload_text_encoder(model: "BaseModel"):
                 text_encoder_list.append(FakeTextEncoder(device=model.device_torch, dtype=model.torch_dtype))
             model.text_encoder = text_encoder_list
         else:
-            # only has a single text encoder
+            # only has a single text encoder — move to CPU before replacing
+            try:
+                model.text_encoder.to("cpu")
+            except Exception:
+                pass
             model.text_encoder = FakeTextEncoder(device=model.device_torch, dtype=model.torch_dtype)
 
     flush()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
