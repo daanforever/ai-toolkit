@@ -532,6 +532,7 @@ def main():
                 # Minimal fields used by ZImageDiffSynthTrainer.__init__
                 # and the smoke test itself.
                 self.config = config
+                self.progress_bar = None  # avoid AttributeError in self.print()
                 self.train_config = SimpleNamespace(
                     noise_scheduler="placeholder",
                     num_train_timesteps=None,
@@ -568,16 +569,13 @@ def main():
 
             # 7b. When use_diffsynth_training_loop is explicitly False in model_kwargs,
             # trainer must *not* override timestep_type / loss / SNR settings.
+            # Use process config shape (same as job passes to the trainer).
             cfg_with_flag = {
-                "process": [
-                    {
-                        "model": {
-                            "model_kwargs": {
-                                "use_diffsynth_training_loop": False,
-                            }
-                        }
+                "model": {
+                    "model_kwargs": {
+                        "use_diffsynth_training_loop": False,
                     }
-                ]
+                }
             }
             trainer2 = ZImageDiffSynthTrainer(0, None, cfg_with_flag)
             tc2 = trainer2.train_config

@@ -29,13 +29,12 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
         cfg = getattr(self, "config", None)
         if isinstance(cfg, dict):
             try:
-                processes = cfg.get("process") or cfg.get("processes") or []
-                if processes:
-                    model_cfg = processes[0].get("model", {}) or {}
-                    model_kwargs = model_cfg.get("model_kwargs", {}) or {}
-                    use_diffsynth_training_loop = model_kwargs.get(
-                        "use_diffsynth_training_loop", True
-                    )
+                # self.config is the current process config (one element of job config.process).
+                model_cfg = cfg.get("model", {}) or {}
+                model_kwargs = model_cfg.get("model_kwargs", {}) or {}
+                use_diffsynth_training_loop = model_kwargs.get(
+                    "use_diffsynth_training_loop", True
+                )
             except Exception:
                 # On any unexpected shape, keep the default (True) so existing
                 # configs and smoke tests remain unchanged.
