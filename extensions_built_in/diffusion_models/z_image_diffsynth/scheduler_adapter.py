@@ -3,6 +3,9 @@
 
 import torch
 
+from toolkit.samplers.custom_flowmatch_sampler import CustomFlowMatchEulerDiscreteScheduler
+from toolkit.timestep_weighing.default_weighing_scheme import default_weighing_scheme
+
 
 def _get_diffsynth_flow_match_scheduler():
     import sys
@@ -14,15 +17,17 @@ def _get_diffsynth_flow_match_scheduler():
     return FlowMatchScheduler(template="Z-Image")
 
 
-class DiffSynthZImageSchedulerAdapter(torch.nn.Module):
+class DiffSynthZImageSchedulerAdapter(CustomFlowMatchEulerDiscreteScheduler):
     """
     Wraps DiffSynth's FlowMatchScheduler("Z-Image") so our BatchProcessor and
     base_model.add_noise use the same timesteps/add_noise/training_weight as
-    the original Z-Image.sh training loop.
+    the original Z-Image.sh training loop. Inherits from CustomFlowMatchEulerDiscreteScheduler
+    so trainer-facing methods (get_weights_for_timesteps, get_sigmas, etc.) are available
+    without reimplementing them; only DiffSynth-specific behaviour is overridden.
     """
 
     def __init__(self):
-        super().__init__()
+        super().__init__(num_train_timesteps=1000)
         self._scheduler = _get_diffsynth_flow_match_scheduler()
         self._scheduler.set_timesteps(1000, denoising_strength=1.0, training=True)
         self.timesteps = self._scheduler.timesteps
@@ -30,7 +35,9 @@ class DiffSynthZImageSchedulerAdapter(torch.nn.Module):
         self.linear_timesteps_weights = getattr(
             self._scheduler, "linear_timesteps_weights", torch.ones_like(self._scheduler.timesteps, dtype=torch.float32)
         )
-        self.config = type("_Config", (), {"num_train_timesteps": 1000})()
+        self.linear_timesteps_weights2 = getattr(
+            self._scheduler, "linear_timesteps_weights2", self.linear_timesteps_weights
+        )
 
     def scale_model_input(self, sample: torch.Tensor, timestep: torch.Tensor) -> torch.Tensor:
         """
@@ -53,10 +60,14 @@ class DiffSynthZImageSchedulerAdapter(torch.nn.Module):
         self.linear_timesteps_weights = getattr(
             self._scheduler, "linear_timesteps_weights", torch.ones_like(self._scheduler.timesteps, dtype=torch.float32)
         )
+        self.linear_timesteps_weights2 = getattr(
+            self._scheduler, "linear_timesteps_weights2", self.linear_timesteps_weights
+        )
         if device is not None:
             self.timesteps = self.timesteps.to(device)
             self.sigmas = self.sigmas.to(device)
             self.linear_timesteps_weights = self.linear_timesteps_weights.to(device)
+            self.linear_timesteps_weights2 = self.linear_timesteps_weights2.to(device)
 
     def set_train_timesteps(
         self,
@@ -76,30 +87,19 @@ class DiffSynthZImageSchedulerAdapter(torch.nn.Module):
     ) -> torch.Tensor:
         return self._scheduler.add_noise(original_samples, noise, timesteps)
 
-    def get_timestep_weights(self, timesteps: torch.Tensor) -> torch.Tensor:
-        """Return training_weight per batch element (same as DiffSynth FlowMatchSFTLoss)."""
+    def get_weights_for_timesteps(self, timesteps: torch.Tensor, v2=False, timestep_type="linear") -> torch.Tensor:
+        """Use argmin-based lookup so DiffSynth float timesteps match robustly; then use base weights."""
         device = timesteps.device
         dtype = timesteps.dtype
-        tw = self.linear_timesteps_weights.to(device=device, dtype=dtype)
         tt = self.timesteps.to(device=device)
-        # timesteps can be (B,) or (1,); find index per element
         if timesteps.dim() == 0:
             timesteps = timesteps.unsqueeze(0)
-        indices = torch.argmin(
-            (tt.unsqueeze(0) - timesteps.unsqueeze(1)).abs(), dim=1
-        )
-        return tw[indices]
-
-    def compute_snr(self) -> torch.Tensor:
-        """
-        Compute SNR for each timestep for flow matching (min_snr_gamma / SNR weighting).
-        Used by get_all_snr() when runtime params change (e.g. data loaders recreated).
-        Same convention as CustomFlowMatchEulerDiscreteScheduler: t in [0,1],
-        SNR = (1-t)^2 / (t^2 + eps).
-        """
-        num = self.config.num_train_timesteps
-        device = self.timesteps.device if hasattr(self.timesteps, "device") else torch.device("cpu")
-        t = torch.linspace(0.0, 1.0, num, device=device, dtype=torch.float32)
-        epsilon = 1e-8
-        snr = ((1.0 - t) ** 2) / (t ** 2 + epsilon)
-        return snr
+        indices = torch.argmin((tt.unsqueeze(0) - timesteps.unsqueeze(1)).abs(), dim=1)
+        if timestep_type == "weighted":
+            return torch.tensor(
+                [default_weighing_scheme[i] for i in indices.tolist()],
+                device=device,
+                dtype=dtype,
+            )
+        weights_src = (self.linear_timesteps_weights2 if v2 else self.linear_timesteps_weights).to(device=device, dtype=dtype)
+        return weights_src[indices]
