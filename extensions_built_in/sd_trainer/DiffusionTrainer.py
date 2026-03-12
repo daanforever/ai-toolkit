@@ -204,12 +204,12 @@ class DiffusionTrainer(SDTrainer):
             if is_debug_enabled():
                 print_acc(f"\nruntime_lr from UI/DB: {value}")
             optimizer.set_lr(value)
-            self._last_applied_runtime_lr = value
         else:
             if is_debug_enabled():
                 print_acc(
                     f"\nruntime_lr from DB not applied: optimizer has no set_lr (type: {type(optimizer).__name__})"
                 )
+        self._last_applied_runtime_lr = value
 
     def get_runtime_min_lr(self):
         """Read runtime_min_lr from DB (only when is_ui_trainer). Returns float or None."""
