@@ -158,7 +158,7 @@ def get_lr_scheduler(
             gamma=kwargs.get('gamma', 1.0),
             scale_fn=kwargs.get('scale_fn', None),
             scale_mode=kwargs.get('scale_mode', 'cycle'),
-            cycle_momentum=kwargs.get('cycle_momentum', True),
+            cycle_momentum=kwargs.get('cycle_momentum', False),
             base_momentum=kwargs.get('base_momentum', 0.85),
             max_momentum=kwargs.get('max_momentum', 0.95),
             last_epoch=kwargs.get('last_epoch', -1)
