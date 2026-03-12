@@ -42,6 +42,14 @@ function parseJobConfig(raw: string | null): JobConfig | null {
   }
 }
 
+/** Last path segment (folder name), supports both / and \ separators. */
+function folderNameFromPath(folderPath: string | undefined): string {
+  if (!folderPath || typeof folderPath !== 'string') return '';
+  const normalized = folderPath.replace(/\\/g, '/').replace(/\/+$/, '');
+  const lastSlash = normalized.lastIndexOf('/');
+  return lastSlash === -1 ? normalized : normalized.slice(lastSlash + 1);
+}
+
 export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigProps) {
   const initialConfig = useMemo(() => parseJobConfig(job.job_config), [job.job_config]);
   const [config, setValue] = useNestedState<JobConfig | null>(initialConfig);
@@ -504,9 +512,11 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
           <div className="space-y-2">
             <p className="text-xs text-gray-400">Datasets — Network weight</p>
             <div className="flex items-center gap-2 flex-wrap">
-              {datasets.map((d: { network_weight?: number }, i: number) => (
+              {datasets.map((d: { folder_path?: string; network_weight?: number }, i: number) => {
+                const name = folderNameFromPath(d.folder_path) || `Dataset ${i + 1}`;
+                return (
                 <div key={i} className="space-y-1 min-w-[100px]">
-                  <label className="block text-xs text-gray-500">Dataset {i + 1}</label>
+                  <label className="block text-xs text-gray-500">Dataset {name}</label>
                   <input
                     type="number"
                     min={1e-6}
@@ -522,7 +532,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
                     className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none"
                   />
                 </div>
-              ))}
+              ); })}
             </div>
           </div>
         )}
