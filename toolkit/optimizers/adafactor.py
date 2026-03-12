@@ -254,6 +254,12 @@ class Adafactor(torch.optim.Optimizer):
             if total_parameters >= target_parameters:
                 break
 
+    @staticmethod
+    def stop_warmup(param_group):
+        param_group["warmup_init"] = False
+        if is_debug_enabled():
+            print_acc(f"Adafactor: warmup stopped")
+
     def _get_lr(self, param_group, param_state):
         """
         Compute per-parameter learning rate.
@@ -280,6 +286,8 @@ class Adafactor(torch.optim.Optimizer):
         param_group["base_lr_previous"] = base_lr
         if base_lr_prev > 0 and abs(base_lr - base_lr_prev) / base_lr_prev > 0.1:
             param_group["warmup_init"] = True
+            if is_debug_enabled():
+                print_acc(f"Adafactor: base_lr changed (>10%), starting warmup")
 
         if not param_group["relative_step"]:
             # Manual LR mode: use fixed learning rate from config
@@ -293,8 +301,6 @@ class Adafactor(torch.optim.Optimizer):
             group_rms_max = param_group.get("group_rms_max", torch.tensor(eps1)).item()  # Group-level max parameter RMS
             update_rms    = param_state.get("update_rms", torch.tensor(0.0)).item()      # Previous update RMS
 
-            # Smaller params (vs group max) gets more learning rate
-            # largest param gets base learning rate
             ratio = max(eps0, (group_rms_max - param_rms) / (group_rms_max + eps0))
             new_lr = base_lr * (1 + min_lr * ratio)
 
@@ -309,11 +315,11 @@ class Adafactor(torch.optim.Optimizer):
             if target > prev:  # Increasing
                 new_lr = max(base_lr * 0.1, min(new_lr, base_lr * 0.8))
                 if new_lr >= target * 0.99:
-                    param_group["warmup_init"] = False
+                    self.stop_warmup(param_group)
             else:  # Decreasing
                 new_lr = max(target, min(new_lr, prev))
                 if new_lr <= target * 1.01:
-                    param_group["warmup_init"] = False
+                    self.stop_warmup(param_group)
 
         param_state["lr_previous"] = new_lr
         return new_lr
