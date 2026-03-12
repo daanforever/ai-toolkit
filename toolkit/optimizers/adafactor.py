@@ -256,7 +256,7 @@ class Adafactor(torch.optim.Optimizer):
 
     @staticmethod
     def stop_warmup(param_group):
-        param_group["warmup_init"] = False
+        param_group["warmup_active"] = False
         if is_debug_enabled():
             print_acc(f"Adafactor: warmup stopped")
 
@@ -281,13 +281,18 @@ class Adafactor(torch.optim.Optimizer):
         eps1       = param_group["eps"][1]          # Parameter scale regularization constant
         param_rms  = param_state["RMS"].item()      # Current parameter RMS magnitude
 
+        # Initialize warmup_active on first use if not present
+        if "warmup_active" not in param_group:
+            param_group["warmup_active"] = param_group["warmup_init"]
+
         # Track base_lr changes and activate warmup when change > 10%
         base_lr_prev = param_group.get("base_lr_previous", base_lr)
         param_group["base_lr_previous"] = base_lr
         if base_lr_prev > 0 and abs(base_lr - base_lr_prev) / base_lr_prev > 0.1:
-            param_group["warmup_init"] = True
-            if is_debug_enabled():
-                print_acc(f"Adafactor: base_lr changed (>10%), starting warmup")
+            if param_group["warmup_init"]:
+                param_group["warmup_active"] = True
+                if is_debug_enabled():
+                    print_acc(f"Adafactor: base_lr changed (>10%), starting warmup")
 
         if not param_group["relative_step"]:
             # Manual LR mode: use fixed learning rate from config
@@ -304,7 +309,7 @@ class Adafactor(torch.optim.Optimizer):
             ratio = max(eps0, (group_rms_max - param_rms) / (group_rms_max + eps0))
             new_lr = base_lr * (1 + min_lr * ratio)
 
-        if param_group.get("warmup_init", False):
+        if param_group.get("warmup_active", False):
             target = base_lr * 0.8
             prev = param_state.get("lr_previous", 0.0)
             gap = target - prev
