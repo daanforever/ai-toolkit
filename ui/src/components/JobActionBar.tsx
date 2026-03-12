@@ -1,12 +1,11 @@
 import Link from 'next/link';
-import { Eye, Trash2, Pen, Play, Pause, Cog, X } from 'lucide-react';
+import { Eye, Trash2, Pen, Play, Pause, Cog, X, RotateCcw } from 'lucide-react';
 import { Button } from '@headlessui/react';
 import { openConfirm } from '@/components/ConfirmModal';
 import { Job } from '@prisma/client';
-import { startJob, stopJob, deleteJob, getAvaliableJobActions, markJobAsStopped } from '@/utils/jobs';
+import { startJob, stopJob, deleteJob, getAvaliableJobActions, markJobAsStopped, resetJob } from '@/utils/jobs';
 import { startQueue } from '@/utils/queue';
 import { Menu, MenuButton, MenuItem, MenuItems } from '@headlessui/react';
-import { redirect } from 'next/navigation';
 
 interface JobActionBarProps {
   job: Job;
@@ -25,7 +24,7 @@ export default function JobActionBar({
   hideView,
   autoStartQueue = false,
 }: JobActionBarProps) {
-  const { canStart, canStop, canDelete, canEdit, canRemoveFromQueue } = getAvaliableJobActions(job);
+  const { canStart, canStop, canDelete, canEdit, canRemoveFromQueue, canReset } = getAvaliableJobActions(job);
 
   if (!afterDelete) afterDelete = onRefresh;
 
@@ -88,6 +87,25 @@ export default function JobActionBar({
         <Link href={`/jobs/new?id=${job.id}`} className="ml-2 hover:text-gray-100 inline-block">
           <Pen />
         </Link>
+      )}
+      {canReset && (
+        <Button
+          onClick={() => {
+            openConfirm({
+              title: 'Reset Job Output',
+              message: `Are you sure you want to reset the output for job "${job.name}"? This will permanently delete all files and folders in the job output directory except for .job_config.json and config.yaml.`,
+              type: 'warning',
+              confirmText: 'Reset',
+              onConfirm: async () => {
+                await resetJob(job.id);
+                if (onRefresh) onRefresh();
+              },
+            });
+          }}
+          className={`ml-2 opacity-100`}
+        >
+          <RotateCcw />
+        </Button>
       )}
       <Button
         onClick={() => {
