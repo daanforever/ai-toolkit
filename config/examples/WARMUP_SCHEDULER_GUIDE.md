@@ -9,6 +9,7 @@ This guide explains how to use the warmup functionality for learning rate schedu
 Warmup is supported for the following schedulers:
 - `cosine` - Cosine annealing scheduler
 - `cosine_with_restarts` - Cosine annealing with warm restarts (SGDR)
+> Note: The `cyclic` scheduler (`torch.optim.lr_scheduler.CyclicLR`) is also available in the toolkit, but it does **not** use the warmup wrapper described in this guide. It manages LR changes internally via cycles.
 
 ## How It Works
 
@@ -136,6 +137,28 @@ train:
     T_mult: 2
     eta_min: 1e-7
 ```
+
+### Example 5: CyclicLR (without warmup)
+
+While CyclicLR does not use the warmup wrapper, it is often used in a similar context to control learning rate over training. Here is a typical configuration:
+
+```yaml
+train:
+  steps: 2000
+  lr: 1e-4  # Reference value only, actual LR range is defined below
+  lr_scheduler: "cyclic"
+  lr_scheduler_params:
+    base_lr: 1e-7        # Minimum learning rate
+    max_lr: 1e-4         # Maximum learning rate
+    step_size_up: 2000   # Steps to grow from base_lr to max_lr
+    step_size_down: 100  # Steps to quickly decay back to base_lr
+    mode: "triangular"   # Supported: "triangular", "triangular2", "exp_range"
+```
+
+In this setup:
+- LR linearly increases from `base_lr` to `max_lr` over `step_size_up` steps.
+- Then it decreases back towards `base_lr` over `step_size_down` steps.
+- The cycle then repeats according to the selected `mode`.
 
 ## Parameters
 

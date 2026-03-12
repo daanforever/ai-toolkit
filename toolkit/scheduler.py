@@ -143,6 +143,26 @@ def get_lr_scheduler(
         return torch.optim.lr_scheduler.LinearLR(
             optimizer, **kwargs
         )
+    elif name == "cyclic":
+        # CyclicLR scheduler: cycles between base_lr and max_lr
+        default_step_size_up = kwargs.get('step_size_up', 2000)
+        default_step_size_down = kwargs.get('step_size_down', default_step_size_up)
+
+        return torch.optim.lr_scheduler.CyclicLR(
+            optimizer,
+            base_lr=kwargs.get('base_lr', 1e-7),
+            max_lr=kwargs.get('max_lr', kwargs.get('lr', 1e-4)),
+            step_size_up=kwargs.get('step_size_up', 2000),
+            step_size_down=kwargs.get('step_size_down', default_step_size_down),
+            mode=kwargs.get('mode', 'triangular'),
+            gamma=kwargs.get('gamma', 1.0),
+            scale_fn=kwargs.get('scale_fn', None),
+            scale_mode=kwargs.get('scale_mode', 'cycle'),
+            cycle_momentum=kwargs.get('cycle_momentum', True),
+            base_momentum=kwargs.get('base_momentum', 0.85),
+            max_momentum=kwargs.get('max_momentum', 0.95),
+            last_epoch=kwargs.get('last_epoch', -1)
+        )
     elif name == 'constant_with_warmup':
         # see if num_warmup_steps is in kwargs
         if 'num_warmup_steps' not in kwargs:
@@ -161,5 +181,5 @@ def get_lr_scheduler(
             print(e)
             pass
         raise ValueError(
-            "Scheduler must be cosine, cosine_with_restarts, step, linear or constant"
+            "Scheduler must be cosine, cosine_with_restarts, step, linear, constant or cyclic"
         )

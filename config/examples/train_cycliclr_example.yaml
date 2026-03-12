@@ -1,0 +1,12 @@
+train:
+  steps: 2000
+  lr: 1e-4  # Reference value only; CyclicLR uses base_lr/max_lr below
+
+  lr_scheduler: "cyclic"
+  lr_scheduler_params:
+    base_lr: 1e-7        # Minimum learning rate
+    max_lr: 1e-4         # Maximum learning rate
+    step_size_up: 2000   # Steps to grow from base_lr to max_lr
+    step_size_down: 100  # Steps to quickly decay back to base_lr
+    mode: "triangular"   # "triangular", "triangular2", or "exp_range"
+
