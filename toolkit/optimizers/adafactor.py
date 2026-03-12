@@ -322,20 +322,19 @@ class Adafactor(torch.optim.Optimizer):
             new_lr = base_lr * (1 + min_lr * ratio)
 
         if param_group.get("warmup_active", False):
-            target = base_lr * 0.8
             warmup_steps = param_group.get("warmup_steps", self._warmup_steps)
             prev = param_state.get("lr_previous", base_lr * eps1)
-            delta = abs(target - prev) / warmup_steps
+            delta = abs(base_lr - prev) / warmup_steps
 
-            if target > prev:  # Increasing
+            if base_lr > prev:  # Increasing
                 new_lr = prev + delta
-                new_lr = max(base_lr * 0.1, min(new_lr, target))
-                if new_lr >= target * 0.99:
+                new_lr = max(base_lr * 0.1, min(new_lr, base_lr))
+                if new_lr >= base_lr * 0.99:
                     self.stop_warmup(param_group)
             else:  # Decreasing
                 new_lr = prev - delta
-                new_lr = max(target, min(new_lr, prev))
-                if new_lr <= target * 1.01:
+                new_lr = max(base_lr, min(new_lr, prev))
+                if new_lr <= base_lr * 1.01:
                     self.stop_warmup(param_group)
 
         param_state["lr_previous"] = new_lr
