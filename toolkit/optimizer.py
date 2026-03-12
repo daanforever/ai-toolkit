@@ -101,12 +101,6 @@ def get_optimizer(
         optimizer = torch.optim.Adagrad(params, lr=float(learning_rate), **optimizer_params)
     elif lower_type == 'adafactor':
         from toolkit.optimizers.adafactor import Adafactor
-        if 'relative_step' not in optimizer_params:
-            optimizer_params['relative_step'] = False
-        if 'scale_parameter' not in optimizer_params:
-            optimizer_params['scale_parameter'] = False
-        if 'warmup_init' not in optimizer_params:
-            optimizer_params['warmup_init'] = False
         optimizer = Adafactor(params, lr=float(learning_rate), **optimizer_params)
     elif lower_type == 'automagic':
         from toolkit.optimizers.automagic import Automagic

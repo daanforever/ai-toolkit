@@ -127,6 +127,7 @@ class Adafactor(torch.optim.Optimizer):
         warmup_init=False,
         min_lr=1e-6,
         lr_smoothing_rate=100.0,
+        warmup_steps: int = 100,
         do_parameter_swapping=False,
         parameter_swapping_factor=0.1,
         stochastic_accumulation=True,
@@ -150,6 +151,7 @@ class Adafactor(torch.optim.Optimizer):
             "warmup_init": warmup_init,
             "min_lr": min_lr,
             "lr_smoothing_rate": lr_smoothing_rate,
+            "warmup_steps": warmup_steps,
         }
         super().__init__(params, defaults)
         
@@ -158,6 +160,7 @@ class Adafactor(torch.optim.Optimizer):
         self._lr_smoothing_rate = lr_smoothing_rate
         self._rms_max_decay_rate = rms_max_decay_rate
         self._lr = lr
+        self._warmup_steps = warmup_steps
 
         self.is_stochastic_rounding_accumulation = False
 
@@ -216,6 +219,7 @@ class Adafactor(torch.optim.Optimizer):
             group["lr"] = max(group["eps"][0], self._lr)
             group["lr_smoothing_rate"] = self._lr_smoothing_rate
             group["rms_max_decay_rate"] = self._rms_max_decay_rate
+            group["warmup_steps"] = self._warmup_steps
             # Normalize group_rms_max if present (old checkpoints may not have it)
             if "group_rms_max" in group and not isinstance(group["group_rms_max"], torch.Tensor):
                 group["group_rms_max"] = torch.tensor(group["group_rms_max"], dtype=torch.float32)
@@ -259,6 +263,14 @@ class Adafactor(torch.optim.Optimizer):
         param_group["warmup_active"] = False
         if is_debug_enabled():
             print_acc(f"Adafactor: warmup stopped")
+
+    def set_warmup_steps(self, value: int) -> None:
+        """Update warmup_steps at runtime (e.g. from UI)."""
+        self._warmup_steps = value
+        for group in self.param_groups:
+            group["warmup_steps"] = value
+        if is_debug_enabled():
+            print_acc(f"Adafactor: applied runtime warmup_steps={value}")
 
     def _get_lr(self, param_group, param_state):
         """
@@ -311,17 +323,17 @@ class Adafactor(torch.optim.Optimizer):
 
         if param_group.get("warmup_active", False):
             target = base_lr * 0.8
-            prev = param_state.get("lr_previous", 0.0)
-            gap = target - prev
-
-            # Bidirectional warmup: move lr toward target (up or down)
-            new_lr = prev + base_lr * eps1 + gap * eps1
+            warmup_steps = param_group.get("warmup_steps", self._warmup_steps)
+            prev = param_state.get("lr_previous", base_lr * eps1)
+            delta = abs(target - prev) / warmup_steps
 
             if target > prev:  # Increasing
-                new_lr = max(base_lr * 0.1, min(new_lr, base_lr * 0.8))
+                new_lr = prev + delta
+                new_lr = max(base_lr * 0.1, min(new_lr, target))
                 if new_lr >= target * 0.99:
                     self.stop_warmup(param_group)
             else:  # Decreasing
+                new_lr = prev - delta
                 new_lr = max(target, min(new_lr, prev))
                 if new_lr <= target * 1.01:
                     self.stop_warmup(param_group)
