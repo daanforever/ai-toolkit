@@ -1692,6 +1692,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
         if 'max_iterations' not in lr_scheduler_params:
             lr_scheduler_params['total_iters'] = self.train_config.steps
 
+        # add lr from train config if not already in params
+        if 'lr' not in lr_scheduler_params:
+            lr_scheduler_params['lr'] = self.train_config.lr
+
         lr_scheduler = get_lr_scheduler(
             self.train_config.lr_scheduler,
             optimizer,
