@@ -151,7 +151,7 @@ def get_lr_scheduler(
         return torch.optim.lr_scheduler.CyclicLR(
             optimizer,
             base_lr=kwargs.get('base_lr', 1e-7),
-            max_lr=kwargs.get('max_lr', kwargs.get('lr', 1e-4)),
+            max_lr=kwargs.get('max_lr', 1e-4),
             step_size_up=kwargs.get('step_size_up', 2000),
             step_size_down=kwargs.get('step_size_down', default_step_size_down),
             mode=kwargs.get('mode', 'triangular'),
