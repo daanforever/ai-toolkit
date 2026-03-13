@@ -259,8 +259,10 @@ class Adafactor(torch.optim.Optimizer):
                 break
 
     @staticmethod
-    def stop_warmup(param_group):
+    def stop_warmup(param_group, param_state=None):
         param_group["warmup_active"] = False
+        if param_state is not None:
+            param_state.pop("warmup_delta", None)
         if is_debug_enabled():
             print_acc(f"Adafactor: warmup stopped")
 
@@ -324,18 +326,22 @@ class Adafactor(torch.optim.Optimizer):
         if param_group.get("warmup_active", False):
             warmup_steps = param_group.get("warmup_steps", self._warmup_steps)
             prev = param_state.get("lr_previous", base_lr * eps1)
-            delta = abs(base_lr - prev) / warmup_steps
+
+            if "warmup_delta" not in param_state:
+                param_state["warmup_delta"] = abs(base_lr - prev) / warmup_steps
+
+            delta = param_state["warmup_delta"]
 
             if base_lr > prev:  # Increasing
                 new_lr = prev + delta
                 new_lr = max(base_lr * 0.1, min(new_lr, base_lr))
                 if new_lr >= base_lr * 0.99:
-                    self.stop_warmup(param_group)
+                    self.stop_warmup(param_group, param_state)
             else:  # Decreasing
                 new_lr = prev - delta
                 new_lr = max(base_lr, min(new_lr, prev))
                 if new_lr <= base_lr * 1.01:
-                    self.stop_warmup(param_group)
+                    self.stop_warmup(param_group, param_state)
 
         param_state["lr_previous"] = new_lr
         return new_lr
