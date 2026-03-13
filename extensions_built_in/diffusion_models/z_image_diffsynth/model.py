@@ -379,6 +379,11 @@ class ZImageDiffSynthModel(BaseModel):
         text_embeds = text_embeddings.text_embeds
         if isinstance(text_embeds, torch.Tensor) and len(text_embeds.shape) == 3:
             text_embeds = [text_embeds[i] for i in range(text_embeds.shape[0])]
+        # Cast embeddings to model dtype at DiT boundary
+        if isinstance(text_embeds, list):
+            text_embeds = [t.to(self.torch_dtype) for t in text_embeds]
+        elif isinstance(text_embeds, torch.Tensor):
+            text_embeds = text_embeds.to(self.torch_dtype)
         # Pass raw DiT to DiffSynth model_fn (expects real DiT with t_embedder, etc.).
         # When debug logging is enabled, wrap the forward call in a memory_debug
         # context so that VRAM usage can be compared with the baseline z_image
@@ -409,13 +414,13 @@ class ZImageDiffSynthModel(BaseModel):
             te,
             prompt,
             self.device_torch,
-            dtype=self.torch_dtype,
+            dtype=torch.float32,
         )
 
     def get_loss_target(self, *args, **kwargs):
         noise = kwargs.get("noise")
         batch = kwargs.get("batch")
-        return (noise - batch.latents).detach()
+        return (noise.float() - batch.latents.float()).detach()
 
     def get_generation_pipeline(self):
         return sampling_mod.get_generation_pipeline(self)

@@ -51,6 +51,13 @@ def run_forward(
                     )
                 )
 
+    # Ensure embeddings match latents dtype (safety check for mixed precision)
+    target_dtype = latents.dtype
+    if isinstance(prompt_embeds, torch.Tensor):
+        prompt_embeds = prompt_embeds.to(target_dtype)
+    elif isinstance(prompt_embeds, list):
+        prompt_embeds = [p.to(target_dtype) if isinstance(p, torch.Tensor) else p for p in prompt_embeds]
+
     out = model_fn_z_image_turbo(
         dit,
         latents=latents,

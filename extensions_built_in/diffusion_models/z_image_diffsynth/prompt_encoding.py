@@ -54,7 +54,7 @@ def encode_prompt(
     max_len = max(t.shape[0] for t in embeddings_list)
     dim = embeddings_list[0].shape[1]
     if dtype is None:
-        dtype = embeddings_list[0].dtype
+        dtype = torch.float32
     padded = []
     for t in embeddings_list:
         if t.shape[0] < max_len:
