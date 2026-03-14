@@ -57,3 +57,9 @@ You are an expert in deep learning, transformers, diffusion models, and LLM deve
 
 ### Key Conventions:
 - Create modular code structures with separate files for models, data loading, training, and evaluation.
+
+## Follow the principle of "Minimal Viable Implementation":
+1. Implement only what is strictly required by the current plan. 
+2. No "future-proofing," speculative features, or unsolicited optimizations.
+3. Minimize changes to existing code: only add, replace, or delete the absolute necessary minimum of lines to achieve the goal.
+4. Strictly avoid "gold-plating" or "just-in-case" logic.

@@ -1941,6 +1941,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 param_rms = 0.0  # Average parameter RMS across groups (Adafactor)
                 grad_rms = 0.0  # Average gradient RMS across groups (Adafactor)
                 grad_rms_max = 0.0  # Running max of gradient RMS (for graphs)
+                gns = 0.0  # Gradient Noise Scale (Adafactor with momentum)
+                dir_consistency = 0.0  # Directional consistency with EMA (Adafactor with momentum)
+                step_efficiency = 0.0  # Step efficiency: update_rms / update_rms_max (Adafactor)
                 if not did_oom and loss_dict is not None:
                     if hasattr(optimizer, 'get_avg_learning_rate'):
                         learning_rate = optimizer.get_avg_learning_rate()
@@ -1966,6 +1969,12 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         grad_rms = optimizer.get_avg_grad_rms()
                     if hasattr(optimizer, 'get_avg_grad_rms_max'):
                         grad_rms_max = optimizer.get_avg_grad_rms_max()
+                    if hasattr(optimizer, 'get_avg_gns'):
+                        gns = optimizer.get_avg_gns()
+                    if hasattr(optimizer, 'get_avg_dir_consistency'):
+                        dir_consistency = optimizer.get_avg_dir_consistency()
+                    if hasattr(optimizer, 'get_avg_step_efficiency'):
+                        step_efficiency = optimizer.get_avg_step_efficiency()
 
                     prog_bar_string = f"lr: {learning_rate:.1e}"
                     if update_rms > 0:
@@ -2061,6 +2070,12 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                             self.writer.add_scalar("train/grad_rms", grad_rms, self.step_num)
                                         if grad_rms_max > 0:
                                             self.writer.add_scalar("train/grad_rms_max", grad_rms_max, self.step_num)
+                                        if gns > 0:
+                                            self.writer.add_scalar("train/gns", gns, self.step_num)
+                                        if abs(dir_consistency) > 0:
+                                            self.writer.add_scalar("train/dir_consistency", dir_consistency, self.step_num)
+                                        if step_efficiency > 0:
+                                            self.writer.add_scalar("train/step_efficiency", step_efficiency, self.step_num)
                                 if self.progress_bar is not None:
                                     self.progress_bar.unpause()
                         
@@ -2095,6 +2110,18 @@ class BaseSDTrainProcess(BaseTrainProcess):
                             if grad_rms_max > 0:
                                 self.logger.log({
                                     'train/grad_rms_max': grad_rms_max,
+                                })
+                            if gns > 0:
+                                self.logger.log({
+                                    'train/gns': gns,
+                                })
+                            if abs(dir_consistency) > 0:
+                                self.logger.log({
+                                    'train/dir_consistency': dir_consistency,
+                                })
+                            if step_efficiency > 0:
+                                self.logger.log({
+                                    'train/step_efficiency': step_efficiency,
                                 })
                             if loss_dict is not None:
                                 for key, value in loss_dict.items():
@@ -2133,6 +2160,18 @@ class BaseSDTrainProcess(BaseTrainProcess):
                             if grad_rms_max > 0:
                                 self.logger.log({
                                     'train/grad_rms_max': grad_rms_max,
+                                })
+                            if gns > 0:
+                                self.logger.log({
+                                    'train/gns': gns,
+                                })
+                            if abs(dir_consistency) > 0:
+                                self.logger.log({
+                                    'train/dir_consistency': dir_consistency,
+                                })
+                            if step_efficiency > 0:
+                                self.logger.log({
+                                    'train/step_efficiency': step_efficiency,
                                 })
                             for key, value in loss_dict.items():
                                 self.logger.log({

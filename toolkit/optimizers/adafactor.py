@@ -369,22 +369,27 @@ class Adafactor(torch.optim.Optimizer):
         Used for unified metric aggregation (RMS, update_rms, update_rms_max) so get_* use the same
         path. Only params that have state_key in state are included (same as get_update_rms/get_update_rms_max).
         """
-        tensors = []
+        values = []
+        weights = []
         device = None
         for p in group["params"]:
             if p not in self.state or state_key not in self.state[p]:
                 continue
             val = self.state[p][state_key]
-            t = torch.as_tensor(val, device=p.device)
+            v_t = torch.as_tensor(val, device=p.device, dtype=torch.float32)
             if device is None:
-                device = t.device
-            tensors.append(t.to(device))
-        if not tensors:
+                device = v_t.device
+            values.append(v_t.to(device))
+            weights.append(torch.tensor(p.numel(), device=device, dtype=torch.float32))
+        if not values:
             return None
-        stacked = torch.stack(tensors)
+        v_stacked = torch.stack(values)
+        w_stacked = torch.stack(weights)
         if reduction == 'max':
-            return stacked.max().item()
-        return stacked.mean().item()
+            return v_stacked.max().item()
+        weighted_sum = torch.sum(v_stacked * w_stacked)
+        total_weight = torch.sum(w_stacked)
+        return (weighted_sum / (total_weight + 1e-12)).item()
 
     def _scalars_per_group_to_avg(self, per_group_list: List[float]) -> float:
         """Unified average over groups for get_avg_*; uses tensor reduction for consistency."""
@@ -556,9 +561,19 @@ class Adafactor(torch.optim.Optimizer):
 
                 if use_first_moment:
                     exp_avg = state["exp_avg"]
+                    # Directional Consistency: cosine similarity between current update and EMA from previous step
+                    state["dir_consistency"] = torch.nn.functional.cosine_similarity(
+                        update.flatten(), exp_avg.flatten(), dim=0, eps=1e-8
+                    )
                     exp_avg.mul_(group["beta1"]).add_(
                         update, alpha=(1 - group["beta1"]))
                     update = exp_avg
+                    # Gradient Noise Scale: ratio of noise to signal
+                    total_sq = state["exp_avg_sq_row"].mean() if factored else state["exp_avg_sq"].mean()
+                    signal_sq = state["exp_avg"].pow(2).mean()
+                    state["gns"] = (total_sq - signal_sq) / (signal_sq + 1e-8)
+                else:
+                    state["gns"] = torch.tensor(0.0, device=update.device)
 
                 if group["weight_decay"] != 0:
                     p_data_fp32.add_(
@@ -576,6 +591,9 @@ class Adafactor(torch.optim.Optimizer):
                 state["update_rms_max"] = torch.maximum(
                     current_max * group["rms_max_decay_rate"], state["update_rms"]
                 )
+                # Step Efficiency: ratio of current update RMS to historical maximum
+                eps = group["eps"][0] if isinstance(group["eps"], (tuple, list)) else group["eps"]
+                state["step_efficiency"] = state["update_rms"] / (state["update_rms_max"] + eps)
 
                 if (p.dtype != torch.float32 or is_quantized) and self.stochastic_rounding:
                     # apply stochastic rounding
@@ -689,3 +707,39 @@ class Adafactor(torch.optim.Optimizer):
         Use with get_avg_grad_rms() to monitor gradient scale vs recent max.
         """
         return self._scalars_per_group_to_avg(self.get_grad_rms_max())
+
+    def get_gns(self):
+        """Get Gradient Noise Scale per group."""
+        out = []
+        for group in self.param_groups:
+            v = self._get_group_scalars(group, "gns", default=0.0, reduction='mean')
+            out.append(v if v is not None else 0.0)
+        return out
+
+    def get_dir_consistency(self):
+        """Get Directional Consistency (cosine similarity to EMA) per group."""
+        out = []
+        for group in self.param_groups:
+            v = self._get_group_scalars(group, "dir_consistency", default=0.0, reduction='mean')
+            out.append(v if v is not None else 0.0)
+        return out
+
+    def get_step_efficiency(self):
+        """Get Step Efficiency (current_rms / max_rms) per group."""
+        out = []
+        for group in self.param_groups:
+            v = self._get_group_scalars(group, "step_efficiency", default=0.0, reduction='mean')
+            out.append(v if v is not None else 0.0)
+        return out
+
+    def get_avg_gns(self):
+        """Average GNS across all parameter groups."""
+        return self._scalars_per_group_to_avg(self.get_gns())
+
+    def get_avg_dir_consistency(self):
+        """Average Directional Consistency across all parameter groups."""
+        return self._scalars_per_group_to_avg(self.get_dir_consistency())
+
+    def get_avg_step_efficiency(self):
+        """Average Step Efficiency across all parameter groups."""
+        return self._scalars_per_group_to_avg(self.get_step_efficiency())
