@@ -85,18 +85,22 @@ def _create_scheduler_with_warmup(
                 optimizer, T_0=main_total_iters, **scheduler_kwargs
             )
   
-    # save base_lr
+    # Warmup: linear from eta_min to base_lr (explicit, not tied to optimizer initial_lr)
     base_lr = optimizer.param_groups[0]['lr']
-    print(f"Using LR {base_lr} for warmup")
+    eta_min = scheduler_kwargs.get('eta_min', base_lr / 10.0)
+    print(f"Using LR {base_lr} for warmup (eta_min={eta_min})")
     print(f"Param groups LR: {[g['lr'] for g in optimizer.param_groups]}")
-    optimizer.param_groups[0]['initial_lr'] = base_lr / 10
 
-    # Create warmup scheduler (linear from ~0 to 1.0)
-    warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+    def _warmup_lambda(step: int) -> float:
+        step = max(0, step)  # guard for last_epoch=-1 before first step()
+        if warmup_steps <= 1:
+            return 1.0
+        t = min(step, warmup_steps - 1) / (warmup_steps - 1)
+        return eta_min / base_lr + (1.0 - eta_min / base_lr) * t
+
+    warmup_scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer,
-        start_factor=0.1,   # 1/10 of the target LR
-        end_factor=1.0,      # End at full LR
-        total_iters=warmup_steps,
+        lr_lambda=_warmup_lambda,
         last_epoch=-1
     )
     
