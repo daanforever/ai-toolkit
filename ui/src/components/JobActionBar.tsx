@@ -1,9 +1,9 @@
 import Link from 'next/link';
-import { Eye, Trash2, Pen, Play, Pause, Cog, X, RotateCcw } from 'lucide-react';
+import { Eye, Trash2, Pen, Play, Pause, Cog, X, RotateCcw, Eraser } from 'lucide-react';
 import { Button } from '@headlessui/react';
 import { openConfirm } from '@/components/ConfirmModal';
 import { Job } from '@prisma/client';
-import { startJob, stopJob, deleteJob, getAvaliableJobActions, markJobAsStopped, resetJob } from '@/utils/jobs';
+import { startJob, stopJob, deleteJob, getAvaliableJobActions, markJobAsStopped, resetJob, clearSamplesAndLossLog } from '@/utils/jobs';
 import { startQueue } from '@/utils/queue';
 import { Menu, MenuButton, MenuItem, MenuItems } from '@headlessui/react';
 
@@ -24,7 +24,7 @@ export default function JobActionBar({
   hideView,
   autoStartQueue = false,
 }: JobActionBarProps) {
-  const { canStart, canStop, canDelete, canEdit, canRemoveFromQueue, canReset } = getAvaliableJobActions(job);
+  const { canStart, canStop, canDelete, canEdit, canRemoveFromQueue, canReset, canClearSamplesAndLog } = getAvaliableJobActions(job);
 
   if (!afterDelete) afterDelete = onRefresh;
 
@@ -76,6 +76,26 @@ export default function JobActionBar({
           className={`ml-2 opacity-100`}
         >
           <Pause />
+        </Button>
+      )}
+      {canClearSamplesAndLog && (
+        <Button
+          onClick={() => {
+            if (!canClearSamplesAndLog) return;
+            openConfirm({
+              title: 'Clear samples & loss log',
+              message: `Are you sure you want to clear the samples folder and loss_log.* files for job "${job.name}"? This will permanently delete the samples directory and all loss_log files in the job output directory. The job will continue running.`,
+              type: 'warning',
+              confirmText: 'Clear',
+              onConfirm: async () => {
+                await clearSamplesAndLossLog(job.id);
+                if (onRefresh) onRefresh();
+              },
+            });
+          }}
+          className={`ml-2 opacity-100`}
+        >
+          <Eraser />
         </Button>
       )}
       {!hideView && (

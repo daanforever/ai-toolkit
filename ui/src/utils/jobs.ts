@@ -66,6 +66,22 @@ export const resetJob = (jobID: string) => {
   });
 };
 
+export const clearSamplesAndLossLog = (jobID: string) => {
+  return new Promise<void>((resolve, reject) => {
+    apiClient
+      .get(`/api/jobs/${jobID}/clear-samples-and-log`)
+      .then(res => res.data)
+      .then(data => {
+        console.log('Samples and loss log cleared:', data);
+        resolve();
+      })
+      .catch(error => {
+        console.error('Error clearing samples and loss log:', error);
+        reject(error);
+      });
+  });
+};
+
 export const markJobAsStopped = (jobID: string) => {
   return new Promise<void>((resolve, reject) => {
     apiClient
@@ -93,13 +109,14 @@ export const getAvaliableJobActions = (job: Job) => {
   const canEdit = ['queued', 'completed', 'stopped', 'error'].includes(job.status) && !isStopping;
   const canRemoveFromQueue = job.status === 'queued';
   const canStop = job.status === 'running' && !isStopping;
+  const canClearSamplesAndLog = job.status === 'running' && !isStopping;
   let canStart = ['stopped', 'error'].includes(job.status) && !isStopping;
   const canReset = ['completed', 'stopped', 'error'].includes(job.status) && !isStopping;
   // can resume if more steps were added
   if (job.status === 'completed' && jobConfig.config.process[0].train.steps > job.step && !isStopping) {
     canStart = true;
   }
-  return { canDelete, canEdit, canStop, canStart, canRemoveFromQueue, canReset };
+  return { canDelete, canEdit, canStop, canStart, canRemoveFromQueue, canReset, canClearSamplesAndLog };
 };
 
 export const getNumberOfSamples = (job: Job) => {
