@@ -84,7 +84,14 @@ def _create_scheduler_with_warmup(
             return torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
                 optimizer, T_0=main_total_iters, **scheduler_kwargs
             )
-    
+  
+    # save base_lr
+    base_lr = optimizer.param_groups[0]['lr']
+
+    # set initial lr for warmup (10% of base_lr)
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = base_lr * 0.1
+
     # Create warmup scheduler (linear from ~0 to 1.0)
     warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
         optimizer,
