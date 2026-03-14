@@ -31,7 +31,11 @@ class Adafactor(torch.optim.Optimizer):
         clip_threshold (`float`, *optional*, defaults to 1.0):
             Threshold of root mean square of final gradient update
         decay_rate (`float`, *optional*, defaults to -0.8):
+            Deprecated. Previously used to compute beta2 as `1.0 + decay_rate`.
+            Now beta2 is specified directly. Kept for backward compatibility.
+        beta2 (`float`, *optional*, defaults to 0.99):
             Coefficient used to compute running averages of square
+            (second moment, like in Adam). Suggested values: 0.99 (default), 0.999.
         rms_max_decay_rate (`float`, *optional*, defaults to `0.97`):
             Decay rate for running max of update RMS used in activity normalization.
             Applied each step: ``update_rms_max = max(update_rms_max * rms_max_decay_rate, update_rms)``.
@@ -119,8 +123,9 @@ class Adafactor(torch.optim.Optimizer):
         eps=(1e-30, 1e-3),
         clip_threshold=1.0,
         decay_rate=-0.8,
-        rms_max_decay_rate=0.97,
         beta1=None,
+        beta2=0.99,
+        rms_max_decay_rate=0.97,
         weight_decay=0.0,
         scale_parameter=False,
         relative_step=False,
@@ -142,9 +147,9 @@ class Adafactor(torch.optim.Optimizer):
             "lr": lr,
             "eps": eps,
             "clip_threshold": clip_threshold,
-            "decay_rate": decay_rate,
-            "rms_max_decay_rate": rms_max_decay_rate,
             "beta1": beta1,
+            "beta2": beta2,
+            "rms_max_decay_rate": rms_max_decay_rate,
             "weight_decay": weight_decay,
             "scale_parameter": scale_parameter,
             "relative_step": relative_step,
@@ -519,7 +524,7 @@ class Adafactor(torch.optim.Optimizer):
                 )
                 lr = self._get_lr(group, state)
 
-                beta2t = 1.0 + group["decay_rate"]
+                beta2 = group["beta2"]
                 eps = group["eps"]
                 if isinstance(eps, tuple) or isinstance(eps, list):
                     eps = eps[0]
@@ -528,10 +533,10 @@ class Adafactor(torch.optim.Optimizer):
                     exp_avg_sq_row = state["exp_avg_sq_row"]
                     exp_avg_sq_col = state["exp_avg_sq_col"]
 
-                    exp_avg_sq_row.mul_(beta2t).add_(
-                        update.mean(dim=-1), alpha=(1.0 - beta2t))
-                    exp_avg_sq_col.mul_(beta2t).add_(
-                        update.mean(dim=-2), alpha=(1.0 - beta2t))
+                    exp_avg_sq_row.mul_(beta2).add_(
+                        update.mean(dim=-1), alpha=(1.0 - beta2))
+                    exp_avg_sq_col.mul_(beta2).add_(
+                        update.mean(dim=-2), alpha=(1.0 - beta2))
 
                     # Approximation of exponential moving average of square of gradient
                     update = self._approx_sq_grad(
@@ -540,7 +545,7 @@ class Adafactor(torch.optim.Optimizer):
                 else:
                     exp_avg_sq = state["exp_avg_sq"]
 
-                    exp_avg_sq.mul_(beta2t).add_(update, alpha=(1.0 - beta2t))
+                    exp_avg_sq.mul_(beta2).add_(update, alpha=(1.0 - beta2))
                     update = exp_avg_sq.rsqrt().mul_(grad)
 
                 update.div_(
