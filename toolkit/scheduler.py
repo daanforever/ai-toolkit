@@ -89,6 +89,7 @@ def _create_scheduler_with_warmup(
     base_lr = optimizer.param_groups[0]['lr']
     print(f"Using LR {base_lr} for warmup")
     print(f"Param groups LR: {[g['lr'] for g in optimizer.param_groups]}")
+    optimizer.param_groups[0]['initial_lr'] = base_lr / 10
 
     # Create warmup scheduler (linear from ~0 to 1.0)
     warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
