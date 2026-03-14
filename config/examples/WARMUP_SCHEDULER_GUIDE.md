@@ -46,6 +46,18 @@ LR |
 - **`total_iters`**: TOTAL training iterations (including warmup)
 - **`T_0`/`T_max`**: Main scheduler iterations (after warmup), overrides calculation from total_iters
 
+### Example config:
+
+```yaml
+train:
+  lr_scheduler: "cosine_with_restarts"
+  lr_scheduler_params:
+    warmup_steps: 100
+    T_0: 100
+    T_mult: 1
+    eta_min: 1e-5
+```
+
 ### Example: Training with 1000 total steps
 
 **Config 1: Using total_iters (automatic calculation)**
