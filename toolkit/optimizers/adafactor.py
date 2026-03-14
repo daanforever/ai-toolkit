@@ -166,6 +166,7 @@ class Adafactor(torch.optim.Optimizer):
         self._rms_max_decay_rate = rms_max_decay_rate
         self._lr = lr
         self._warmup_steps = warmup_steps
+        self._beta2 = beta2
 
         self.is_stochastic_rounding_accumulation = False
 
@@ -225,6 +226,7 @@ class Adafactor(torch.optim.Optimizer):
             group["lr_smoothing_rate"] = self._lr_smoothing_rate
             group["rms_max_decay_rate"] = self._rms_max_decay_rate
             group["warmup_steps"] = self._warmup_steps
+            group["beta2"] = group.get("beta2", self._beta2)
             # Normalize group_rms_max if present (old checkpoints may not have it)
             if "group_rms_max" in group and not isinstance(group["group_rms_max"], torch.Tensor):
                 group["group_rms_max"] = torch.tensor(group["group_rms_max"], dtype=torch.float32)
