@@ -95,7 +95,8 @@ def _create_scheduler_with_warmup(
         optimizer,
         start_factor=0.1,   # 1/10 of the target LR
         end_factor=1.0,      # End at full LR
-        total_iters=warmup_steps
+        total_iters=warmup_steps,
+        last_epoch=0
     )
     
     # Create main scheduler
