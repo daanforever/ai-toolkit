@@ -457,7 +457,7 @@ class Adafactor(torch.optim.Optimizer):
                     group, grad_shape)
                 # State Initialization
                 if len(state) == 0:
-                    state["step"] = 0
+                    # state["step"] = 0
 
                     if use_first_moment:
                         # Exponential moving average of gradient values
@@ -492,7 +492,7 @@ class Adafactor(torch.optim.Optimizer):
                 if p.dtype != torch.float32:
                     p_data_fp32 = p_data_fp32.clone().float()
 
-                state["step"] += 1
+                # state["step"] += 1
                 state["RMS"] = self._rms(p_data_fp32)
                 if "rms_max" not in state:
                     state["rms_max"] = state["RMS"].clone().detach()
