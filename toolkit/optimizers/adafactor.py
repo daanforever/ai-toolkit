@@ -519,8 +519,7 @@ class Adafactor(torch.optim.Optimizer):
                 )
                 lr = self._get_lr(group, state)
 
-                beta2t = 1.0 - math.pow(state["step"], group["decay_rate"])
-                beta2t = min(0.99, beta2t)
+                beta2t = 1.0 + group["decay_rate"]
                 eps = group["eps"]
                 if isinstance(eps, tuple) or isinstance(eps, list):
                     eps = eps[0]
