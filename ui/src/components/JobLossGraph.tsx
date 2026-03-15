@@ -71,7 +71,7 @@ export default function JobLossGraph({ job }: Props) {
   // Controls
   const [useLogScale, setUseLogScale] = useState(false);
   const [showRaw, setShowRaw] = useState(false);
-  const [showSmoothed, setShowSmoothed] = useState(true);
+  const [showSmoothed, setShowSmoothed] = useState(false);
 
   // 0..100 slider. 100 = no smoothing, 0 = heavy smoothing.
   const [smoothing, setSmoothing] = useState(90);
@@ -80,7 +80,7 @@ export default function JobLossGraph({ job }: Props) {
   const [plotStride, setPlotStride] = useState(1);
 
   // show only last N points in the chart (0 = all)
-  const [windowSize, setWindowSize] = useState<number>(4000);
+  const [windowSize, setWindowSize] = useState<number>(250);
 
   // quick y clipping for readability
   const [clipOutliers, setClipOutliers] = useState(false);
@@ -93,7 +93,7 @@ export default function JobLossGraph({ job }: Props) {
     setEnabled(prev => {
       const next = { ...prev };
       for (const k of filteredKeys) {
-        if (next[k] === undefined) next[k] = true;
+        if (next[k] === undefined) next[k] = false;
       }
       // drop removed keys
       for (const k of Object.keys(next)) {
