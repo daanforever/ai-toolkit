@@ -2091,39 +2091,39 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                 })
                                 self.diff_guidance_norm = None
                             # Log weight update RMS if available (Adafactor optimizer statistic)
-                            if update_rms > 0:
+                            
                                 self.logger.log({
                                     'train/update_rms': update_rms,
                                 })
-                            if update_rms_max > 0:
+
                                 self.logger.log({
                                     'train/update_rms_max': update_rms_max,
                                 })
-                            if param_rms > 0:
+
                                 self.logger.log({
                                     'train/param_rms': param_rms,
                                 })
-                            if grad_rms > 0:
+
                                 self.logger.log({
                                     'train/grad_rms': grad_rms,
                                 })
-                            if grad_rms_max > 0:
+
                                 self.logger.log({
                                     'train/grad_rms_max': grad_rms_max,
                                 })
-                            if gns > 0:
+
                                 self.logger.log({
                                     'train/gns': gns,
                                 })
-                            if abs(dir_consistency) > 0:
+
                                 self.logger.log({
                                     'train/dir_consistency': dir_consistency,
                                 })
-                            if step_efficiency > 0:
+
                                 self.logger.log({
                                     'train/step_efficiency': step_efficiency,
                                 })
-                            if loss_dict is not None:
+
                                 for key, value in loss_dict.items():
                                     self.logger.log({
                                         f'loss/{key}': value,
@@ -2141,35 +2141,35 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                 })
                                 self.diff_guidance_norm = None
                             # Log weight update RMS if available (Adafactor optimizer statistic)
-                            if update_rms > 0:
+
                                 self.logger.log({
                                     'train/update_rms': update_rms,
                                 })
-                            if update_rms_max > 0:
+
                                 self.logger.log({
                                     'train/update_rms_max': update_rms_max,
                                 })
-                            if param_rms > 0:
+
                                 self.logger.log({
                                     'train/param_rms': param_rms,
                                 })
-                            if grad_rms > 0:
+
                                 self.logger.log({
                                     'train/grad_rms': grad_rms,
                                 })
-                            if grad_rms_max > 0:
+
                                 self.logger.log({
                                     'train/grad_rms_max': grad_rms_max,
                                 })
-                            if gns > 0:
+
                                 self.logger.log({
                                     'train/gns': gns,
                                 })
-                            if abs(dir_consistency) > 0:
+
                                 self.logger.log({
                                     'train/dir_consistency': dir_consistency,
                                 })
-                            if step_efficiency > 0:
+
                                 self.logger.log({
                                     'train/step_efficiency': step_efficiency,
                                 })
