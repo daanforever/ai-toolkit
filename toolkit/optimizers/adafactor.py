@@ -348,7 +348,8 @@ class Adafactor(torch.optim.Optimizer):
             # Emergency Brake: multiplicative factor based on directional consistency
             dir_val = self._get_group_scalars(param_group, "dir_consistency", default=0.0, reduction='mean')
             dir_val = dir_val or 0.0  # None when beta1=None → neutral 0.0
-            brake = ((0.1 + max(dir_val, -0.1)) / 0.1).clamp(0.0, 1.0)
+            raw_brake = (0.1 + max(dir_val, -0.1)) / 0.1
+            brake = max(0.0, min(1.0, raw_brake))
 
             # Ratio of parameter RMS to group RMS max
             ratio = max(eps0, (group_rms_max - param_rms) / (group_rms_max + eps0))

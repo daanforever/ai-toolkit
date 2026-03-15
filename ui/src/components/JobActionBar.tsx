@@ -24,7 +24,7 @@ export default function JobActionBar({
   hideView,
   autoStartQueue = false,
 }: JobActionBarProps) {
-  const { canStart, canStop, canDelete, canEdit, canRemoveFromQueue, canReset, canClearSamplesAndLog } = getAvaliableJobActions(job);
+  const { canStart, canStop, canDelete, canEdit, canRemoveFromQueue, canReset, canClear } = getAvaliableJobActions(job);
 
   if (!afterDelete) afterDelete = onRefresh;
 
@@ -78,10 +78,10 @@ export default function JobActionBar({
           <Pause />
         </Button>
       )}
-      {canClearSamplesAndLog && (
+      {canClear && (
         <Button
           onClick={() => {
-            if (!canClearSamplesAndLog) return;
+            if (!canClear) return;
             openConfirm({
               title: 'Clear samples & loss log',
               message: `Are you sure you want to clear the samples folder and loss_log.* files for job "${job.name}"? This will permanently delete the samples directory and all loss_log files in the job output directory. The job will continue running.`,
