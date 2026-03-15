@@ -589,18 +589,32 @@ class Adafactor(torch.optim.Optimizer):
 
                 if use_first_moment:
                     exp_avg = state["exp_avg"]
-                    # Directional Consistency: cosine similarity between current update and EMA from previous step
+                    
+                    # 1. Directional Consistency (before EMA update)
+                    # Compare current gradient direction with history
                     state["dir_consistency"] = torch.nn.functional.cosine_similarity(
                         update.flatten(), exp_avg.flatten(), dim=0, eps=1e-8
                     )
-                    exp_avg.mul_(group["beta1"]).add_(
-                        update, alpha=(1 - group["beta1"]))
+
+                    # 2. Update EMA of direction
+                    exp_avg.mul_(group["beta1"]).add_(update, alpha=(1 - group["beta1"]))
+                    
+                    # 3. GNS (after update)
+                    # Use energy in one scale to avoid extreme values.
+                    # signal_sq - energy of averaged direction
+                    signal_sq = exp_avg.pow(2).mean()
+                    
+                    # current_update_sq - energy of current direction (in Adafactor ~1.0,
+                    # we compute it explicitly so scales match)
+                    # Use update before it was modified by EMA
+                    current_update_sq = update.pow(2).mean()
+                    
+                    # GNS = (Noise / Signal)
+                    # Early steps: signal_sq is small so GNS is large (e.g. 100-400);
+                    # normal, drops to 0.1-5.0 in 50-100 steps
+                    state["gns"] = (current_update_sq - signal_sq) / (signal_sq + 1e-12)
+                    
                     update = exp_avg
-                    # Gradient Noise Scale: ratio of noise to signal in normalized directions.
-                    # In Adafactor, updates are normalized to RMS=1.0 before EMA, so total energy is always 1.0.
-                    # GNS = (1 - signal_sq) / signal_sq: 0 = clean signal, high = noisy (consider larger batch or lower LR).
-                    signal_sq = state["exp_avg"].pow(2).mean()
-                    state["gns"] = (1.0 - signal_sq) / (signal_sq + 1e-8)
                 else:
                     state["gns"] = torch.tensor(0.0, device=update.device)
 
