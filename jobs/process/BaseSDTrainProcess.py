@@ -2058,24 +2058,15 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                     if loss_dict is not None:
                                         for key, value in loss_dict.items():
                                             self.writer.add_scalar(f"{key}", value, self.step_num)
-                                        self.writer.add_scalar(f"lr", learning_rate, self.step_num)
-                                        # Log weight update RMS if available (shows optimizer step magnitude)
-                                        if update_rms > 0:
-                                            self.writer.add_scalar("train/update_rms", update_rms, self.step_num)
-                                        if update_rms_max > 0:
-                                            self.writer.add_scalar("train/update_rms_max", update_rms_max, self.step_num)
-                                        if param_rms > 0:
-                                            self.writer.add_scalar("train/param_rms", param_rms, self.step_num)
-                                        if grad_rms > 0:
-                                            self.writer.add_scalar("train/grad_rms", grad_rms, self.step_num)
-                                        if grad_rms_max > 0:
-                                            self.writer.add_scalar("train/grad_rms_max", grad_rms_max, self.step_num)
-                                        if gns > 0:
-                                            self.writer.add_scalar("train/gns", gns, self.step_num)
-                                        if abs(dir_consistency) > 0:
-                                            self.writer.add_scalar("train/dir_consistency", dir_consistency, self.step_num)
-                                        if step_efficiency > 0:
-                                            self.writer.add_scalar("train/step_efficiency", step_efficiency, self.step_num)
+                                            self.writer.add_scalar(f"lr", learning_rate, self.step_num)
+                                            self.writer.add_scalar(f"train/update_rms", update_rms, self.step_num)
+                                            self.writer.add_scalar(f"train/update_rms_max", update_rms_max, self.step_num)
+                                            self.writer.add_scalar(f"train/param_rms", param_rms, self.step_num)
+                                            self.writer.add_scalar(f"train/grad_rms", grad_rms, self.step_num)
+                                            self.writer.add_scalar(f"train/grad_rms_max", grad_rms_max, self.step_num)
+                                            self.writer.add_scalar(f"train/gns", gns, self.step_num)
+                                            self.writer.add_scalar(f"train/dir_consistency", dir_consistency, self.step_num)
+                                            self.writer.add_scalar(f"train/step_efficiency", step_efficiency, self.step_num)
                                 if self.progress_bar is not None:
                                     self.progress_bar.unpause()
                         
@@ -2090,44 +2081,43 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                     'diff_guidance_norm': self.diff_guidance_norm,
                                 })
                                 self.diff_guidance_norm = None
-                            # Log weight update RMS if available (Adafactor optimizer statistic)
                             
-                                self.logger.log({
-                                    'train/update_rms': update_rms,
-                                })
+                            self.logger.log({
+                                'train/update_rms': update_rms,
+                            })
 
-                                self.logger.log({
-                                    'train/update_rms_max': update_rms_max,
-                                })
+                            self.logger.log({
+                                'train/update_rms_max': update_rms_max,
+                            })
 
-                                self.logger.log({
-                                    'train/param_rms': param_rms,
-                                })
+                            self.logger.log({
+                                'train/param_rms': param_rms,
+                            })
 
-                                self.logger.log({
-                                    'train/grad_rms': grad_rms,
-                                })
+                            self.logger.log({
+                                'train/grad_rms': grad_rms,
+                            })
 
-                                self.logger.log({
-                                    'train/grad_rms_max': grad_rms_max,
-                                })
+                            self.logger.log({
+                                'train/grad_rms_max': grad_rms_max,
+                            })
 
-                                self.logger.log({
-                                    'train/gns': gns,
-                                })
+                            self.logger.log({
+                                'train/gns': gns,
+                            })
 
-                                self.logger.log({
-                                    'train/dir_consistency': dir_consistency,
-                                })
+                            self.logger.log({
+                                'train/dir_consistency': dir_consistency,
+                            })
 
-                                self.logger.log({
-                                    'train/step_efficiency': step_efficiency,
-                                })
+                            self.logger.log({
+                                'train/step_efficiency': step_efficiency,
+                            })
 
-                                for key, value in loss_dict.items():
-                                    self.logger.log({
-                                        f'loss/{key}': value,
-                                    })
+                            for key, value in loss_dict.items():
+                                self.logger.log({
+                                    f'loss/{key}': value,
+                                })
                     elif self.logging_config.log_every is None:
                         if self.accelerator.is_main_process:
                             # log every step
@@ -2140,44 +2130,43 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                     'diff_guidance_norm': self.diff_guidance_norm,
                                 })
                                 self.diff_guidance_norm = None
-                            # Log weight update RMS if available (Adafactor optimizer statistic)
 
-                                self.logger.log({
-                                    'train/update_rms': update_rms,
-                                })
+                            self.logger.log({
+                                'train/update_rms': update_rms,
+                            })
 
-                                self.logger.log({
-                                    'train/update_rms_max': update_rms_max,
-                                })
+                            self.logger.log({
+                                'train/update_rms_max': update_rms_max,
+                            })
 
-                                self.logger.log({
-                                    'train/param_rms': param_rms,
-                                })
+                            self.logger.log({
+                                'train/param_rms': param_rms,
+                            })
 
-                                self.logger.log({
-                                    'train/grad_rms': grad_rms,
-                                })
+                            self.logger.log({
+                                'train/grad_rms': grad_rms,
+                            })
 
-                                self.logger.log({
-                                    'train/grad_rms_max': grad_rms_max,
-                                })
+                            self.logger.log({
+                                'train/grad_rms_max': grad_rms_max,
+                            })
 
-                                self.logger.log({
-                                    'train/gns': gns,
-                                })
+                            self.logger.log({
+                                'train/gns': gns,
+                            })
 
-                                self.logger.log({
-                                    'train/dir_consistency': dir_consistency,
-                                })
+                            self.logger.log({
+                                'train/dir_consistency': dir_consistency,
+                            })
 
-                                self.logger.log({
-                                    'train/step_efficiency': step_efficiency,
-                                })
+                            self.logger.log({
+                                'train/step_efficiency': step_efficiency,
+                            })
+
                             for key, value in loss_dict.items():
                                 self.logger.log({
                                     f'loss/{key}': value,
                                 })
-
 
                     if self.performance_log_every > 0 and self.step_num % self.performance_log_every == 0:
                         if self.progress_bar is not None:
