@@ -596,10 +596,11 @@ class Adafactor(torch.optim.Optimizer):
                     exp_avg.mul_(group["beta1"]).add_(
                         update, alpha=(1 - group["beta1"]))
                     update = exp_avg
-                    # Gradient Noise Scale: ratio of noise to signal
-                    total_sq = state["exp_avg_sq_row"].mean() if factored else state["exp_avg_sq"].mean()
+                    # Gradient Noise Scale: ratio of noise to signal in normalized directions.
+                    # In Adafactor, updates are normalized to RMS=1.0 before EMA, so total energy is always 1.0.
+                    # GNS = (1 - signal_sq) / signal_sq: 0 = clean signal, high = noisy (consider larger batch or lower LR).
                     signal_sq = state["exp_avg"].pow(2).mean()
-                    state["gns"] = (total_sq - signal_sq) / (signal_sq + 1e-8)
+                    state["gns"] = (1.0 - signal_sq) / (signal_sq + 1e-8)
                 else:
                     state["gns"] = torch.tensor(0.0, device=update.device)
 
