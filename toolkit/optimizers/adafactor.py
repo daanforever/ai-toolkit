@@ -345,8 +345,15 @@ class Adafactor(torch.optim.Optimizer):
             group_rms_max = param_group.get("group_rms_max", torch.tensor(eps1)).item()  # Group-level max parameter RMS
             update_rms    = param_state.get("update_rms", torch.tensor(0.0)).item()      # Previous update RMS
 
+            # Emergency Brake: multiplicative factor based on directional consistency
+            dir_val = self._get_group_scalars(param_group, "dir_consistency", default=0.0, reduction='mean')
+            dir_val = dir_val or 0.0  # None when beta1=None → neutral 0.0
+            brake = ((0.1 + max(dir_val, -0.1)) / 0.1).clamp(0.0, 1.0)
+
+            # Ratio of parameter RMS to group RMS max
             ratio = max(eps0, (group_rms_max - param_rms) / (group_rms_max + eps0))
-            new_lr = base_lr * (1 + min_lr * ratio)
+
+            new_lr = base_lr * (1 + min_lr * ratio) * brake
 
         if param_group.get("warmup_active", False):
             warmup_steps = param_group.get("warmup_steps", self._warmup_steps)

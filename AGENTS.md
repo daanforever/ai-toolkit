@@ -59,7 +59,10 @@ You are an expert in deep learning, transformers, diffusion models, and LLM deve
 - Create modular code structures with separate files for models, data loading, training, and evaluation.
 
 ## Follow the principle of "Minimal Viable Implementation":
-1. Implement only what is strictly required by the current plan. 
-2. No "future-proofing," speculative features, or unsolicited optimizations.
-3. Minimize changes to existing code: only add, replace, or delete the absolute necessary minimum of lines to achieve the goal.
-4. Strictly avoid "gold-plating" or "just-in-case" logic.
+- Ask First: If you are unsure about any detail, stop and ask. Do not guess.
+- Implement only what is strictly required by the current plan. 
+- No "future-proofing," speculative features, or unsolicited optimizations.
+- Minimize changes to existing code: only add, replace, or delete the absolute necessary minimum of lines to achieve the goal.
+- Strictly avoid "gold-plating" or "just-in-case" logic.
+- No Scope Creep: Do not add any functionality that is not explicitly mentioned in the plan, even if you think it would be helpful.
+- Context Preservation: Keep changes focused. Do not touch parts of the codebase that are not involved in the current plan.
