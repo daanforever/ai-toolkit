@@ -17,7 +17,7 @@ export async function PATCH(
     return NextResponse.json({ error: 'Job not found' }, { status: 404 });
   }
 
-  let body: { lr?: number; min_lr?: number; gaussian_mean?: number; gaussian_std?: number; weight_decay?: number; content_or_style?: string; timestep_type?: string; network_weights?: number[]; batch_size?: number; gradient_accumulation?: number; save_every?: number; sample_every?: number; min_snr_gamma?: number; debug?: boolean };
+  let body: { lr?: number; min_lr?: number; gaussian_mean?: number; gaussian_std?: number; weight_decay?: number; beta1?: number | null; beta2?: number; content_or_style?: string; timestep_type?: string; network_weights?: number[]; batch_size?: number; gradient_accumulation?: number; save_every?: number; sample_every?: number; min_snr_gamma?: number; debug?: boolean };
   try {
     body = await request.json();
   } catch {
@@ -30,7 +30,7 @@ export async function PATCH(
   const CONTENT_OR_STYLE_VALUES = ['balanced', 'content', 'style', 'gaussian', 'fixed_cycle'] as const;
   const TIMESTEP_TYPE_VALUES = ['sigmoid', 'linear', 'shift', 'weighted', 'gaussian'] as const;
 
-  const data: { runtime_lr?: number; runtime_min_lr?: number; runtime_gaussian_mean?: number; runtime_gaussian_std?: number; runtime_weight_decay?: number; runtime_content_or_style?: string; runtime_timestep_type?: string; runtime_network_weights?: string; runtime_batch_size?: number; runtime_gradient_accumulation?: number; runtime_save_every?: number; runtime_sample_every?: number; runtime_min_snr_gamma?: number; runtime_debug?: boolean } = {};
+  const data: { runtime_lr?: number; runtime_min_lr?: number; runtime_gaussian_mean?: number; runtime_gaussian_std?: number; runtime_weight_decay?: number; runtime_beta1?: number | null; runtime_beta2?: number; runtime_content_or_style?: string; runtime_timestep_type?: string; runtime_network_weights?: string; runtime_batch_size?: number; runtime_gradient_accumulation?: number; runtime_save_every?: number; runtime_sample_every?: number; runtime_min_snr_gamma?: number; runtime_debug?: boolean } = {};
 
   const lr = body.lr;
   if (lr !== undefined) {
@@ -85,6 +85,31 @@ export async function PATCH(
       );
     }
     data.runtime_weight_decay = weightDecay;
+  }
+
+  const beta1 = body.beta1;
+  if (beta1 !== undefined) {
+    if (beta1 === null || beta1 === 0) {
+      data.runtime_beta1 = null;
+    } else if (typeof beta1 !== 'number' || !Number.isFinite(beta1) || beta1 < 0 || beta1 >= 1) {
+      return NextResponse.json(
+        { error: 'beta1 must be null or a number in [0, 1)' },
+        { status: 400 }
+      );
+    } else {
+      data.runtime_beta1 = beta1;
+    }
+  }
+
+  const beta2 = body.beta2;
+  if (beta2 !== undefined) {
+    if (typeof beta2 !== 'number' || !Number.isFinite(beta2) || beta2 <= 0 || beta2 >= 1) {
+      return NextResponse.json(
+        { error: 'beta2 must be a number in (0, 1)' },
+        { status: 400 }
+      );
+    }
+    data.runtime_beta2 = beta2;
   }
 
   const contentOrStyle = body.content_or_style;
@@ -197,7 +222,7 @@ export async function PATCH(
 
   if (Object.keys(data).length === 0) {
     return NextResponse.json(
-      { error: 'At least one of lr, min_lr, gaussian_mean, gaussian_std, weight_decay, content_or_style, timestep_type, network_weights, batch_size, gradient_accumulation, save_every, sample_every, min_snr_gamma, debug must be provided' },
+      { error: 'At least one of lr, min_lr, gaussian_mean, gaussian_std, weight_decay, beta1, beta2, content_or_style, timestep_type, network_weights, batch_size, gradient_accumulation, save_every, sample_every, min_snr_gamma, debug must be provided' },
       { status: 400 }
     );
   }

@@ -70,6 +70,12 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
   const timestepType = train?.timestep_type ?? defaultJobConfig.config.process[0].train.timestep_type;
   const contentOrStyle = train?.content_or_style ?? defaultJobConfig.config.process[0].train.content_or_style;
   const weightDecay = optimizerParams?.weight_decay ?? defaultJobConfig.config.process[0].train.optimizer_params.weight_decay;
+  const beta1 = optimizerParams?.beta1 != null
+    ? Number(optimizerParams.beta1)
+    : null;
+  const beta2 = optimizerParams?.beta2 != null
+    ? Number(optimizerParams.beta2)
+    : 0.99;
   const lr = typeof train?.lr === 'number' && Number.isFinite(train.lr)
     ? train.lr
     : (defaultJobConfig.config.process[0].train.lr ?? 1e-4);
@@ -125,6 +131,8 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     process.train.timestep_type = timestepType;
     process.train.content_or_style = contentOrStyle;
     process.train.optimizer_params.weight_decay = weightDecay;
+    (process.train.optimizer_params as Record<string, number | null>).beta1 = beta1;
+    (process.train.optimizer_params as Record<string, number>).beta2 = beta2;
     (process.train as Record<string, number>).lr = lr;
     if (hasMinLr) {
       (process.train.optimizer_params as Record<string, number>).min_lr = minLr ?? 1e-6;
@@ -178,6 +186,8 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         lr?: number;
         min_lr?: number;
         weight_decay?: number;
+        beta1?: number | null;
+        beta2?: number;
         content_or_style?: string;
         timestep_type?: string;
         gaussian_mean?: number;
@@ -191,6 +201,8 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         debug?: boolean;
       } = {
         weight_decay: weightDecay,
+        beta1: beta1 === 0 ? null : beta1,
+        beta2: beta2,
         content_or_style: contentOrStyle,
         timestep_type: timestepType,
         gaussian_mean: gaussianMean,
@@ -233,6 +245,8 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     timestepType,
     contentOrStyle,
     weightDecay,
+    beta1,
+    beta2,
     lr,
     minLr,
     hasMinLr,
@@ -314,6 +328,41 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
               onChange={(e) => {
                 const v = parseFloat(e.target.value);
                 if (Number.isFinite(v)) setValue(v, `${OPTIMIZER_PARAMS_PATH}.weight_decay`);
+                setApplyStatus('idle');
+              }}
+              className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+            />
+          </div>
+          <div className="space-y-2 flex-1 min-w-[140px]">
+            <p className="text-xs text-gray-400">Beta1</p>
+            <input
+              type="number"
+              min={0}
+              max={0.999}
+              step="0.01"
+              placeholder="e.g. 0.9"
+              value={beta1 ?? ''}
+              onChange={(e) => {
+                const v = e.target.value.trim();
+                const num = v === '' ? null : parseFloat(v);
+                setValue(num != null && Number.isFinite(num) ? num : null, `${OPTIMIZER_PARAMS_PATH}.beta1`);
+                setApplyStatus('idle');
+              }}
+              className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+            />
+          </div>
+          <div className="space-y-2 flex-1 min-w-[140px]">
+            <p className="text-xs text-gray-400">Beta2</p>
+            <input
+              type="number"
+              min={0.001}
+              max={0.9999}
+              step="0.001"
+              placeholder="e.g. 0.99"
+              value={beta2}
+              onChange={(e) => {
+                const v = parseFloat(e.target.value);
+                if (Number.isFinite(v)) setValue(v, `${OPTIMIZER_PARAMS_PATH}.beta2`);
                 setApplyStatus('idle');
               }}
               className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"

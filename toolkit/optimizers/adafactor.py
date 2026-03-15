@@ -166,6 +166,7 @@ class Adafactor(torch.optim.Optimizer):
         self._rms_max_decay_rate = rms_max_decay_rate
         self._lr = lr
         self._warmup_steps = warmup_steps
+        self._beta1 = beta1
         self._beta2 = beta2
 
         self.is_stochastic_rounding_accumulation = False
@@ -217,6 +218,22 @@ class Adafactor(torch.optim.Optimizer):
         if is_debug_enabled():
             print_acc(f"Adafactor: applied runtime weight_decay={value}")
 
+    def set_beta1(self, value: float | None) -> None:
+        """Update beta1 at runtime (e.g. from UI). None disables momentum."""
+        self._beta1 = value
+        for group in self.param_groups:
+            group["beta1"] = value
+        if is_debug_enabled():
+            print_acc(f"Adafactor: applied runtime beta1={value}")
+
+    def set_beta2(self, value: float) -> None:
+        """Update beta2 at runtime (e.g. from UI)."""
+        self._beta2 = value
+        for group in self.param_groups:
+            group["beta2"] = value
+        if is_debug_enabled():
+            print_acc(f"Adafactor: applied runtime beta2={value}")
+
     def load_state_dict(self, state_dict):
         super().load_state_dict(state_dict)
         # Apply current run's min_lr/lr_smoothing_rate/rms_max_decay_rate/lr so changed config is used after restart.
@@ -226,6 +243,7 @@ class Adafactor(torch.optim.Optimizer):
             group["lr_smoothing_rate"] = self._lr_smoothing_rate
             group["rms_max_decay_rate"] = self._rms_max_decay_rate
             group["warmup_steps"] = self._warmup_steps
+            group["beta1"] = group.get("beta1", self._beta1)
             group["beta2"] = group.get("beta2", self._beta2)
             # Normalize group_rms_max if present (old checkpoints may not have it)
             if "group_rms_max" in group and not isinstance(group["group_rms_max"], torch.Tensor):

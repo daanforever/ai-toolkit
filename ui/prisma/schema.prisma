@@ -49,6 +49,8 @@ model RuntimeParams {
   runtime_gaussian_mean    Float?
   runtime_gaussian_std     Float?
   runtime_weight_decay     Float?
+  runtime_beta1            Float?
+  runtime_beta2            Float?
   runtime_content_or_style String?
   runtime_timestep_type    String?
   runtime_network_weights  String?

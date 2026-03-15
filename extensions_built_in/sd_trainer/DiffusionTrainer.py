@@ -44,6 +44,8 @@ class DiffusionTrainer(SDTrainer):
             self._last_applied_runtime_gaussian_mean = None
             self._last_applied_runtime_gaussian_std = None
             self._last_applied_runtime_weight_decay = None
+            self._last_applied_runtime_beta1 = None
+            self._last_applied_runtime_beta2 = None
             self._last_applied_runtime_content_or_style = None
             self._last_applied_runtime_timestep_type = None
             self._last_applied_runtime_network_weights: Optional[tuple] = None
@@ -331,6 +333,44 @@ class DiffusionTrainer(SDTrainer):
 
         return _read()
 
+    def get_runtime_beta1(self):
+        """Read runtime_beta1 from DB (only when is_ui_trainer). Returns float or None."""
+        if not self.is_ui_trainer:
+            return None
+
+        def _read():
+            with self._db_connect() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT runtime_beta1 FROM RuntimeParams WHERE jobId = ?",
+                    (self.job_id,),
+                )
+                row = cursor.fetchone()
+                if row is None or row[0] is None:
+                    return None
+                return float(row[0])
+
+        return _read()
+
+    def get_runtime_beta2(self):
+        """Read runtime_beta2 from DB (only when is_ui_trainer). Returns float or None."""
+        if not self.is_ui_trainer:
+            return None
+
+        def _read():
+            with self._db_connect() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT runtime_beta2 FROM RuntimeParams WHERE jobId = ?",
+                    (self.job_id,),
+                )
+                row = cursor.fetchone()
+                if row is None or row[0] is None:
+                    return None
+                return float(row[0])
+
+        return _read()
+
     def apply_runtime_batch_size(self):
         """If runtime_batch_size is set in DB, apply it to train_config and recreate data loaders."""
         if not self.is_ui_trainer:
@@ -572,6 +612,50 @@ class DiffusionTrainer(SDTrainer):
                 )
         self._last_applied_runtime_weight_decay = value
 
+    def apply_runtime_beta1(self):
+        """If runtime_beta1 is set in DB, apply it to the optimizer (e.g. Adafactor). None disables momentum."""
+        if not self.is_ui_trainer:
+            return
+        value = self.get_runtime_beta1()
+        if value == self._last_applied_runtime_beta1:
+            return
+        optimizer = unwrap_model(self.optimizer)
+        while getattr(optimizer, "optimizer", None) is not None:
+            optimizer = optimizer.optimizer
+        if hasattr(optimizer, "set_beta1"):
+            if is_debug_enabled():
+                print_acc(f"\nruntime_beta1 from UI/DB: {value}")
+            optimizer.set_beta1(value)
+        else:
+            if is_debug_enabled():
+                print_acc(
+                    f"\nruntime_beta1 from DB not applied: optimizer has no set_beta1 (type: {type(optimizer).__name__})"
+                )
+        self._last_applied_runtime_beta1 = value
+
+    def apply_runtime_beta2(self):
+        """If runtime_beta2 is set in DB, apply it to the optimizer (e.g. Adafactor)."""
+        if not self.is_ui_trainer:
+            return
+        value = self.get_runtime_beta2()
+        if value is None:
+            return
+        if value == self._last_applied_runtime_beta2:
+            return
+        optimizer = unwrap_model(self.optimizer)
+        while getattr(optimizer, "optimizer", None) is not None:
+            optimizer = optimizer.optimizer
+        if hasattr(optimizer, "set_beta2"):
+            if is_debug_enabled():
+                print_acc(f"\nruntime_beta2 from UI/DB: {value}")
+            optimizer.set_beta2(value)
+        else:
+            if is_debug_enabled():
+                print_acc(
+                    f"\nruntime_beta2 from DB not applied: optimizer has no set_beta2 (type: {type(optimizer).__name__})"
+                )
+        self._last_applied_runtime_beta2 = value
+
     def get_runtime_content_or_style(self):
         """Read runtime_content_or_style from DB (only when is_ui_trainer). Returns str or None."""
         if not self.is_ui_trainer:
@@ -708,6 +792,8 @@ class DiffusionTrainer(SDTrainer):
         self._last_applied_runtime_gaussian_mean = None
         self._last_applied_runtime_gaussian_std = None
         self._last_applied_runtime_weight_decay = None
+        self._last_applied_runtime_beta1 = None
+        self._last_applied_runtime_beta2 = None
         self._last_applied_runtime_content_or_style = None
         self._last_applied_runtime_timestep_type = None
         self._last_applied_runtime_network_weights = None
@@ -833,6 +919,8 @@ class DiffusionTrainer(SDTrainer):
             self.apply_runtime_min_lr()
             self.apply_runtime_gaussian_params()
             self.apply_runtime_weight_decay()
+            self.apply_runtime_beta1()
+            self.apply_runtime_beta2()
             self.apply_runtime_content_or_style()
             self.apply_runtime_timestep_type()
             self.apply_runtime_network_weights()
