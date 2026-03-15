@@ -1944,6 +1944,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 gns = 0.0  # Gradient Noise Scale (Adafactor with momentum)
                 dir_consistency = 0.0  # Directional consistency with EMA (Adafactor with momentum)
                 step_efficiency = 0.0  # Step efficiency: update_rms / update_rms_max (Adafactor)
+                dynamic_gain = 0.0  # Dynamic gain (Adafactor)
                 if not did_oom and loss_dict is not None:
                     if hasattr(optimizer, 'get_avg_learning_rate'):
                         learning_rate = optimizer.get_avg_learning_rate()
@@ -1975,6 +1976,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         dir_consistency = optimizer.get_avg_dir_consistency()
                     if hasattr(optimizer, 'get_avg_step_efficiency'):
                         step_efficiency = optimizer.get_avg_step_efficiency()
+                    if hasattr(optimizer, 'get_avg_dynamic_gain'):
+                        dynamic_gain = optimizer.get_avg_dynamic_gain()
 
                     prog_bar_string = f"lr: {learning_rate:.1e}"
                     if update_rms > 0:
@@ -2067,6 +2070,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                             self.writer.add_scalar(f"train/gns", gns, self.step_num)
                                             self.writer.add_scalar(f"train/dir_consistency", dir_consistency, self.step_num)
                                             self.writer.add_scalar(f"train/step_efficiency", step_efficiency, self.step_num)
+                                            self.writer.add_scalar(f"train/dynamic_gain", dynamic_gain, self.step_num)
                                 if self.progress_bar is not None:
                                     self.progress_bar.unpause()
                         
@@ -2112,6 +2116,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
                             self.logger.log({
                                 'train/step_efficiency': step_efficiency,
+                            })
+
+                            self.logger.log({
+                                'train/dynamic_gain': dynamic_gain,
                             })
 
                             for key, value in loss_dict.items():
@@ -2161,6 +2169,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
                             self.logger.log({
                                 'train/step_efficiency': step_efficiency,
+                            })
+
+                            self.logger.log({
+                                'train/dynamic_gain': dynamic_gain,
                             })
 
                             for key, value in loss_dict.items():

@@ -350,6 +350,8 @@ class Adafactor(torch.optim.Optimizer):
             raw_brake = (0.5 + dir_val) / 0.5 
             brake = max(0.2, min(1.0, raw_brake))
 
+            self._update_beta2_from_gns(param_group, param_state)
+
             # Ratio of parameter RMS to group RMS max
             ratio = max(eps0, (group_rms_max - param_rms) / (group_rms_max + eps0))
 
@@ -377,6 +379,22 @@ class Adafactor(torch.optim.Optimizer):
 
         param_state["lr_previous"] = new_lr
         return new_lr
+
+    def _update_beta2_from_gns(self, group, group_state):
+        """
+        Softly adjust group["beta2"] toward a GNS-based target (only when relative_step=True).
+        Low GNS (< 4) -> target 0.88; high GNS (> 10) -> target 0.99; else 0.9.
+        """
+        target_beta2 = 0.9
+        gns_t = group_state.get("gns")
+        current_gns = gns_t.item() if gns_t is not None else 0.0
+
+        if current_gns < 4.0:
+            target_beta2 = 0.88
+        elif current_gns > 10.0:
+            target_beta2 = 0.99
+
+        group["beta2"] = group["beta2"] + 0.01 * (target_beta2 - group["beta2"])
 
     @staticmethod
     def _get_options(param_group, param_shape):
@@ -709,6 +727,34 @@ class Adafactor(torch.optim.Optimizer):
         Use with get_avg_update_rms() to monitor normalization scale and update magnitude vs recent max.
         """
         return self._scalars_per_group_to_avg(self.get_update_rms_max())
+
+    def get_dynamic_gain(self):
+        """
+        Get dynamic gain (update_rms / grad_rms) for each parameter group.
+        Per-group value is mean over params in group via tensor reduction.
+
+        If dynamic_gain falls below 0.01 - you are barely learning.
+        If it is above 1.0 - you are flying blind.
+
+        Returns:
+            List[float]: One value per group; 0.0 for groups that haven't been updated yet.
+        """
+        out = []
+        for group in self.param_groups:
+            update_rms = self._get_group_scalars(group, "update_rms", default=0.0, reduction='mean')
+            grad_rms = self._get_group_scalars(group, "grad_rms", default=0.0, reduction='mean')
+            if update_rms is not None and grad_rms is not None and grad_rms > 0:
+                eps = group["eps"][0]
+                out.append(update_rms / (grad_rms + eps))
+            else:
+                out.append(0.0)
+        return out
+
+    def get_avg_dynamic_gain(self):
+        """
+        Average dynamic gain across all parameter groups (unified tensor reduction).
+        """
+        return self._scalars_per_group_to_avg(self.get_dynamic_gain())
 
     def get_grad_rms(self):
         """
