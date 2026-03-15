@@ -346,8 +346,7 @@ class Adafactor(torch.optim.Optimizer):
             update_rms    = param_state.get("update_rms", torch.tensor(0.0)).item()      # Previous update RMS
 
             # Emergency Brake: multiplicative factor based on directional consistency
-            dir_val = self._get_group_scalars(param_group, "dir_consistency", default=0.0, reduction='mean')
-            dir_val = dir_val or 0.0  # None when beta1=None → neutral 0.0
+            dir_val = param_group.get("dir_consistency_mean") or 0.0  # None when beta1=None → neutral 0.0
             raw_brake = (0.1 + max(dir_val, -0.1)) / 0.1
             brake = max(0.0, min(1.0, raw_brake))
 
@@ -472,6 +471,9 @@ class Adafactor(torch.optim.Optimizer):
             # Decay group_rms_max once per step
             if "group_rms_max" in group:
                 group["group_rms_max"] = group["group_rms_max"] * group["rms_max_decay_rate"]
+
+            # Pre-compute mean directional consistency once per group for _get_lr
+            group["dir_consistency_mean"] = self._get_group_scalars(group, "dir_consistency", default=0.0, reduction='mean')
 
             for p in group["params"]:
                 if p.grad is None or not p.requires_grad:
