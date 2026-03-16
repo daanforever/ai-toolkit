@@ -425,18 +425,17 @@ class Adafactor(torch.optim.Optimizer):
         param_state["lr_previous"] = new_lr
         return new_lr
 
-    def _update_beta1_from_dynamic_gain(self, group):
+    def _update_beta1_from_dynamic_gain(self, group, global_mean_dynamic_gain: Optional[float]) -> None:
         """
-        Update beta1 based on mean dynamic gain across the parameter group.
-        Scaling factor is normalized by number of groups to prevent excessive
-        cumulative updates when multiple parameter groups are present.
+        Update beta1 for a group based on global mean dynamic gain across all parameter groups.
+        Scaling factor is normalized by number of groups to prevent excessive cumulative updates
+        when multiple parameter groups are present.
         """
-        mean_dynamic_gain = self._get_group_scalars(group, "dynamic_gain", default=0.0, reduction='mean')
-        if isinstance(mean_dynamic_gain, torch.Tensor):
-            mean_dynamic_gain = mean_dynamic_gain.item()
+        if global_mean_dynamic_gain is None:
+            return
         num_groups = len(self.param_groups)
         scale = 0.01 / max(1, num_groups)  # Normalize by number of groups
-        delta = group["beta1"] * scale * (mean_dynamic_gain - 1.0)
+        delta = group["beta1"] * scale * (global_mean_dynamic_gain - 1.0)
         group["beta1"] = group["beta1"] + delta
         group["beta1"] = max(0.1, min(0.99, group["beta1"]))
 
@@ -490,6 +489,32 @@ class Adafactor(torch.optim.Optimizer):
         w_stacked = torch.stack(weights)
         if reduction == 'max':
             return v_stacked.max().item()
+        weighted_sum = torch.sum(v_stacked * w_stacked)
+        total_weight = torch.sum(w_stacked)
+        return (weighted_sum / (total_weight + 1e-12)).item()
+
+    def _get_global_scalar(self, state_key: str) -> Optional[float]:
+        """
+        Weighted mean over all groups and parameters for a given scalar state_key.
+        Weights are parameter sizes (p.numel()) to mirror _get_group_scalars behavior.
+        """
+        values = []
+        weights = []
+        device = None
+        for group in self.param_groups:
+            for p in group["params"]:
+                if p not in self.state or state_key not in self.state[p]:
+                    continue
+                val = self.state[p][state_key]
+                v_t = torch.as_tensor(val, device=p.device, dtype=torch.float32)
+                if device is None:
+                    device = v_t.device
+                values.append(v_t.to(device))
+                weights.append(torch.tensor(p.numel(), device=device, dtype=torch.float32))
+        if not values:
+            return None
+        v_stacked = torch.stack(values)
+        w_stacked = torch.stack(weights)
         weighted_sum = torch.sum(v_stacked * w_stacked)
         total_weight = torch.sum(w_stacked)
         return (weighted_sum / (total_weight + 1e-12)).item()
@@ -726,8 +751,19 @@ class Adafactor(torch.optim.Optimizer):
 
                 state["dynamic_gain"] = state["update_rms"] / (state["grad_rms"] + group["eps"][0])
 
-            # Update beta1 based on mean dynamic_gain across group
-            self._update_beta1_from_dynamic_gain(group)
+        # Compute global mean dynamic_gain across all groups (weighted by parameter size)
+        global_mean_dynamic_gain = self._get_global_scalar("dynamic_gain")
+
+        # Update beta1 once per group using global_mean_dynamic_gain; groups without dynamic_gain are effectively skipped
+        for group in self.param_groups:
+            # If group has no parameters with dynamic_gain, skip updating beta1 for this group
+            has_dynamic_gain = any(
+                (p in self.state and "dynamic_gain" in self.state[p])
+                for p in group["params"]
+            )
+            if not has_dynamic_gain:
+                continue
+            self._update_beta1_from_dynamic_gain(group, global_mean_dynamic_gain)
 
         return loss
         
