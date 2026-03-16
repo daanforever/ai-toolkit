@@ -159,7 +159,10 @@ class Adafactor(torch.optim.Optimizer):
             "warmup_steps": warmup_steps,
         }
         super().__init__(params, defaults)
-        
+
+        for group in self.param_groups:
+            group["base_lr_previous"] = 0.0
+
         # Store LR limits, lr_smoothing_rate, rms_max_decay_rate and lr so they can be reapplied after load_state_dict (restart with new config).
         self._min_lr = min_lr
         self._lr_smoothing_rate = lr_smoothing_rate
@@ -248,6 +251,13 @@ class Adafactor(torch.optim.Optimizer):
             # Normalize group_rms_max if present (old checkpoints may not have it)
             if "group_rms_max" in group and not isinstance(group["group_rms_max"], torch.Tensor):
                 group["group_rms_max"] = torch.tensor(group["group_rms_max"], dtype=torch.float32)
+            restored_lr = None
+            for param in group["params"]:
+                if param in self.state and "lr_previous" in self.state[param]:
+                    lr_prev_val = self.state[param]["lr_previous"]
+                    restored_lr = lr_prev_val.item() if isinstance(lr_prev_val, torch.Tensor) else lr_prev_val
+                    break
+            group["base_lr_previous"] = restored_lr if restored_lr is not None else 0.0
         # Normalize state from old checkpoints: update_rms_max/update_rms must be tensors for step().
         for group in self.param_groups:
             for param in group["params"]:
@@ -289,6 +299,8 @@ class Adafactor(torch.optim.Optimizer):
         if param_state is not None:
             param_state.pop("warmup_delta", None)
             param_state.pop("warmup_factor", None)
+        param_group.pop("warmup_start", None)
+        param_group.pop("warmup_target", None)
         if is_debug_enabled():
             print_acc(f"Adafactor: warmup stopped")
 
@@ -328,17 +340,20 @@ class Adafactor(torch.optim.Optimizer):
         if "warmup_active" not in param_group:
             param_group["warmup_active"] = param_group["warmup_init"]
 
-        # Track base_lr changes and activate warmup when change > 10%
-        base_lr_prev = param_group.get("base_lr_previous", base_lr)
+        # Track base_lr changes and activate warmup for both increase and decrease
+        base_lr_prev = param_group.get("base_lr_previous", 0.0)
+        if base_lr != base_lr_prev and param_group["warmup_init"]:
+            param_group["warmup_start"] = base_lr_prev
+            param_group["warmup_target"] = base_lr
+            param_group["warmup_active"] = True
+            param_state.pop("warmup_factor", None)
+            param_state.pop("warmup_delta", None)
+            if is_debug_enabled():
+                direction = "up" if base_lr > base_lr_prev else "down"
+                print_acc(
+                    f"Adafactor: base_lr changed ({base_lr_prev:.2e} -> {base_lr:.2e}, {direction}), starting warmup"
+                )
         param_group["base_lr_previous"] = base_lr
-        if base_lr_prev > 0 and base_lr != base_lr_prev:
-            if param_group["warmup_init"]:
-                param_group["warmup_active"] = True
-                # Delete param_state["warmup_factor"] to recalculate it from scratch
-                # when warmup already activated
-                param_state.pop("warmup_factor", None)
-                if is_debug_enabled():
-                    print_acc(f"Adafactor: base_lr changed, starting warmup")
 
         if param_group["scale_parameter"]:
             # Scale LR by parameter magnitude for better adaptation to parameter scale
@@ -376,28 +391,32 @@ class Adafactor(torch.optim.Optimizer):
 
         if param_group.get("warmup_active", False):
             warmup_steps = param_group.get("warmup_steps", self._warmup_steps)
-            
-            # Initialize warmup_factor: starts from 0.1 (10% of target LR) and grows to 1.0
+            warmup_start = param_group.get("warmup_start", 0.0)
+            warmup_target = param_group.get("warmup_target", base_lr)
+
+            # Initialize warmup_factor: progress from 0.0 to 1.0
             if "warmup_factor" not in param_state:
-                param_state["warmup_factor"] = 0.1
-                # Delta is the increment per step to reach 1.0 from 0.1
-                param_state["warmup_delta"] = (1.0 - 0.1) / warmup_steps
-            
+                param_state["warmup_factor"] = 0.0
+                param_state["warmup_delta"] = 1.0 / max(1, warmup_steps)
+
             warmup_factor = param_state["warmup_factor"]
             delta = param_state["warmup_delta"]
-            
-            # Increment warmup factor
+
+            # Increment warmup progress
             new_warmup_factor = min(1.0, warmup_factor + delta)
             param_state["warmup_factor"] = new_warmup_factor
-            
+
+            # Interpolate base_lr from start to target
+            interpolated_base_lr = warmup_start + new_warmup_factor * (warmup_target - warmup_start)
+
             # Stop warmup when factor reaches 1.0
             if new_warmup_factor >= 1.0:
                 self.stop_warmup(param_group, param_state)
-                warmup = 1.0
+                base_lr = warmup_target
             else:
-                warmup = new_warmup_factor
+                base_lr = interpolated_base_lr
 
-        new_lr = base_lr * scale * relative * warmup
+        new_lr = base_lr * scale * relative
 
         param_state["lr_previous"] = new_lr
         return new_lr
