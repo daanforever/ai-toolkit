@@ -755,16 +755,16 @@ class Adafactor(torch.optim.Optimizer):
         global_mean_dynamic_gain = self.get_avg_dynamic_gain()
 
         # Update beta1 once per group using global_mean_dynamic_gain; groups without dynamic_gain are effectively skipped
-        if global_mean_dynamic_gain > 0:
-            for group in self.param_groups:
-                # If group has no parameters with dynamic_gain, skip updating beta1 for this group
-                has_dynamic_gain = any(
-                    (p in self.state and "dynamic_gain" in self.state[p])
-                    for p in group["params"]
-                )
-                if not has_dynamic_gain:
-                    continue
-                self._update_beta1_from_dynamic_gain(group, global_mean_dynamic_gain)
+        # if global_mean_dynamic_gain > 0:
+        #     for group in self.param_groups:
+        #         # If group has no parameters with dynamic_gain, skip updating beta1 for this group
+        #         has_dynamic_gain = any(
+        #             (p in self.state and "dynamic_gain" in self.state[p])
+        #             for p in group["params"]
+        #         )
+        #         if not has_dynamic_gain:
+        #             continue
+        #         self._update_beta1_from_dynamic_gain(group, global_mean_dynamic_gain)
 
         return loss
         
