@@ -299,7 +299,7 @@ class Adafactor(torch.optim.Optimizer):
         if param_state is not None:
             param_state.pop("warmup_delta", None)
             param_state.pop("warmup_factor", None)
-        param_group.pop("warmup_start", None)
+            param_state.pop("warmup_start", None)
         param_group.pop("warmup_target", None)
         if is_debug_enabled():
             print_acc(f"Adafactor: warmup stopped")
@@ -347,7 +347,7 @@ class Adafactor(torch.optim.Optimizer):
             # This ensures smooth transition from current interpolated LR, not from old target
             current_effective_lr = param_state.get("lr_previous", base_lr_prev)
 
-            param_group["warmup_start"] = current_effective_lr
+            param_state["warmup_start"] = current_effective_lr
             param_group["warmup_target"] = base_lr
             param_group["warmup_active"] = True
             param_state.pop("warmup_factor", None)
@@ -395,7 +395,7 @@ class Adafactor(torch.optim.Optimizer):
 
         if param_group.get("warmup_active", False):
             warmup_steps = param_group.get("warmup_steps", self._warmup_steps)
-            warmup_start = param_group.get("warmup_start", 0.0)
+            warmup_start = param_state.get("warmup_start", 0.0)
             warmup_target = param_group.get("warmup_target", base_lr)
 
             # Initialize warmup_factor: progress from 0.0 to 1.0
