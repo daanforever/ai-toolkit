@@ -433,10 +433,9 @@ class Adafactor(torch.optim.Optimizer):
         """
         if global_mean_dynamic_gain is None:
             return
-        num_groups = len(self.param_groups)
-        scale = 0.01 / max(1, num_groups)  # Normalize by number of groups
-        delta = group["beta1"] * scale * (global_mean_dynamic_gain - 1.0)
-        group["beta1"] = group["beta1"] + delta
+        limited = max(0.0, min(2.0, global_mean_dynamic_gain))
+        delta = 0.001 * (limited - 1.0)
+        group["beta1"] += delta
         group["beta1"] = max(0.1, min(0.99, group["beta1"]))
 
     def _update_beta2_from_gns(self, group, group_state):
