@@ -425,6 +425,16 @@ class Adafactor(torch.optim.Optimizer):
         param_state["lr_previous"] = new_lr
         return new_lr
 
+    def _update_beta1_from_dynamic_gain(self, group):
+        """
+        Update beta1 based on mean dynamic gain across the parameter group.
+        """
+        mean_dynamic_gain = self._get_group_scalars(group, "dynamic_gain", default=0.0, reduction='mean')
+        if isinstance(mean_dynamic_gain, torch.Tensor):
+            mean_dynamic_gain = mean_dynamic_gain.item()
+        delta = group["beta1"] * 0.01 * (mean_dynamic_gain - 1.0)
+        group["beta1"] = group["beta1"] + delta
+
     def _update_beta2_from_gns(self, group, group_state):
         """
         Softly adjust group["beta2"] toward a GNS-based target (only when relative_step=True).
@@ -709,6 +719,11 @@ class Adafactor(torch.optim.Optimizer):
                     # apply stochastic rounding
                     copy_stochastic(p, p_data_fp32)
 
+                state["dynamic_gain"] = state["update_rms"] / (state["grad_rms"] + group["eps"][0])
+
+            # Update beta1 based on mean dynamic_gain across group
+            self._update_beta1_from_dynamic_gain(group)
+
         return loss
         
     def get_avg_learning_rate(self):
@@ -881,3 +896,15 @@ class Adafactor(torch.optim.Optimizer):
     def get_avg_step_efficiency(self):
         """Average Step Efficiency across all parameter groups."""
         return self._scalars_per_group_to_avg(self.get_step_efficiency())
+
+    def get_beta1(self):
+        """Get beta1 (momentum coefficient) for each parameter group."""
+        out = []
+        for group in self.param_groups:
+            beta1 = group.get("beta1", 0.0)
+            out.append(beta1 if beta1 is not None else 0.0)
+        return out
+
+    def get_avg_beta1(self):
+        """Average beta1 (momentum coefficient) across all parameter groups."""
+        return self._scalars_per_group_to_avg(self.get_beta1())
