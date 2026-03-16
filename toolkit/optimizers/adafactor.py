@@ -288,6 +288,7 @@ class Adafactor(torch.optim.Optimizer):
         param_group["warmup_active"] = False
         if param_state is not None:
             param_state.pop("warmup_delta", None)
+            param_state.pop("warmup_factor", None)
         if is_debug_enabled():
             print_acc(f"Adafactor: warmup stopped")
 
@@ -319,6 +320,9 @@ class Adafactor(torch.optim.Optimizer):
         eps0       = param_group["eps"][0]          # Small constant for numerical stability (division guard)
         eps1       = param_group["eps"][1]          # Parameter scale regularization constant
         param_rms  = param_state["RMS"].item()      # Current parameter RMS magnitude
+        scale      = 1.0                            # Default scale for LR
+        relative   = 1.0                            # Default relative for LR
+        warmup     = 1.0                            # Default warmup for LR
 
         # Initialize warmup_active on first use if not present
         if "warmup_active" not in param_group:
@@ -333,49 +337,59 @@ class Adafactor(torch.optim.Optimizer):
                 if is_debug_enabled():
                     print_acc(f"Adafactor: base_lr changed (>10%), starting warmup")
 
-        if not param_group["relative_step"]:
-            # Manual LR mode: use fixed learning rate from config
-            new_lr = base_lr
-            if param_group["scale_parameter"]:
-                # Scale LR by parameter magnitude for better adaptation to parameter scale
-                new_lr *= max(eps1, param_rms)
-        else:
+        if param_group["scale_parameter"]:
+            # Scale LR by parameter magnitude for better adaptation to parameter scale
+            scale = max(eps1, param_rms)
+
+        if param_group["relative_step"]:
             # Adaptive LR mode: compute LR from gradient and parameter statistics
             grad_rms      = param_state["grad_rms"].item()        # Current gradient RMS
             group_rms_max = param_group.get("group_rms_max", torch.tensor(eps1)).item()  # Group-level max parameter RMS
-            update_rms    = param_state.get("update_rms", torch.tensor(0.0)).item()      # Previous update RMS
 
             # Emergency Brake: multiplicative factor based on directional consistency
             dir_val = param_group.get("dir_consistency_mean") or 0.0  # None when beta1=None → neutral 0.0
             raw_brake = (0.5 + dir_val) / 0.5 
             brake = max(0.2, min(1.0, raw_brake))
 
+            # Smooth Brake: drift LR down 1% per call when direction inconsistent, up 0.5% when consistent
+            soft_brake = param_group.get("soft_brake", 1.0)
+            if dir_val < 0.0:
+                soft_brake = max(0.2, soft_brake * 0.99)
+            elif dir_val > 0.0:
+                soft_brake = min(1.0, soft_brake * 1.005)
+            param_group["soft_brake"] = soft_brake
+
             self._update_beta2_from_gns(param_group, param_state)
 
             # Ratio of parameter RMS to group RMS max
             ratio = max(eps0, (group_rms_max - param_rms) / (group_rms_max + eps0))
 
-            new_lr = base_lr * (1 + min_lr * ratio) * brake
+            relative = (1 + min_lr * ratio) * brake * soft_brake
 
         if param_group.get("warmup_active", False):
             warmup_steps = param_group.get("warmup_steps", self._warmup_steps)
-            prev = param_state.get("lr_previous", base_lr * eps1)
-
-            if "warmup_delta" not in param_state:
-                param_state["warmup_delta"] = abs(base_lr - prev) / warmup_steps
-
+            
+            # Initialize warmup_factor: starts from 0.1 (10% of target LR) and grows to 1.0
+            if "warmup_factor" not in param_state:
+                param_state["warmup_factor"] = 0.1
+                # Delta is the increment per step to reach 1.0 from 0.1
+                param_state["warmup_delta"] = (1.0 - 0.1) / warmup_steps
+            
+            warmup_factor = param_state["warmup_factor"]
             delta = param_state["warmup_delta"]
+            
+            # Increment warmup factor
+            new_warmup_factor = min(1.0, warmup_factor + delta)
+            param_state["warmup_factor"] = new_warmup_factor
+            
+            # Stop warmup when factor reaches 1.0
+            if new_warmup_factor >= 1.0:
+                self.stop_warmup(param_group, param_state)
+                warmup = 1.0
+            else:
+                warmup = new_warmup_factor
 
-            if base_lr > prev:  # Increasing
-                new_lr = prev + delta
-                new_lr = max(base_lr * 0.1, min(new_lr, base_lr))
-                if new_lr >= base_lr * 0.99:
-                    self.stop_warmup(param_group, param_state)
-            else:  # Decreasing
-                new_lr = prev - delta
-                new_lr = max(base_lr, min(new_lr, prev))
-                if new_lr <= base_lr * 1.01:
-                    self.stop_warmup(param_group, param_state)
+        new_lr = base_lr * scale * relative * warmup
 
         param_state["lr_previous"] = new_lr
         return new_lr
