@@ -817,21 +817,21 @@ class Adafactor(torch.optim.Optimizer):
         """
         Average RMS of parameters across all parameter groups (unified tensor reduction).
         """
-        return self._scalars_per_group_to_avg(self.get_rms())
+        return self._get_global_scalar("RMS") or 0.0
 
     def get_avg_update_rms(self):
         """
         Average RMS of weight updates across all parameter groups (unified tensor reduction).
         Useful for monitoring training stability and convergence.
         """
-        return self._scalars_per_group_to_avg(self.get_update_rms())
+        return self._get_global_scalar("update_rms") or 0.0
 
     def get_avg_update_rms_max(self):
         """
         Average of per-group update_rms_max across groups (unified tensor reduction).
         Use with get_avg_update_rms() to monitor normalization scale and update magnitude vs recent max.
         """
-        return self._scalars_per_group_to_avg(self.get_update_rms_max())
+        return self._get_global_scalar("update_rms_max") or 0.0
 
     def get_dynamic_gain(self):
         """
@@ -859,7 +859,7 @@ class Adafactor(torch.optim.Optimizer):
         """
         Average dynamic gain across all parameter groups (unified tensor reduction).
         """
-        return self._scalars_per_group_to_avg(self.get_dynamic_gain())
+        return self._get_global_scalar("dynamic_gain") or 0.0
 
     def get_grad_rms(self):
         """
@@ -893,14 +893,14 @@ class Adafactor(torch.optim.Optimizer):
         """
         Average RMS of gradients across all parameter groups (unified tensor reduction).
         """
-        return self._scalars_per_group_to_avg(self.get_grad_rms())
+        return self._get_global_scalar("grad_rms") or 0.0
 
     def get_avg_grad_rms_max(self):
         """
         Average of per-group grad_rms_max across groups (unified tensor reduction).
         Use with get_avg_grad_rms() to monitor gradient scale vs recent max.
         """
-        return self._scalars_per_group_to_avg(self.get_grad_rms_max())
+        return self._get_global_scalar("grad_rms_max") or 0.0
 
     def get_gns(self):
         """Get Gradient Noise Scale per group."""
@@ -928,15 +928,15 @@ class Adafactor(torch.optim.Optimizer):
 
     def get_avg_gns(self):
         """Average GNS across all parameter groups."""
-        return self._scalars_per_group_to_avg(self.get_gns())
+        return self._get_global_scalar("gns") or 0.0
 
     def get_avg_dir_consistency(self):
         """Average Directional Consistency across all parameter groups."""
-        return self._scalars_per_group_to_avg(self.get_dir_consistency())
+        return self._get_global_scalar("dir_consistency") or 0.0
 
     def get_avg_step_efficiency(self):
         """Average Step Efficiency across all parameter groups."""
-        return self._scalars_per_group_to_avg(self.get_step_efficiency())
+        return self._get_global_scalar("step_efficiency") or 0.0
 
     def get_beta1(self):
         """Get beta1 (momentum coefficient) for each parameter group."""
