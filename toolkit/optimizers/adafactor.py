@@ -62,6 +62,9 @@ class Adafactor(torch.optim.Optimizer):
         lr_smoothing_rate (`float`, *optional*, defaults to `100.0`):
             Divisor for the smoothing scale in step-to-step learning rate smoothing in `_smooth_lr`.
             Larger values yield stronger smoothing (smaller step-to-step LR changes).
+        factored (`bool`, *optional*, defaults to `None`):
+            If True, use factored second-moment (row/col) for all parameters. If False, use full second-moment.
+            If None, auto-detect: use factored for parameters with 2+ dimensions (current default behavior).
 
     This implementation handles low-precision (FP16, bfloat) values, but we have not thoroughly tested.
 
@@ -137,6 +140,7 @@ class Adafactor(torch.optim.Optimizer):
         parameter_swapping_factor=0.1,
         stochastic_accumulation=True,
         stochastic_rounding=True,
+        factored=None,
     ):
         self.stochastic_rounding = stochastic_rounding
         if warmup_init and not relative_step:
@@ -157,6 +161,7 @@ class Adafactor(torch.optim.Optimizer):
             "min_lr": min_lr,
             "lr_smoothing_rate": lr_smoothing_rate,
             "warmup_steps": warmup_steps,
+            "factored": factored,
         }
         super().__init__(params, defaults)
 
@@ -457,7 +462,11 @@ class Adafactor(torch.optim.Optimizer):
 
     @staticmethod
     def _get_options(param_group, param_shape):
-        factored = len(param_shape) >= 2
+        factored_setting = param_group.get("factored", None)
+        if factored_setting is None:
+            factored = len(param_shape) >= 2
+        else:
+            factored = factored_setting
         use_first_moment = param_group["beta1"] is not None
         return factored, use_first_moment
 
