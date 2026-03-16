@@ -437,7 +437,7 @@ class Adafactor(torch.optim.Optimizer):
         limited = max(0.0, min(2.0, global_mean_dynamic_gain))
         delta = 0.01 * (limited - 1.0)
         group["beta1"] += delta
-        group["beta1"] = max(0.8, min(0.99, group["beta1"]))
+        group["beta1"] = max(0.1, min(0.99, group["beta1"]))
 
     def _update_beta2_from_gns(self, group, group_state):
         """
@@ -457,7 +457,8 @@ class Adafactor(torch.optim.Optimizer):
 
     @staticmethod
     def _get_options(param_group, param_shape):
-        factored = len(param_shape) >= 2
+        # factored = len(param_shape) >= 2
+        factored = False
         use_first_moment = param_group["beta1"] is not None
         return factored, use_first_moment
 
