@@ -343,7 +343,11 @@ class Adafactor(torch.optim.Optimizer):
         # Track base_lr changes and activate warmup for both increase and decrease
         base_lr_prev = param_group.get("base_lr_previous", 0.0)
         if base_lr != base_lr_prev and param_group["warmup_init"]:
-            param_group["warmup_start"] = base_lr_prev
+            # Get current effective LR (what was actually applied last step)
+            # This ensures smooth transition from current interpolated LR, not from old target
+            current_effective_lr = param_state.get("lr_previous", base_lr_prev)
+
+            param_group["warmup_start"] = current_effective_lr
             param_group["warmup_target"] = base_lr
             param_group["warmup_active"] = True
             param_state.pop("warmup_factor", None)
@@ -351,7 +355,7 @@ class Adafactor(torch.optim.Optimizer):
             if is_debug_enabled():
                 direction = "up" if base_lr > base_lr_prev else "down"
                 print_acc(
-                    f"Adafactor: base_lr changed ({base_lr_prev:.2e} -> {base_lr:.2e}, {direction}), starting warmup"
+                    f"Adafactor: base_lr changed ({current_effective_lr:.2e} -> {base_lr:.2e}, {direction}), starting warmup"
                 )
         param_group["base_lr_previous"] = base_lr
 
