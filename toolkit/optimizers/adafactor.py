@@ -631,32 +631,33 @@ class Adafactor(torch.optim.Optimizer):
                     )
 
                 lr = self._get_lr(group, state)
-                update = update_hat.mul(lr)
 
                 if use_first_moment:
                     exp_avg = state["exp_avg"]
 
-                    # 2. Update EMA of direction
-                    exp_avg.mul_(group["beta1"]).add_(update, alpha=(1 - group["beta1"]))
-
-                    # 3. GNS (after update)
+                    # 1. Update EMA of direction without LR
+                    exp_avg.mul_(group["beta1"]).add_(update_hat, alpha=(1 - group["beta1"]))
+    
+                    # 2. GNS
                     # Use energy in one scale to avoid extreme values.
                     # signal_sq - energy of averaged direction
                     signal_sq = exp_avg.pow(2).mean()
 
                     # current_update_sq - energy of current direction (in Adafactor ~1.0,
                     # we compute it explicitly so scales match)
-                    # Use update before it was modified by EMA
-                    current_update_sq = update.pow(2).mean()
+                    current_update_sq = update_hat.pow(2).mean()
 
                     # GNS = (Noise / Signal)
                     # Early steps: signal_sq is small so GNS is large (e.g. 100-400);
                     # normal, drops to 0.1-5.0 in 50-100 steps
                     state["gns"] = (current_update_sq - signal_sq) / (signal_sq + 1e-12)
 
-                    update = exp_avg
+                    # 3. Now calculate the final update as EMA of direction * current LR
+                    update = exp_avg.mul(lr)
+
                 else:
-                    state["gns"] = torch.tensor(0.0, device=update.device)
+                    state["gns"] = torch.tensor(0.0, device=update_hat.device)
+                    update = update_hat.mul(lr)
 
                 if group["weight_decay"] != 0:
                     p_data_fp32.add_(
