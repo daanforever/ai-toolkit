@@ -331,11 +331,14 @@ class Adafactor(torch.optim.Optimizer):
         # Track base_lr changes and activate warmup when change > 10%
         base_lr_prev = param_group.get("base_lr_previous", base_lr)
         param_group["base_lr_previous"] = base_lr
-        if base_lr_prev > 0 and abs(base_lr - base_lr_prev) / base_lr_prev > 0.1:
+        if base_lr_prev > 0 and base_lr != base_lr_prev:
             if param_group["warmup_init"]:
                 param_group["warmup_active"] = True
+                # Delete param_state["warmup_factor"] to recalculate it from scratch
+                # when warmup already activated
+                param_state.pop("warmup_factor", None)
                 if is_debug_enabled():
-                    print_acc(f"Adafactor: base_lr changed (>10%), starting warmup")
+                    print_acc(f"Adafactor: base_lr changed, starting warmup")
 
         if param_group["scale_parameter"]:
             # Scale LR by parameter magnitude for better adaptation to parameter scale
