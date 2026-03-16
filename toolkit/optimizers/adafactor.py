@@ -376,10 +376,7 @@ class Adafactor(torch.optim.Optimizer):
             else:
                 dir_val = param_group.get("dir_consistency_mean") or 0.0  # None when beta1=None → neutral 0.0
 
-            # raw_brake = (0.5 + dir_val) / 0.5 
-            # brake = max(0.5, min(1.0, raw_brake))
-
-            brake = torch.clamp(dir_val * 2.0, min=0.2, max=1.0)
+            brake = max(0.2, min(1.0, dir_val * 2.0))
 
             # Smooth Brake: drift LR down 1% per call when direction inconsistent, up 0.5% when consistent
             # soft_brake = param_group.get("soft_brake", 1.0)
