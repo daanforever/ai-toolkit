@@ -354,22 +354,22 @@ class Adafactor(torch.optim.Optimizer):
             else:
                 dir_val = param_group.get("dir_consistency_mean") or 0.0  # None when beta1=None → neutral 0.0
             raw_brake = (0.5 + dir_val) / 0.5 
-            brake = max(0.2, min(1.0, raw_brake))
+            brake = max(0.5, min(1.0, raw_brake))
 
             # Smooth Brake: drift LR down 1% per call when direction inconsistent, up 0.5% when consistent
-            soft_brake = param_group.get("soft_brake", 1.0)
-            if dir_val < 0.0:
-                soft_brake = max(0.2, soft_brake * 0.99)
-            elif dir_val > 0.0:
-                soft_brake = min(1.0, soft_brake * 1.005)
-            param_group["soft_brake"] = soft_brake
+            # soft_brake = param_group.get("soft_brake", 1.0)
+            # if dir_val < 0.0:
+            #     soft_brake = max(0.2, soft_brake * 0.99)
+            # elif dir_val > 0.0:
+            #     soft_brake = min(1.0, soft_brake * 1.005)
+            # param_group["soft_brake"] = soft_brake
 
-            self._update_beta2_from_gns(param_group, param_state)
+            # self._update_beta2_from_gns(param_group, param_state)
 
             # Ratio of parameter RMS to group RMS max
             ratio = max(eps0, (group_rms_max - param_rms) / (group_rms_max + eps0))
 
-            relative = (1 + min_lr * ratio) * brake * soft_brake
+            relative = (1 + min_lr * ratio) * brake
 
         if param_group.get("warmup_active", False):
             warmup_steps = param_group.get("warmup_steps", self._warmup_steps)
