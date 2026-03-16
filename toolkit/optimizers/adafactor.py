@@ -1,5 +1,5 @@
 import math
-from typing import List
+from typing import List, Optional
 import torch
 from toolkit.optimizers.optimizer_utils import copy_stochastic, stochastic_grad_accummulation
 from toolkit.print import print_acc
