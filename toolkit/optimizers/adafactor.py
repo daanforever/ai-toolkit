@@ -347,7 +347,12 @@ class Adafactor(torch.optim.Optimizer):
             group_rms_max = param_group.get("group_rms_max", torch.tensor(eps1)).item()  # Group-level max parameter RMS
 
             # Emergency Brake: multiplicative factor based on directional consistency
-            dir_val = param_group.get("dir_consistency_mean") or 0.0  # None when beta1=None → neutral 0.0
+            # Prefer fresh per-parameter dir_consistency (current step); fallback to group mean (reporting / beta1=None)
+            dc = param_state.get("dir_consistency")
+            if dc is not None:
+                dir_val = dc.item() if isinstance(dc, torch.Tensor) else float(dc)
+            else:
+                dir_val = param_group.get("dir_consistency_mean") or 0.0  # None when beta1=None → neutral 0.0
             raw_brake = (0.5 + dir_val) / 0.5 
             brake = max(0.2, min(1.0, raw_brake))
 
@@ -404,9 +409,9 @@ class Adafactor(torch.optim.Optimizer):
         current_gns = gns_t.item() if gns_t is not None else 0.0
 
         if current_gns < 4.0:
-            target_beta2 = 0.88
+            target_beta2 = 0.888
         elif current_gns > 10.0:
-            target_beta2 = 0.99
+            target_beta2 = 0.999
 
         group["beta2"] = group["beta2"] + 0.01 * (target_beta2 - group["beta2"])
 
@@ -589,7 +594,6 @@ class Adafactor(torch.optim.Optimizer):
                 state["grad_rms_max"] = torch.maximum(
                     current_grad_max * group["rms_max_decay_rate"], state["grad_rms"]
                 )
-                lr = self._get_lr(group, state)
 
                 beta2 = group["beta2"]
                 eps = group["eps"]
@@ -615,37 +619,41 @@ class Adafactor(torch.optim.Optimizer):
                     exp_avg_sq.mul_(beta2).add_(update, alpha=(1.0 - beta2))
                     update = exp_avg_sq.rsqrt().mul_(grad)
 
-                update.div_(
+                # Preconditioned + clipped direction (before LR) for fresh brake signal
+                update_hat = update.div_(
                     (self._rms(update) / group["clip_threshold"]).clamp_(min=1.0))
-                update.mul_(lr)
 
                 if use_first_moment:
                     exp_avg = state["exp_avg"]
-                    
-                    # 1. Directional Consistency (before EMA update)
-                    # Compare current gradient direction with history
+                    # 1. Directional Consistency (before EMA, before LR) — fresh for _get_lr brake
                     state["dir_consistency"] = torch.nn.functional.cosine_similarity(
-                        update.flatten(), exp_avg.flatten(), dim=0, eps=1e-8
+                        update_hat.flatten(), exp_avg.flatten(), dim=0, eps=1e-8
                     )
+
+                lr = self._get_lr(group, state)
+                update = update_hat.mul(lr)
+
+                if use_first_moment:
+                    exp_avg = state["exp_avg"]
 
                     # 2. Update EMA of direction
                     exp_avg.mul_(group["beta1"]).add_(update, alpha=(1 - group["beta1"]))
-                    
+
                     # 3. GNS (after update)
                     # Use energy in one scale to avoid extreme values.
                     # signal_sq - energy of averaged direction
                     signal_sq = exp_avg.pow(2).mean()
-                    
+
                     # current_update_sq - energy of current direction (in Adafactor ~1.0,
                     # we compute it explicitly so scales match)
                     # Use update before it was modified by EMA
                     current_update_sq = update.pow(2).mean()
-                    
+
                     # GNS = (Noise / Signal)
                     # Early steps: signal_sq is small so GNS is large (e.g. 100-400);
                     # normal, drops to 0.1-5.0 in 50-100 steps
                     state["gns"] = (current_update_sq - signal_sq) / (signal_sq + 1e-12)
-                    
+
                     update = exp_avg
                 else:
                     state["gns"] = torch.tensor(0.0, device=update.device)
