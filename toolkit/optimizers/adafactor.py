@@ -428,12 +428,17 @@ class Adafactor(torch.optim.Optimizer):
     def _update_beta1_from_dynamic_gain(self, group):
         """
         Update beta1 based on mean dynamic gain across the parameter group.
+        Scaling factor is normalized by number of groups to prevent excessive
+        cumulative updates when multiple parameter groups are present.
         """
         mean_dynamic_gain = self._get_group_scalars(group, "dynamic_gain", default=0.0, reduction='mean')
         if isinstance(mean_dynamic_gain, torch.Tensor):
             mean_dynamic_gain = mean_dynamic_gain.item()
-        delta = group["beta1"] * 0.01 * (mean_dynamic_gain - 1.0)
+        num_groups = len(self.param_groups)
+        scale = 0.01 / max(1, num_groups)  # Normalize by number of groups
+        delta = group["beta1"] * scale * (mean_dynamic_gain - 1.0)
         group["beta1"] = group["beta1"] + delta
+        group["beta1"] = max(0.1, min(0.99, group["beta1"]))
 
     def _update_beta2_from_gns(self, group, group_state):
         """
