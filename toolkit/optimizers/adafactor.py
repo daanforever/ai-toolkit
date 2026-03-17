@@ -167,6 +167,12 @@ class Adafactor(torch.optim.Optimizer):
 
         for group in self.param_groups:
             group["base_lr_previous"] = 0.0
+            group["scale_parameter"] = scale_parameter
+            group["relative_step"] = relative_step
+            group["warmup_init"] = warmup_init
+            group["warmup_steps"] = warmup_steps
+            group["factored"] = factored
+            group["emergency_brake"] = emergency_brake
 
         # Store LR limits, lr_smoothing_rate, rms_max_decay_rate and lr so they can be reapplied after load_state_dict (restart with new config).
         self._min_lr = min_lr
@@ -177,7 +183,6 @@ class Adafactor(torch.optim.Optimizer):
         self._beta1 = beta1
         self._beta2 = beta2
         self._emergency_brake = emergency_brake
-
         self.is_stochastic_rounding_accumulation = False
 
         # setup stochastic grad accum hooks
