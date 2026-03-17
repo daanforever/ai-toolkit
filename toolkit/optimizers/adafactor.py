@@ -446,7 +446,7 @@ class Adafactor(torch.optim.Optimizer):
             if param_rms > eps1:
                 # Cap LR to limit update magnitude relative to parameter scale
                 # Ratio > 0.1 (10% per step) typically indicates overshoot
-                max_allowed_lr = param_rms * 0.1
+                max_allowed_lr = max(base_lr/10, param_rms * 0.1)
                 if new_lr > max_allowed_lr:
                     new_lr = max_allowed_lr
 
