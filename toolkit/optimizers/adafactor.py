@@ -1001,6 +1001,18 @@ class Adafactor(torch.optim.Optimizer):
         """Average of pre-computed mean Directional Consistency across all parameter groups."""
         return self._scalars_per_group_to_avg(self.get_dir_consistency_mean())
 
+    def get_instability_score(self):
+        """Get instability_score per parameter group (soft brake cumulative score)."""
+        out = []
+        for group in self.param_groups:
+            score = group.get("instability_score", 0.0)
+            out.append(score if score is not None else 0.0)
+        return out
+
+    def get_avg_instability_score(self):
+        """Average instability_score across all parameter groups."""
+        return self._scalars_per_group_to_avg(self.get_instability_score())
+
     def get_avg_step_efficiency(self):
         """Average Step Efficiency across all parameter groups."""
         return self._scalars_per_group_to_avg(self.get_step_efficiency())
