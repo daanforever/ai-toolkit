@@ -161,6 +161,7 @@ class Adafactor(torch.optim.Optimizer):
             "warmup_steps": warmup_steps,
             "factored": factored,
             "emergency_brake": emergency_brake,
+            "instability_score": 0.0,  # cumulative instability tracking for soft brake
         }
         super().__init__(params, defaults)
 
@@ -271,6 +272,8 @@ class Adafactor(torch.optim.Optimizer):
                     restored_lr = lr_prev_val.item() if isinstance(lr_prev_val, torch.Tensor) else lr_prev_val
                     break
             group["base_lr_previous"] = restored_lr if restored_lr is not None else 0.0
+            # Restore instability_score for soft brake continuity across restarts
+            group["instability_score"] = group.get("instability_score", 0.0)
             # Ensure warmup_target is initialized if warmup was active at checkpoint time
             if group.get("warmup_active", False) and "warmup_target" not in group:
                 group["warmup_target"] = group["lr"]
@@ -385,32 +388,28 @@ class Adafactor(torch.optim.Optimizer):
             group_rms_max = param_group.get("group_rms_max", torch.tensor(eps1)).item()  # Group-level max parameter RMS
 
             brake = 1.0
+            soft_brake = 1.0
+
             if param_group.get("emergency_brake", False):
-                # Emergency Brake: multiplicative factor based on directional consistency
-                # Prefer fresh per-parameter dir_consistency (current step); fallback to group mean (reporting / beta1=None)
+                # Instant Brake: multiplicative factor based on current directional consistency
+                # Prefer fresh per-parameter dir_consistency; fallback to group mean (when beta1=None)
                 dc = param_state.get("dir_consistency")
                 if dc is not None:
                     dir_val = dc.item() if isinstance(dc, torch.Tensor) else float(dc)
                 else:
-                    dir_val = param_group.get("dir_consistency_mean") or 0.0  # None when beta1=None → neutral 0.0
+                    dir_val = param_group.get("dir_consistency_mean") or 0.0
 
-                # brake = max(0.2, min(1.0, dir_val * 2.0))
                 brake = max(0.3, min(0.5 + dir_val, 1.0))
 
-            # Smooth Brake: drift LR down 1% per call when direction inconsistent, up 0.5% when consistent
-            # soft_brake = param_group.get("soft_brake", 1.0)
-            # if dir_val < 0.0:
-            #     soft_brake = max(0.2, soft_brake * 0.99)
-            # elif dir_val > 0.0:
-            #     soft_brake = min(1.0, soft_brake * 1.005)
-            # param_group["soft_brake"] = soft_brake
-
-            # self._update_beta2_from_gns(param_group, param_state)
+                # Soft Brake: exponential damping based on cumulative instability
+                # exp(-score) smoothly reduces LR: score=0 → 1.0, score=2 → 0.135, score=4 → 0.018
+                instability_score = param_group.get("instability_score", 0.0)
+                soft_brake = math.exp(-instability_score)
 
             # Ratio of parameter RMS to group RMS max
             ratio = max(eps0, (group_rms_max - param_rms) / (group_rms_max + eps0))
 
-            relative = (1 + min_lr * ratio) * brake
+            relative = (1 + min_lr * ratio) * brake * soft_brake
 
         if param_group.get("warmup_active", False):
             warmup_steps = param_group.get("warmup_steps", self._warmup_steps)
@@ -440,6 +439,15 @@ class Adafactor(torch.optim.Optimizer):
                 base_lr = interpolated_base_lr
 
         new_lr = base_lr * scale * relative
+
+        # Update-to-Weight Ratio safeguard: prevent updates > 10% of parameter magnitude
+        if param_group.get("emergency_brake", False):
+            if param_rms > eps1:
+                # Cap LR to limit update magnitude relative to parameter scale
+                # Ratio > 0.1 (10% per step) typically indicates overshoot
+                max_allowed_lr = param_rms * 0.1
+                if new_lr > max_allowed_lr:
+                    new_lr = max_allowed_lr
 
         param_state["lr_previous"] = new_lr
         return new_lr
@@ -480,7 +488,8 @@ class Adafactor(torch.optim.Optimizer):
             factored = len(param_shape) >= 2
         else:
             factored = factored_setting
-        use_first_moment = param_group["beta1"] is not None
+        # Enable first moment (exp_avg) if beta1 is set OR emergency_brake is enabled
+        use_first_moment = param_group["beta1"] is not None or param_group.get("emergency_brake", False)
         return factored, use_first_moment
 
     @staticmethod
@@ -600,6 +609,22 @@ class Adafactor(torch.optim.Optimizer):
             # Pre-compute mean directional consistency once per group for _get_lr
             group["dir_consistency_mean"] = self._get_group_scalars(group, "dir_consistency", default=0.0, reduction='mean')
 
+            # Soft Brake: accumulate instability score when emergency_brake is enabled
+            if group.get("emergency_brake", False):
+                dc_mean = group.get("dir_consistency_mean", 0.0)
+                score = group.get("instability_score", 0.0)
+
+                if dc_mean < 0:
+                    # Accumulate penalty for inconsistent directions (gradient reversals)
+                    # Penalty scales with magnitude: stronger for -1.0 (180° reversal) than -0.1
+                    score += abs(dc_mean) * 0.1
+                else:
+                    # Decay penalty when directions are consistent
+                    score *= 0.95
+
+                # Clamp score to [0.0, 4.0] to prevent LR from dropping to zero permanently
+                group["instability_score"] = min(max(score, 0.0), 4.0)
+
             for p in group["params"]:
                 if p.grad is None or not p.requires_grad:
                     continue
@@ -713,7 +738,7 @@ class Adafactor(torch.optim.Optimizer):
 
                 if use_first_moment:
                     exp_avg = state["exp_avg"]
-                    # 1. Directional Consistency (before EMA, before LR) — fresh for _get_lr brake
+                    # Directional Consistency (before EMA, before LR) — fresh for _get_lr brake
                     state["dir_consistency"] = torch.nn.functional.cosine_similarity(
                         update_hat.flatten(), exp_avg.flatten(), dim=0, eps=1e-8
                     )
@@ -723,25 +748,25 @@ class Adafactor(torch.optim.Optimizer):
                 if use_first_moment:
                     exp_avg = state["exp_avg"]
 
-                    # 1. Update EMA of direction without LR
-                    exp_avg.mul_(group["beta1"]).add_(update_hat, alpha=(1 - group["beta1"]))
-    
-                    # 2. GNS
-                    # Use energy in one scale to avoid extreme values.
-                    # signal_sq - energy of averaged direction
-                    signal_sq = exp_avg.pow(2).mean()
+                    # Use beta1 if available, otherwise use default 0.9 when emergency_brake is enabled
+                    beta1_for_ema = group["beta1"] if group["beta1"] is not None else 0.9
 
-                    # current_update_sq - energy of current direction (in Adafactor ~1.0,
-                    # we compute it explicitly so scales match)
-                    current_update_sq = update_hat.pow(2).mean()
+                    # Update EMA of direction without LR (always when use_first_moment=True)
+                    exp_avg.mul_(beta1_for_ema).add_(update_hat, alpha=(1 - beta1_for_ema))
 
-                    # GNS = (Noise / Signal)
-                    # Early steps: signal_sq is small so GNS is large (e.g. 100-400);
-                    # normal, drops to 0.1-5.0 in 50-100 steps
-                    state["gns"] = (current_update_sq - signal_sq) / (signal_sq + 1e-12)
+                    # GNS calculation (only when beta1 is not None)
+                    if group["beta1"] is not None:
+                        signal_sq = exp_avg.pow(2).mean()
+                        current_update_sq = update_hat.pow(2).mean()
+                        state["gns"] = (current_update_sq - signal_sq) / (signal_sq + 1e-12)
+                    else:
+                        state["gns"] = torch.tensor(0.0, device=update_hat.device)
 
-                    # 3. Now calculate the final update as EMA of direction * current LR
-                    update = exp_avg.mul(lr)
+                    # Final update: use exp_avg only if beta1 is not None (momentum mode)
+                    if group["beta1"] is not None:
+                        update = exp_avg.mul(lr)
+                    else:
+                        update = update_hat.mul(lr)
 
                 else:
                     state["gns"] = torch.tensor(0.0, device=update_hat.device)
