@@ -405,6 +405,7 @@ class Adafactor(torch.optim.Optimizer):
                 # exp(-score) smoothly reduces LR: score=0 → 1.0, score=2 → 0.135, score=4 → 0.018
                 instability_score = param_group.get("instability_score", 0.0)
                 soft_brake = math.exp(-instability_score)
+                soft_brake = max(0.5, soft_brake)
 
             # Ratio of parameter RMS to group RMS max
             ratio = max(eps0, (group_rms_max - param_rms) / (group_rms_max + eps0))
