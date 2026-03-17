@@ -586,12 +586,11 @@ class Adafactor(torch.optim.Optimizer):
     def get_learning_rates(self):
         """
         One value per group: mean LR over params in group (same aggregation as get_update_rms/get_update_rms_max).
-        Fallback to group["lr"] or 0.0 when no param in group has state yet.
         """
         out = []
         for group in self.param_groups:
             v = self._get_group_scalars(group, "lr_previous", default=0.0, reduction='mean')
-            out.append(v if v is not None else (group["lr"] if group["lr"] is not None else 0.0))
+            out.append(v if v is not None else 0.0)
         return out
 
     @torch.no_grad()
