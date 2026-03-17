@@ -399,7 +399,7 @@ class Adafactor(torch.optim.Optimizer):
                 else:
                     dir_val = param_group.get("dir_consistency_mean") or 0.0
 
-                brake = max(0.3, min(0.5 + dir_val, 1.0))
+                brake = max(0.9, min(1 + dir_val, 1.0))
 
                 # Soft Brake: exponential damping based on cumulative instability
                 # exp(-score) smoothly reduces LR: score=0 → 1.0, score=2 → 0.135, score=4 → 0.018
