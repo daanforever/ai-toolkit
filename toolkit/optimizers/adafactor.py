@@ -613,8 +613,8 @@ class Adafactor(torch.optim.Optimizer):
 
             # Soft Brake: accumulate instability score when emergency_brake is enabled
             if group.get("emergency_brake", False):
-                dc_mean = group.get("dir_consistency_mean", 0.0)
-                score = group.get("instability_score", 0.0)
+                dc_mean = group.get("dir_consistency_mean") or 0.0
+                score = group.get("instability_score") or 0.0
 
                 if dc_mean < 0:
                     # Accumulate penalty for inconsistent directions (gradient reversals)
