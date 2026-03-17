@@ -233,11 +233,130 @@ def _test_batch_sampling_device_moves() -> None:
     _log("[batch] Device-move pattern for multi-prompt batch sampling OK.")
 
 
+def _test_share_parameters_edge_cases() -> None:
+    """
+    Exercise LoRASpecialNetwork.share_parameters_with for edge cases:
+    - LoRA parameter and buffer sharing between two networks
+    - full_train_in_out parameter sharing (unet_conv_in/out)
+    - mismatch detection on lora_name.
+    """
+    import torch
+    from toolkit.lora_special import LoRASpecialNetwork
+
+    class DummyTextEncoder(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+
+    # Create a dummy UNet-like module whose class name matches what
+    # LoRASpecialNetwork expects ("UNet2DConditionModel").
+    class UNet2DConditionModel(torch.nn.Module):  # type: ignore[override]
+        def __init__(self) -> None:
+            super().__init__()
+            self.conv_in = torch.nn.Conv2d(4, 4, kernel_size=3, padding=1)
+            self.conv_out = torch.nn.Conv2d(4, 4, kernel_size=3, padding=1)
+            # Put LoRA-compatible modules inside a submodule whose class name
+            # matches LINEAR_MODULES/CONV_MODULES expectations so that
+            # create_modules() in LoRASpecialNetwork will pick them up.
+            class LoRACompatibleLinear(torch.nn.Linear):
+                pass
+
+            class LoRACompatibleConv(torch.nn.Conv2d):
+                pass
+
+            self.block = torch.nn.Module()
+            self.block.linear = LoRACompatibleLinear(4, 4)
+            self.block.conv = LoRACompatibleConv(4, 4, kernel_size=1)
+
+    _log("[share] building two LoRASpecialNetwork instances for edge-case tests ...")
+    text_enc = DummyTextEncoder()
+    unet_a = UNet2DConditionModel()
+    unet_b = UNet2DConditionModel()
+
+    net_a = LoRASpecialNetwork(
+        text_encoder=text_enc,
+        unet=unet_a,
+        train_text_encoder=False,
+        train_unet=True,
+        lora_dim=2,
+        alpha=1.0,
+        full_train_in_out=True,
+        target_lin_modules=LoRASpecialNetwork.UNET_TARGET_REPLACE_MODULE,
+        target_conv_modules=LoRASpecialNetwork.UNET_TARGET_REPLACE_MODULE_CONV2D_3X3,
+    )
+    net_b = LoRASpecialNetwork(
+        text_encoder=text_enc,
+        unet=unet_b,
+        train_text_encoder=False,
+        train_unet=True,
+        lora_dim=2,
+        alpha=1.0,
+        full_train_in_out=True,
+        target_lin_modules=LoRASpecialNetwork.UNET_TARGET_REPLACE_MODULE,
+        target_conv_modules=LoRASpecialNetwork.UNET_TARGET_REPLACE_MODULE_CONV2D_3X3,
+    )
+
+    assert net_a.unet_loras, "[share] expected at least one unet LoRA module"
+    assert len(net_a.unet_loras) == len(
+        net_b.unet_loras
+    ), "[share] unet_loras length mismatch between test networks"
+
+    # 1) Base case: after sharing, LoRA parameters and buffers are the same objects.
+    lora_a = net_a.unet_loras[0]
+    lora_b = net_b.unet_loras[0]
+    # Sanity: parameters and buffers differ before sharing.
+    assert lora_a.lora_down.weight is not lora_b.lora_down.weight
+    assert getattr(lora_a, "alpha") is not getattr(
+        lora_b, "alpha"
+    ), "[share] alpha buffers unexpectedly shared before share_parameters_with"
+
+    net_b.share_parameters_with(net_a)
+
+    assert (
+        lora_a.lora_down.weight is lora_b.lora_down.weight
+    ), "[share] lora_down.weight not shared after share_parameters_with"
+    assert (
+        getattr(lora_a, "alpha") is getattr(lora_b, "alpha")
+    ), "[share] alpha buffer not shared after share_parameters_with"
+
+    # 2) full_train_in_out: conv_in/conv_out should also share parameters.
+    assert hasattr(net_a, "unet_conv_in") and hasattr(
+        net_a, "unet_conv_out"
+    ), "[share] net_a missing full_train_in_out conv modules"
+    assert hasattr(net_b, "unet_conv_in") and hasattr(
+        net_b, "unet_conv_out"
+    ), "[share] net_b missing full_train_in_out conv modules"
+
+    assert (
+        net_a.unet_conv_in.weight is net_b.unet_conv_in.weight
+    ), "[share] unet_conv_in weights not shared after share_parameters_with"
+    assert (
+        net_a.unet_conv_out.weight is net_b.unet_conv_out.weight
+    ), "[share] unet_conv_out weights not shared after share_parameters_with"
+
+    # 3) Mismatch detection: differing lora_name should trigger an assertion.
+    orig_name = net_b.unet_loras[0].lora_name
+    net_b.unet_loras[0].lora_name = orig_name + "_mismatch"
+    try:
+        raised = False
+        net_b.share_parameters_with(net_a)
+    except AssertionError as e:
+        raised = True
+        msg = str(e)
+        assert "lora name mismatch" in msg, f"[share] unexpected assertion message: {msg!r}"
+    finally:
+        net_b.unet_loras[0].lora_name = orig_name
+
+    assert raised, "[share] expected AssertionError on lora name mismatch"
+
+    _log("[share] share_parameters_with edge-case tests OK.")
+
+
 def main() -> None:
     _log("Z-Image DiffSynth sampling smoke test (SampleConfig multi-prompt + batch device moves) ...")
     try:
         _test_sample_config_multiple_prompts()
         _test_batch_sampling_device_moves()
+        _test_share_parameters_edge_cases()
     except AssertionError as e:
         _log(f"FAILED: assertion error in sampling smoke test: {e}")
         raise SystemExit(1)

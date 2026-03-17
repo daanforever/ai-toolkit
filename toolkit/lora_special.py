@@ -584,28 +584,60 @@ class LoRASpecialNetwork(ToolkitNetworkMixin, LoRANetwork):
 
     def share_parameters_with(self, other: "LoRASpecialNetwork") -> None:
         """
-        Share all trainable parameters with another network of the same structure.
-        Used so sampling_network uses the same LoRA weights as the training network
-        (one LoRA for both training and sampling, no copy/sync).
+        Share all trainable parameters and buffers with another network of the same structure.
+
+        Contract:
+        - ``self`` is the *target* network whose modules will start pointing to the parameters/buffers
+          of ``other``.
+        - ``other`` is the *source* network that owns the parameters/buffers (e.g. the training network).
+
+        Typical usage:
+        - ``sampling_network.share_parameters_with(training_network)`` so that the sampling network
+          reuses the LoRA and (optionally) full_train_in_out weights of the training network
+          without copying or synchronizing tensors.
         """
         assert len(self.unet_loras) == len(other.unet_loras), "unet_loras length mismatch"
         assert len(self.text_encoder_loras) == len(other.text_encoder_loras), "text_encoder_loras length mismatch"
 
-        def _share_lora_pair(my_lora: torch.nn.Module, other_lora: torch.nn.Module) -> None:
-            assert getattr(my_lora, "lora_name", None) == getattr(other_lora, "lora_name", None), (
-                f"lora name mismatch: {getattr(my_lora, 'lora_name', None)} vs {getattr(other_lora, 'lora_name', None)}"
-            )
-            for name, param in other_lora.named_parameters():
+        def _share_module_params_and_buffers(target: torch.nn.Module, source: torch.nn.Module) -> None:
+            # share all parameters
+            for name, param in source.named_parameters():
                 parts = name.split(".")
-                obj = my_lora
+                obj = target
                 for p in parts[:-1]:
                     obj = getattr(obj, p)
                 setattr(obj, parts[-1], param)
+
+            # and all registered buffers (e.g. alpha)
+            for name, buf in source.named_buffers():
+                parts = name.split(".")
+                obj = target
+                for p in parts[:-1]:
+                    obj = getattr(obj, p)
+                setattr(obj, parts[-1], buf)
+
+        def _share_lora_pair(my_lora: torch.nn.Module, other_lora: torch.nn.Module) -> None:
+            assert type(my_lora) is type(other_lora), "lora module type mismatch"
+            assert getattr(my_lora, "lora_name", None) == getattr(other_lora, "lora_name", None), (
+                f"lora name mismatch: {getattr(my_lora, 'lora_name', None)} vs {getattr(other_lora, 'lora_name', None)}"
+            )
+            _share_module_params_and_buffers(my_lora, other_lora)
 
         for my_lora, other_lora in zip(self.unet_loras, other.unet_loras):
             _share_lora_pair(my_lora, other_lora)
         for my_lora, other_lora in zip(self.text_encoder_loras, other.text_encoder_loras):
             _share_lora_pair(my_lora, other_lora)
+
+        # If we are also retraining main in/out layers, make sure those parameters are shared too.
+        assert self.full_train_in_out == other.full_train_in_out, "full_train_in_out flag mismatch"
+        if self.full_train_in_out:
+            for attr_name in ("unet_conv_in", "unet_conv_out", "transformer_pos_embed", "transformer_proj_out"):
+                my_module = getattr(self, attr_name, None)
+                other_module = getattr(other, attr_name, None)
+                if my_module is None or other_module is None:
+                    continue
+                assert type(my_module) is type(other_module), f"{attr_name} module type mismatch"
+                _share_module_params_and_buffers(my_module, other_module)
 
     def prepare_optimizer_params(self, text_encoder_lr, unet_lr, default_lr):
         # call Lora prepare_optimizer_params
