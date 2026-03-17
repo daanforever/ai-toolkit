@@ -260,8 +260,9 @@ class Adafactor(torch.optim.Optimizer):
             group["lr_smoothing_rate"] = self._lr_smoothing_rate
             group["rms_max_decay_rate"] = self._rms_max_decay_rate
             group["warmup_steps"] = self._warmup_steps
-            group["beta1"] = group.get("beta1", self._beta1)
-            group["beta2"] = group.get("beta2", self._beta2)
+            group["beta1"] = self._beta1
+            group["beta2"] = self._beta2
+            group["emergency_brake"] = self._emergency_brake
             # Normalize group_rms_max if present (old checkpoints may not have it)
             if "group_rms_max" in group and not isinstance(group["group_rms_max"], torch.Tensor):
                 group["group_rms_max"] = torch.tensor(group["group_rms_max"], dtype=torch.float32)
