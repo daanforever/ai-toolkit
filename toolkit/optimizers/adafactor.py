@@ -260,6 +260,9 @@ class Adafactor(torch.optim.Optimizer):
                     restored_lr = lr_prev_val.item() if isinstance(lr_prev_val, torch.Tensor) else lr_prev_val
                     break
             group["base_lr_previous"] = restored_lr if restored_lr is not None else 0.0
+            # Ensure warmup_target is initialized if warmup was active at checkpoint time
+            if group.get("warmup_active", False) and "warmup_target" not in group:
+                group["warmup_target"] = group["lr"]
         # Normalize state from old checkpoints: update_rms_max/update_rms must be tensors for step().
         for group in self.param_groups:
             for param in group["params"]:
