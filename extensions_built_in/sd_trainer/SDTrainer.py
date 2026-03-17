@@ -2208,6 +2208,23 @@ class SDTrainer(BaseSDTrainProcess):
 
 
         if not self.is_grad_accumulation_step:
+            # Minimal fail-fast check for bf16 LoRA training:
+            # trainable grads must be fp32 before optimizer step.
+            if self.network is not None and str(self.train_config.dtype).lower() in ("bf16", "bfloat16"):
+                bad_grad = None
+                for param_group in self.params:
+                    params_to_check = param_group.get("params", []) if isinstance(param_group, dict) else param_group
+                    for param in params_to_check:
+                        if isinstance(param, torch.nn.Parameter) and param.requires_grad and param.grad is not None:
+                            if param.grad.dtype != torch.float32:
+                                bad_grad = param.grad.dtype
+                                break
+                    if bad_grad is not None:
+                        break
+                if bad_grad is not None:
+                    raise RuntimeError(
+                        f"Expected fp32 trainable gradients before optimizer.step(), got {bad_grad}."
+                    )
             # fix this for multi params
             if self.train_config.optimizer != 'adafactor':
                 if isinstance(self.params[0], dict):

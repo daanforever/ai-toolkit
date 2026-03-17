@@ -1618,6 +1618,14 @@ class BaseSDTrainProcess(BaseTrainProcess):
         
         # esure params require grad
         self.ensure_params_requires_grad(force=True)
+        # Minimal verification mode for bf16 training:
+        # keep trainable optimization parameters in fp32 so grads accumulate in fp32.
+        if str(self.train_config.dtype).lower() in ("bf16", "bfloat16"):
+            for param_group in self.params:
+                params_to_check = param_group.get("params", []) if isinstance(param_group, dict) else param_group
+                for param in params_to_check:
+                    if isinstance(param, torch.nn.Parameter) and param.requires_grad and param.dtype != torch.float32:
+                        param.data = param.data.to(dtype=torch.float32)
         optimizer = get_optimizer(self.params, optimizer_type, learning_rate=self.train_config.lr,
                                   optimizer_params=self.train_config.optimizer_params)
         self.optimizer = optimizer
