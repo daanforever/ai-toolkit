@@ -143,9 +143,6 @@ class Adafactor(torch.optim.Optimizer):
         factored=None,
     ):
         self.stochastic_rounding = stochastic_rounding
-        if warmup_init and not relative_step:
-            raise ValueError(
-                "`warmup_init=True` requires `relative_step=True`")
 
         defaults = {
             "lr": lr,
