@@ -647,6 +647,7 @@ class Adafactor(torch.optim.Optimizer):
                 factored, use_first_moment = self._get_options(
                     group, grad_shape)
                 # State Initialization
+
                 if len(state) == 0:
                     # state["step"] = 0
 
@@ -666,7 +667,11 @@ class Adafactor(torch.optim.Optimizer):
                     state["RMS"] = torch.tensor(0.0, device=grad.device)
                 else:
                     if use_first_moment:
-                        state["exp_avg"] = state["exp_avg"].to(grad)
+                        if "exp_avg" not in state:
+                            state["exp_avg"] = torch.zeros_like(grad)
+                        else:
+                            state["exp_avg"] = state["exp_avg"].to(grad)
+
                     if factored:
                         state["exp_avg_sq_row"] = state["exp_avg_sq_row"].to(
                             grad)
