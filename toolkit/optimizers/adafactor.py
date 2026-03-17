@@ -141,6 +141,7 @@ class Adafactor(torch.optim.Optimizer):
         stochastic_accumulation=True,
         stochastic_rounding=True,
         factored=None,
+        emergency_brake: bool = False,
     ):
         self.stochastic_rounding = stochastic_rounding
 
@@ -159,6 +160,7 @@ class Adafactor(torch.optim.Optimizer):
             "lr_smoothing_rate": lr_smoothing_rate,
             "warmup_steps": warmup_steps,
             "factored": factored,
+            "emergency_brake": emergency_brake,
         }
         super().__init__(params, defaults)
 
@@ -173,6 +175,7 @@ class Adafactor(torch.optim.Optimizer):
         self._warmup_steps = warmup_steps
         self._beta1 = beta1
         self._beta2 = beta2
+        self._emergency_brake = emergency_brake
 
         self.is_stochastic_rounding_accumulation = False
 
@@ -222,6 +225,14 @@ class Adafactor(torch.optim.Optimizer):
             group["weight_decay"] = value
         if is_debug_enabled():
             print_acc(f"Adafactor: applied runtime weight_decay={value}")
+
+    def set_emergency_brake(self, value: bool) -> None:
+        """Enable or disable emergency_brake at runtime (e.g. from UI)."""
+        self._emergency_brake = value
+        for group in self.param_groups:
+            group["emergency_brake"] = value
+        if is_debug_enabled():
+            print_acc(f"Adafactor: applied runtime emergency_brake={value}")
 
     def set_beta1(self, value: float | None) -> None:
         """Update beta1 at runtime (e.g. from UI). None disables momentum."""
@@ -373,16 +384,18 @@ class Adafactor(torch.optim.Optimizer):
             grad_rms      = param_state["grad_rms"].item()        # Current gradient RMS
             group_rms_max = param_group.get("group_rms_max", torch.tensor(eps1)).item()  # Group-level max parameter RMS
 
-            # Emergency Brake: multiplicative factor based on directional consistency
-            # Prefer fresh per-parameter dir_consistency (current step); fallback to group mean (reporting / beta1=None)
-            dc = param_state.get("dir_consistency")
-            if dc is not None:
-                dir_val = dc.item() if isinstance(dc, torch.Tensor) else float(dc)
-            else:
-                dir_val = param_group.get("dir_consistency_mean") or 0.0  # None when beta1=None → neutral 0.0
+            brake = 1.0
+            if param_group.get("emergency_brake", False):
+                # Emergency Brake: multiplicative factor based on directional consistency
+                # Prefer fresh per-parameter dir_consistency (current step); fallback to group mean (reporting / beta1=None)
+                dc = param_state.get("dir_consistency")
+                if dc is not None:
+                    dir_val = dc.item() if isinstance(dc, torch.Tensor) else float(dc)
+                else:
+                    dir_val = param_group.get("dir_consistency_mean") or 0.0  # None when beta1=None → neutral 0.0
 
-            # brake = max(0.2, min(1.0, dir_val * 2.0))
-            brake = max(0.3, min(0.5 + dir_val, 1.0))
+                # brake = max(0.2, min(1.0, dir_val * 2.0))
+                brake = max(0.3, min(0.5 + dir_val, 1.0))
 
             # Smooth Brake: drift LR down 1% per call when direction inconsistent, up 0.5% when consistent
             # soft_brake = param_group.get("soft_brake", 1.0)
