@@ -1943,6 +1943,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 grad_rms_max = 0.0  # Running max of gradient RMS (for graphs)
                 gns = 0.0  # Gradient Noise Scale (Adafactor with momentum)
                 dir_consistency = 0.0  # Directional consistency with EMA (Adafactor with momentum)
+                dir_consistency_mean = 0.0  # Mean directional consistency per group (Adafactor emergency brake)
                 step_efficiency = 0.0  # Step efficiency: update_rms / update_rms_max (Adafactor)
                 dynamic_gain = 0.0  # Dynamic gain (Adafactor)
                 beta1 = 0.0  # Momentum coefficient (Adafactor)
@@ -1975,6 +1976,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         gns = optimizer.get_avg_gns()
                     if hasattr(optimizer, 'get_avg_dir_consistency'):
                         dir_consistency = optimizer.get_avg_dir_consistency()
+                    if hasattr(optimizer, 'get_mean_dir_consistency'):
+                        dir_consistency_mean = optimizer.get_mean_dir_consistency()
                     if hasattr(optimizer, 'get_avg_step_efficiency'):
                         step_efficiency = optimizer.get_avg_step_efficiency()
                     if hasattr(optimizer, 'get_avg_dynamic_gain'):
@@ -2072,6 +2075,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                             self.writer.add_scalar(f"train/grad_rms_max", grad_rms_max, self.step_num)
                                             self.writer.add_scalar(f"train/gns", gns, self.step_num)
                                             self.writer.add_scalar(f"train/dir_consistency", dir_consistency, self.step_num)
+                                            self.writer.add_scalar(f"train/dir_consistency_mean", dir_consistency_mean, self.step_num)
                                             self.writer.add_scalar(f"train/step_efficiency", step_efficiency, self.step_num)
                                             self.writer.add_scalar(f"train/dynamic_gain", dynamic_gain, self.step_num)
                                             self.writer.add_scalar(f"train/beta1", beta1, self.step_num)
@@ -2116,6 +2120,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
                             self.logger.log({
                                 'train/dir_consistency': dir_consistency,
+                            })
+
+                            self.logger.log({
+                                'train/dir_consistency_mean': dir_consistency_mean,
                             })
 
                             self.logger.log({
@@ -2173,6 +2181,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
                             self.logger.log({
                                 'train/dir_consistency': dir_consistency,
+                            })
+
+                            self.logger.log({
+                                'train/dir_consistency_mean': dir_consistency_mean,
                             })
 
                             self.logger.log({

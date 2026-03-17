@@ -989,6 +989,18 @@ class Adafactor(torch.optim.Optimizer):
         """Average Directional Consistency across all parameter groups."""
         return self._scalars_per_group_to_avg(self.get_dir_consistency())
 
+    def get_dir_consistency_mean(self):
+        """Get pre-computed mean Directional Consistency per parameter group."""
+        out = []
+        for group in self.param_groups:
+            dc_mean = group.get("dir_consistency_mean", 0.0)
+            out.append(dc_mean if dc_mean is not None else 0.0)
+        return out
+
+    def get_mean_dir_consistency(self):
+        """Average of pre-computed mean Directional Consistency across all parameter groups."""
+        return self._scalars_per_group_to_avg(self.get_dir_consistency_mean())
+
     def get_avg_step_efficiency(self):
         """Average Step Efficiency across all parameter groups."""
         return self._scalars_per_group_to_avg(self.get_step_efficiency())
