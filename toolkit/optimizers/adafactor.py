@@ -141,7 +141,7 @@ class Adafactor(torch.optim.Optimizer):
         stochastic_accumulation=True,
         stochastic_rounding=True,
         factored=None,
-        emergency_brake: bool = False,
+        emergency_brake: float | None = None,
     ):
         self.stochastic_rounding = stochastic_rounding
 
@@ -232,8 +232,8 @@ class Adafactor(torch.optim.Optimizer):
         if is_debug_enabled():
             print_acc(f"Adafactor: applied runtime weight_decay={value}")
 
-    def set_emergency_brake(self, value: bool) -> None:
-        """Enable or disable emergency_brake at runtime (e.g. from UI)."""
+    def set_emergency_brake(self, value: float | None) -> None:
+        """Update emergency_brake at runtime (e.g. from UI). None disables."""
         self._emergency_brake = value
         for group in self.param_groups:
             group["emergency_brake"] = value
@@ -396,7 +396,9 @@ class Adafactor(torch.optim.Optimizer):
             brake = 1.0
             soft_brake = 1.0
 
-            if param_group.get("emergency_brake", False):
+            emergency_brake = param_group.get("emergency_brake", None)
+            if emergency_brake is not None:
+                emergency_brake = float(emergency_brake)
                 # Instant Brake: multiplicative factor based on current directional consistency
                 # Prefer fresh per-parameter dir_consistency; fallback to group mean (when beta1=None)
                 dc = param_state.get("dir_consistency")
@@ -405,13 +407,13 @@ class Adafactor(torch.optim.Optimizer):
                 else:
                     dir_val = param_group.get("dir_consistency_mean") or 0.0
 
-                brake = max(0.9, min(1 + dir_val, 1.0))
+                brake = max(emergency_brake, min(1 + dir_val, 1.0))
 
                 # Soft Brake: exponential damping based on cumulative instability
                 # exp(-score) smoothly reduces LR: score=0 → 1.0, score=2 → 0.135, score=4 → 0.018
                 instability_score = param_group.get("instability_score") or 0.0
                 soft_brake = math.exp(-instability_score)
-                soft_brake = max(0.5, soft_brake)
+                soft_brake = max(emergency_brake, soft_brake)
 
             # Ratio of parameter RMS to group RMS max
             ratio = max(eps0, (group_rms_max - param_rms) / (group_rms_max + eps0))
@@ -448,7 +450,7 @@ class Adafactor(torch.optim.Optimizer):
         new_lr = base_lr * scale * relative
 
         # Update-to-Weight Ratio safeguard: prevent updates > 10% of parameter magnitude
-        if param_group.get("emergency_brake", False):
+        if param_group.get("emergency_brake", None) is not None:
             if param_rms > eps1:
                 # Cap LR to limit update magnitude relative to parameter scale
                 # Ratio > 0.1 (10% per step) typically indicates overshoot
@@ -496,7 +498,7 @@ class Adafactor(torch.optim.Optimizer):
         else:
             factored = factored_setting
         # Enable first moment (exp_avg) if beta1 is set OR emergency_brake is enabled
-        use_first_moment = param_group["beta1"] is not None or param_group.get("emergency_brake", False)
+        use_first_moment = param_group["beta1"] is not None or param_group.get("emergency_brake", None) is not None
         return factored, use_first_moment
 
     @staticmethod
@@ -616,7 +618,7 @@ class Adafactor(torch.optim.Optimizer):
             group["dir_consistency_mean"] = self._get_group_scalars(group, "dir_consistency", default=0.0, reduction='mean')
 
             # Soft Brake: accumulate instability score when emergency_brake is enabled
-            if group.get("emergency_brake", False):
+            if group.get("emergency_brake", None) is not None:
                 dc_mean = group.get("dir_consistency_mean") or 0.0
                 score = group.get("instability_score") or 0.0
 
