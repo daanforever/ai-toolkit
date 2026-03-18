@@ -706,7 +706,7 @@ class Adafactor(torch.optim.Optimizer):
                 if "param_rms_ema" not in state:
                     state["param_rms_ema"] = state["RMS"].clone().detach()
                 else:
-                    state["param_rms_ema"] = state["param_rms_ema"] * group["rms_max_decay_rate"] + state["RMS"] * (1.0 - beta)
+                    state["param_rms_ema"] = state["param_rms_ema"] * group["rms_max_decay_rate"] + state["RMS"] * (1.0 - group["rms_max_decay_rate"])
                 if "rms_max" not in state:
                     state["rms_max"] = state["RMS"].clone().detach()
                 else:
