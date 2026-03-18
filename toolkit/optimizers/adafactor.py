@@ -24,7 +24,7 @@ class Adafactor(torch.optim.Optimizer):
     Arguments:
         params (`Iterable[nn.parameter.Parameter]`):
             Iterable of parameters to optimize or dictionaries defining parameter groups.
-        lr (`float`, *optional*, defaults to `1e-4` when `relative_step=True`):
+        lr (`float`, *optional*, defaults to `1e-4`):
             When `relative_step=True`, acts as maximum learning rate cap (upper bound). When `relative_step=False`, the manual learning rate.
         eps (`Tuple[float, float]`, *optional*, defaults to `(1e-30, 0.001)`):
             Regularization constants for square gradient and parameter scale respectively
@@ -50,10 +50,10 @@ class Adafactor(torch.optim.Optimizer):
             Suggested values: 0.9 (default), 0.95 or 0.99 for smoother updates.
         weight_decay (`float`, *optional*, defaults to 0.0):
             Weight decay (L2 penalty)
-        scale_parameter (`bool`, *optional*, defaults to `True`):
+        scale_parameter (`bool`, *optional*, defaults to `False`):
             If True, learning rate is scaled by root mean square.
             Scaling is stronger when update magnitude is large (to protect small parameters).
-        relative_step (`bool`, *optional*, defaults to `True`):
+        relative_step (`bool`, *optional*, defaults to `False`):
             If True, time-dependent learning rate is computed instead of external learning rate
         warmup_init (`bool`, *optional*, defaults to `False`):
             Time-dependent learning rate computation depends on whether warm-up initialization is being used
@@ -62,9 +62,12 @@ class Adafactor(torch.optim.Optimizer):
         lr_smoothing_rate (`float`, *optional*, defaults to `100.0`):
             Divisor for the smoothing scale in step-to-step learning rate smoothing in `_smooth_lr`.
             Larger values yield stronger smoothing (smaller step-to-step LR changes).
-        factored (`bool`, *optional*, defaults to `None`):
+        factored (`bool | None`, *optional*, defaults to `None`):
             If True, use factored second-moment (row/col) for all parameters. If False, use full second-moment.
             If None, auto-detect: use factored for parameters with 2+ dimensions (current default behavior).
+        emergency_brake (`float | None`, *optional*, defaults to `None`):
+            When set, enables an adaptive "brake" on the internal relative LR and uses this value as the minimum
+            floor for both `brake` and `soft_brake`. `None` disables the mechanism.
 
     This implementation handles low-precision (FP16, bfloat) values, but we have not thoroughly tested.
 
