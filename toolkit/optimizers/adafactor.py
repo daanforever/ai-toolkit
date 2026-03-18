@@ -290,7 +290,7 @@ class Adafactor(torch.optim.Optimizer):
         for group in self.param_groups:
             for param in group["params"]:
                 state = self.state[param]
-                for key in ("update_rms_max", "update_rms", "rms_max", "grad_rms", "grad_rms_max"):
+                for key in ("update_rms_max", "update_rms", "rms_max", "param_rms_ema", "grad_rms", "grad_rms_max"):
                     if key in state and not isinstance(state[key], torch.Tensor):
                         state[key] = torch.tensor(state[key], device=param.device, dtype=torch.float32)
 
@@ -700,6 +700,11 @@ class Adafactor(torch.optim.Optimizer):
 
                 # state["step"] += 1
                 state["RMS"] = self._rms(p_data_fp32)
+                # EMA of parameter RMS for monitoring (uses same decay as rms_max family)
+                if "param_rms_ema" not in state:
+                    state["param_rms_ema"] = state["RMS"].clone().detach()
+                else:
+                    state["param_rms_ema"] = state["param_rms_ema"] * group["rms_max_decay_rate"] + state["RMS"] * (1.0 - beta)
                 if "rms_max" not in state:
                     state["rms_max"] = state["RMS"].clone().detach()
                 else:
@@ -882,6 +887,21 @@ class Adafactor(torch.optim.Optimizer):
         Average RMS of parameters across all parameter groups (unified tensor reduction).
         """
         return self._scalars_per_group_to_avg(self.get_rms())
+
+    def get_param_rms_ema(self):
+        """
+        Get EMA of parameter RMS for each parameter group.
+        Per-group value is mean over params in group via tensor reduction (_get_group_scalars).
+        """
+        out = []
+        for group in self.param_groups:
+            v = self._get_group_scalars(group, "param_rms_ema", default=0.0, reduction='mean')
+            out.append(v if v is not None else 0.0)
+        return out
+
+    def get_avg_param_rms_ema(self):
+        """Average EMA(parameter RMS) across all parameter groups."""
+        return self._scalars_per_group_to_avg(self.get_param_rms_ema())
 
     def get_avg_update_rms(self):
         """
