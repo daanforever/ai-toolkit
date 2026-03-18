@@ -120,6 +120,8 @@ class SDTrainer(BaseSDTrainProcess):
         # store differential guidance norm metric for logging
         self.diff_guidance_norm = None
 
+        self._last_noised_preview_step: Optional[int] = None
+
 
     def before_model_load(self):
         pass
@@ -1342,6 +1344,7 @@ class SDTrainer(BaseSDTrainProcess):
                 and self.sample_config.sample_every
                 and self.step_num % self.sample_config.sample_every == 0
                 and len(noisy_latents.shape) == 4
+                and self._last_noised_preview_step != self.step_num
             ):
                 with torch.no_grad():
                     noisy_single = noisy_latents[:1]
@@ -1351,6 +1354,7 @@ class SDTrainer(BaseSDTrainProcess):
                     timestep_val = int(timesteps[0].item())
                     path = os.path.join(samples_dir, f'noised_step_{self.step_num:09d}_t{timestep_val}.jpg')
                     save_tensors(decoded, path)
+                    self._last_noised_preview_step = self.step_num
             if self.train_config.do_cfg or self.train_config.do_random_cfg:
                 # pick random negative prompts
                 if self.negative_prompt_pool is not None:
