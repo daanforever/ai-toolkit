@@ -182,6 +182,7 @@ class Adafactor(torch.optim.Optimizer):
         self._lr_smoothing_rate = lr_smoothing_rate
         self._rms_max_decay_rate = rms_max_decay_rate
         self._lr = lr
+        self._warmup_init = warmup_init
         self._warmup_steps = warmup_steps
         self._beta1 = beta1
         self._beta2 = beta2
@@ -267,6 +268,7 @@ class Adafactor(torch.optim.Optimizer):
             group["lr"] = max(group["eps"][0], self._lr)
             group["lr_smoothing_rate"] = self._lr_smoothing_rate
             group["rms_max_decay_rate"] = self._rms_max_decay_rate
+            group["warmup_init"] = self._warmup_init
             group["warmup_steps"] = self._warmup_steps
             group["beta1"] = self._beta1
             group["beta2"] = self._beta2
