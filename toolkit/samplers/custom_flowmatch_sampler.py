@@ -65,21 +65,23 @@ class CustomFlowMatchEulerDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
         Equivalent SNR: (1-t)^2 / t^2
         
         For DDPM: SNR = alphas_cumprod / (1 - alphas_cumprod)
-        Therefore: alphas_cumprod = (1-t)^2
+        Therefore: alphas_cumprod = SNR / (1 + SNR)
+        = (1-t)^2 / ((1-t)^2 + t^2)
         """
         num_timesteps = 1000
-        # Create timesteps from 1000 to 0 (descending)
-        timesteps = torch.linspace(1000, 0, num_timesteps, device='cpu')
+        # Build canonical timestep values matching training lookup in apply_snr_weight:
+        # index i corresponds to timestep i + 1.
+        timesteps = torch.linspace(1, 1000, num_timesteps, device='cpu')
         
         # Normalize to [0, 1] range
         t = timesteps / 1000.0
         
         # Clamp to avoid numerical issues at boundaries
-        t = torch.clamp(t, min=1e-8, max=1.0 - 1e-8)
+        t = torch.clamp(t, min=1e-8, max=1.0)
         
-        # Compute equivalent alphas_cumprod: (1-t)^2
-        # This gives correct SNR: alphas_cumprod / (1 - alphas_cumprod) = (1-t)^2 / t^2
-        alphas_cumprod = (1.0 - t) ** 2
+        # Compute equivalent alphas_cumprod from SNR definition.
+        snr = ((1.0 - t) ** 2) / (t ** 2 + 1e-8)
+        alphas_cumprod = snr / (1.0 + snr)
         
         return alphas_cumprod
 
@@ -92,7 +94,8 @@ class CustomFlowMatchEulerDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
         SNR = (1-t)^2 / t^2
         """
         num_timesteps = 1000
-        timesteps = torch.linspace(1000, 0, num_timesteps, device='cpu')
+        # Build canonical timestep values so index i maps to timestep i + 1.
+        timesteps = torch.linspace(1, 1000, num_timesteps, device='cpu')
         t = timesteps / 1000.0
         
         # Add small epsilon to avoid division by zero

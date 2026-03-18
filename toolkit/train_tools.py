@@ -756,7 +756,16 @@ def apply_snr_weight(
     offset = 0
     if noise_scheduler.timesteps[0] == 1000:
         offset = 1
-    snr = torch.stack([all_snr[(t - offset).int()] for t in timesteps])
+    timestep_values = torch.as_tensor(timesteps, device=loss.device, dtype=torch.float32)
+    timestep_indices = (timestep_values - offset).clamp(min=0, max=all_snr.shape[0] - 1)
+
+    # Support non-integer timesteps (e.g. flowmatch shift/sigmoid schedules) by
+    # linearly interpolating SNR between neighboring canonical timestep entries.
+    idx_low = torch.floor(timestep_indices).long()
+    idx_high = torch.ceil(timestep_indices).long()
+    lerp = (timestep_indices - idx_low.float()).to(all_snr.dtype)
+    snr = all_snr[idx_low] * (1.0 - lerp) + all_snr[idx_high] * lerp
+
     gamma_over_snr = torch.div(torch.ones_like(snr) * gamma, snr)
     if fixed:
         snr_weight = gamma_over_snr.float().to(loss.device)  # directly using gamma over snr
