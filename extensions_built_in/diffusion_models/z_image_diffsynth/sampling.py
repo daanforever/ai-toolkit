@@ -180,15 +180,36 @@ class _ImagesOutput:
 
 def get_generation_pipeline(sd_model):
     """Build pipeline for sd_model (ZImageDiffSynthModel). Uses sampling transformer if set.
-    When sampling is a diffusers-format checkpoint, returns ZImagePipeline (same as z_image)
-    so quality matches. Otherwise returns ZImageDiffSynthPipelineWrapper (DiffSynth DiT)."""
+    When sampling_name_or_path points to a diffusers checkpoint (e.g. Z-Image-Turbo), load the
+    full pipeline from that path so VAE, scheduler, TE, tokenizer match the release; only the
+    transformer is replaced with our loaded one (with LoRA if any). Otherwise use wrapper (DiffSynth DiT)."""
     from toolkit.accelerator import unwrap_model
+    from toolkit.paths import normalize_path
 
-    # Same sampling path as z_image: diffusers ZImageTransformer2DModel + ZImagePipeline
+    # Diffusers path: use full pipeline from sampling checkpoint so VAE/scheduler match (avoids grain from mixing components)
     if getattr(sd_model, "_sampling_is_diffusers", False) and getattr(
         sd_model, "_sampling_transformer", None
     ) is not None:
         from diffusers import ZImagePipeline
+
+        sampling_path = getattr(
+            getattr(sd_model, "model_config", None), "sampling_name_or_path", None
+        )
+        if sampling_path:
+            sampling_path = normalize_path(sampling_path)
+            try:
+                pipe = ZImagePipeline.from_pretrained(
+                    sampling_path,
+                    torch_dtype=sd_model.torch_dtype,
+                )
+                # Replace only transformer with our loaded one (with LoRA if merged)
+                tr = sd_model._sampling_transformer
+                tr = getattr(tr, "_inner_dit", getattr(tr, "dit", tr))
+                pipe.transformer = unwrap_model(tr)
+                return pipe
+            except Exception:
+                pass
+        # Fallback: build from model components (may cause grain if VAE/scheduler differ from Turbo)
         scheduler = CustomFlowMatchEulerDiscreteScheduler(**scheduler_config)
         vae = getattr(sd_model.vae, "vae_decoder", sd_model.vae)
         te = sd_model.text_encoder[0] if isinstance(sd_model.text_encoder, list) else sd_model.text_encoder
@@ -196,7 +217,6 @@ def get_generation_pipeline(sd_model):
         if te is None:
             from toolkit.unloader import FakeTextEncoder
             te = FakeTextEncoder(device=sd_model.device_torch, dtype=sd_model.torch_dtype)
-        # Sampling transformer is wrapped in _DiTUnetWrapper for LoRA name match; ZImagePipeline needs raw transformer
         tr = sd_model._sampling_transformer
         tr = getattr(tr, "_inner_dit", getattr(tr, "dit", tr))
         return ZImagePipeline(
