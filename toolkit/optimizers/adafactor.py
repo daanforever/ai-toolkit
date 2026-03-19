@@ -1,11 +1,12 @@
 import math
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import torch
 from toolkit.optimizers.optimizer_utils import copy_stochastic, stochastic_grad_accummulation
 from toolkit.print import print_acc
 from toolkit.util.debug import is_debug_enabled
 from optimum.quanto import QBytesTensor
 import random
+from toolkit.lora_utils.stagnation_detector import StagnationDetector
 
 
 class Adafactor(torch.optim.Optimizer):
@@ -126,7 +127,7 @@ class Adafactor(torch.optim.Optimizer):
         self,
         params,
         lr=1e-4,
-        eps=(1e-30, 1e-3),
+        eps: Tuple[float, float] = (1e-30, 1e-3),
         clip_threshold=1.0,
         decay_rate=-0.8,
         beta1=None,
@@ -145,9 +146,10 @@ class Adafactor(torch.optim.Optimizer):
         stochastic_rounding=True,
         factored=None,
         emergency_brake: float | None = None,
+        saddle_point_window: int = 100,
+        saddle_point_threshold: float = 0.001,
+        saddle_point_step: float = 0.01,
     ):
-        self.stochastic_rounding = stochastic_rounding
-
         defaults = {
             "lr": lr,
             "eps": eps,
@@ -176,6 +178,17 @@ class Adafactor(torch.optim.Optimizer):
             group["warmup_steps"] = warmup_steps
             group["factored"] = factored
             group["emergency_brake"] = emergency_brake
+            group["saddle_point_score"] = 0.0
+            group["saddle_point_detected"] = False
+
+        # Create stagnation detector for RMS(parameter) based heuristic.
+        self._saddle_point_detector = StagnationDetector(
+            window_size=saddle_point_window,
+            threshold=saddle_point_threshold,
+            epsilon=float(eps[0]),
+        )
+        # Increment/decrement applied to group-level saddle-point score per step.
+        self._saddle_point_step = float(saddle_point_step)
 
         # Store LR limits, lr_smoothing_rate, rms_max_decay_rate and lr so they can be reapplied after load_state_dict (restart with new config).
         self._min_lr = min_lr
@@ -288,6 +301,10 @@ class Adafactor(torch.optim.Optimizer):
             # Ensure warmup_target is initialized if warmup was active at checkpoint time
             if group.get("warmup_active", False) and "warmup_target" not in group:
                 group["warmup_target"] = group["lr"]
+
+            # Ensure saddle-point keys exist for backward compatibility.
+            group["saddle_point_score"] = float(group.get("saddle_point_score", 0.0))
+            group["saddle_point_detected"] = False
         # Normalize state from old checkpoints: update_rms_max/update_rms must be tensors for step().
         for group in self.param_groups:
             for param in group["params"]:
@@ -423,7 +440,8 @@ class Adafactor(torch.optim.Optimizer):
             # Ratio of parameter RMS to group RMS max
             ratio = max(eps0, (group_rms_max - param_rms) / (group_rms_max + eps0))
 
-            relative = (1 + min_lr * ratio) * brake * soft_brake
+            saddle_point_mult = 2.0 if param_group.get("saddle_point_detected", False) else 1.0
+            relative = (1 + min_lr * ratio) * brake * soft_brake * saddle_point_mult
 
         if param_group.get("warmup_active", False):
             warmup_steps = param_group.get("warmup_steps", self._warmup_steps)
@@ -589,6 +607,27 @@ class Adafactor(torch.optim.Optimizer):
                     param.grad = param._accum_grad
                     del param._accum_grad
 
+    def _detect_saddle_point(self, current_rms: float) -> None:
+        """
+        Update saddle-point heuristic state (score and detected flag) per param_group.
+        Heuristic uses RMS(parameter) stagnation detector and is independent from loss.
+        """
+        is_stagnant, _cv = self._saddle_point_detector.check(current_rms)
+
+        for group in self.param_groups:
+            score = float(group.get("saddle_point_score", 0.0))
+            if is_stagnant:
+                score += self._saddle_point_step
+                if score > 1.0:
+                    group["saddle_point_detected"] = True
+                    group["saddle_point_score"] = 0.0
+                else:
+                    group["saddle_point_detected"] = False
+                    group["saddle_point_score"] = score
+            else:
+                group["saddle_point_detected"] = False
+                group["saddle_point_score"] = max(0.0, score - self._saddle_point_step)
+
     # adafactor manages its own lr
     def get_learning_rates(self):
         """
@@ -613,6 +652,10 @@ class Adafactor(torch.optim.Optimizer):
         loss = None
         if closure is not None:
             loss = closure()
+
+        # Detect RMS(parameter) stagnation from previous steps.
+        current_rms = self.get_avg_param_rms_ema()
+        self._detect_saddle_point(current_rms)
 
         for group in self.param_groups:
             # Decay group_rms_max once per step
