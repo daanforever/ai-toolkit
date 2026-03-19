@@ -155,6 +155,12 @@ class ZImageDiffSynthPipelineWrapper:
         if hasattr(decoder, "parameters") and next(decoder.parameters(), None) is not None:
             if next(decoder.parameters()).device != device:
                 decoder.to(device)
+        # Same as diffusers ZImagePipeline: scale latents before decode (missing this caused noisy/grainy output)
+        scaling_factor = getattr(getattr(vae, "config", None), "scaling_factor", 1.0)
+        shift_factor = getattr(getattr(vae, "config", None), "shift_factor", 0.0)
+        decode_dtype = getattr(vae, "dtype", latents.dtype)
+        latents = latents.to(decode_dtype)
+        latents = (latents / scaling_factor) + shift_factor
         if hasattr(vae, "decode"):
             out = vae.decode(latents)
             image = out.sample if hasattr(out, "sample") else out
