@@ -14,7 +14,7 @@ from toolkit.models.lokr import LokrModule
 from .config_modules import NetworkConfig
 from .lorm import count_parameters
 from .network_mixins import ToolkitNetworkMixin, ToolkitModuleMixin, ExtractableModuleMixin
-from toolkit.util.debug import memory_debug
+from toolkit.util.debug import memory_debug, is_debug_enabled
 
 from toolkit.kohya_lora import LoRANetwork
 from toolkit.models.DoRA import DoRAModule
@@ -119,6 +119,18 @@ class LoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
 
         # same as microsoft's
         torch.nn.init.kaiming_uniform_(self.lora_down.weight, a=math.sqrt(5))
+
+        # optional scale raises initial param RMS (e.g. for Adafactor update cap)
+        if network is not None and getattr(network, "network_config", None) is not None:
+            nk = getattr(network.network_config, "network_kwargs", None) or {}
+            lora_down_init_scale = nk.get("lora_down_init_scale") or 1.0
+  
+            if lora_down_init_scale != 1.0:
+                self.lora_down.weight.mul_(lora_down_init_scale)
+  
+                if is_debug_enabled():
+                    print(f"LoRA {lora_name}: applied lora_down_init_scale={lora_down_init_scale}")
+
         if not self.full_rank:
             torch.nn.init.zeros_(self.lora_up.weight)
 
