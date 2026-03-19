@@ -402,7 +402,7 @@ class Adafactor(torch.optim.Optimizer):
             soft_brake = 1.0
 
             emergency_brake = param_group.get("emergency_brake", None)
-            if emergency_brake is not None:
+            if param_group["scale_parameter"] and emergency_brake is not None:
                 emergency_brake = float(emergency_brake)
                 # Instant Brake: multiplicative factor based on current directional consistency
                 # Prefer fresh per-parameter dir_consistency; fallback to group mean (when beta1=None)
