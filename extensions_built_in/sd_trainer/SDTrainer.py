@@ -507,7 +507,20 @@ class SDTrainer(BaseSDTrainProcess):
             device=self.device_torch
         )
 
-        output = denoised_latents / self.sd.vae.config['scaling_factor']
+        # Same as BaseModel.decode_latents / ZImagePipeline: scale then shift before VAE decode
+        vae_cfg = getattr(self.sd.vae, "config", None)
+        if vae_cfg is not None:
+            scaling_factor = getattr(vae_cfg, "scaling_factor", None)
+            if scaling_factor is None and getattr(vae_cfg, "get", None):
+                scaling_factor = vae_cfg.get("scaling_factor", 1.0)
+            scaling_factor = scaling_factor if scaling_factor is not None else 1.0
+            shift_factor = getattr(vae_cfg, "shift_factor", None)
+            if shift_factor is None and getattr(vae_cfg, "get", None):
+                shift_factor = vae_cfg.get("shift_factor", 0.0)
+            shift_factor = shift_factor if shift_factor is not None else 0.0
+        else:
+            scaling_factor, shift_factor = 1.0, 0.0
+        output = (denoised_latents / scaling_factor) + shift_factor
         output = self.sd.vae.decode(output).sample
 
         if self.train_config.show_turbo_outputs:
