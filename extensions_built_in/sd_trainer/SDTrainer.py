@@ -1041,6 +1041,7 @@ class SDTrainer(BaseSDTrainProcess):
             batch: 'DataLoaderBatchDTO',
             noise: torch.Tensor,
             unconditional_embeds: Optional[PromptEmbeds] = None,
+            microbatch_scale: float = 1.0,
             **kwargs
     ):
         dtype = get_torch_dtype(self.train_config.dtype)
@@ -1142,7 +1143,8 @@ class SDTrainer(BaseSDTrainProcess):
         loss = loss.mean()
         if loss.item() > 1e3:
             pass
-        self.accelerator.backward(loss)
+        # Scale gradients so microbatch accumulation behaves like a mean.
+        self.accelerator.backward(loss * microbatch_scale)
         return pure_loss
 
 
@@ -1315,7 +1317,7 @@ class SDTrainer(BaseSDTrainProcess):
         )
     
 
-    def train_single_accumulation(self, batch: DataLoaderBatchDTO):
+    def train_single_accumulation(self, batch: DataLoaderBatchDTO, microbatch_scale: float = 1.0):
         with torch.no_grad():
             self.timer.start('preprocess_batch')
             if isinstance(self.adapter, CustomAdapter):
@@ -2085,6 +2087,7 @@ class SDTrainer(BaseSDTrainProcess):
                         batch=batch,
                         noise=noise,
                         unconditional_embeds=unconditional_embeds,
+                        microbatch_scale=microbatch_scale,
                         prior_pred=prior_pred,
                     )
                 else:
@@ -2151,7 +2154,7 @@ class SDTrainer(BaseSDTrainProcess):
                         
                         # Combine main loss and preservation loss with loss_multiplier applied
                         total_loss = loss * loss_multiplier.mean() + preservation_loss
-                        self.accelerator.backward(total_loss)
+                        self.accelerator.backward(total_loss * microbatch_scale)
                         
                         # Detach total loss for logging and nan checks
                         loss = total_loss.detach()
@@ -2176,7 +2179,7 @@ class SDTrainer(BaseSDTrainProcess):
                         # if self.is_bfloat:
                         # loss.backward()
                         # else:
-                        self.accelerator.backward(loss)
+                        self.accelerator.backward(loss * microbatch_scale)
 
         return loss.detach()
         # flush()
@@ -2186,6 +2189,7 @@ class SDTrainer(BaseSDTrainProcess):
             batch_list = batch
         else:
             batch_list = [batch]
+        microbatch_scale = 1.0 / float(len(batch_list))
         total_loss = None
         self.optimizer.zero_grad()
         for batch in batch_list:
@@ -2201,7 +2205,7 @@ class SDTrainer(BaseSDTrainProcess):
                         if self.current_boundary_index in self.sd.trainable_multistage_boundaries:
                             # if this boundary is trainable, we can stop looking
                             break
-            loss = self.train_single_accumulation(batch)
+            loss = self.train_single_accumulation(batch, microbatch_scale=microbatch_scale)
             self.steps_this_boundary += 1
             if total_loss is None:
                 total_loss = loss
@@ -2210,7 +2214,7 @@ class SDTrainer(BaseSDTrainProcess):
             if len(batch_list) > 1 and self.model_config.low_vram:
                 torch.cuda.empty_cache()
 
-
+venv\Scripts\python.exe" -m py_compile "extensions_built_in\sd_trainer\SDTrainer.py
         if not self.is_grad_accumulation_step:
             # Minimal fail-fast check for bf16 LoRA training:
             # trainable grads must be fp32 before optimizer step.
