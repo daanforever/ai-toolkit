@@ -395,11 +395,7 @@ class ZImageDiffSynthModel(BaseModel):
             text_embeds,
             use_gradient_checkpointing=use_gradient_checkpointing,
         )
-        # Match z_image / diffusers Z-Image: trainer loss target is velocity v = (noise - latents).
-        # The model is trained to output -v; we negate so the trainer sees v and the gradient
-        # trains the LoRA in the correct direction. Without this, the gradient would teach the
-        # LoRA to produce noisy images (wrong sign).
-        return -noise_pred
+        return noise_pred
 
     def get_prompt_embeds(self, prompt: str) -> PromptEmbeds:
         te = self.text_encoder[0]
