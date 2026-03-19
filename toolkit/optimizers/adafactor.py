@@ -1087,6 +1087,18 @@ class Adafactor(torch.optim.Optimizer):
         """Average instability_score across all parameter groups."""
         return self._scalars_per_group_to_avg(self.get_instability_score())
 
+    def get_saddle_point_score(self):
+        """Get saddle_point_score per parameter group (RMS stagnation heuristic)."""
+        out = []
+        for group in self.param_groups:
+            score = group.get("saddle_point_score", 0.0)
+            out.append(score if score is not None else 0.0)
+        return out
+
+    def get_avg_saddle_point_score(self):
+        """Average saddle_point_score across all parameter groups."""
+        return self._scalars_per_group_to_avg(self.get_saddle_point_score())
+
     def get_avg_step_efficiency(self):
         """Average Step Efficiency across all parameter groups."""
         return self._scalars_per_group_to_avg(self.get_step_efficiency())
