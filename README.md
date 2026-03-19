@@ -488,6 +488,17 @@ You can also exclude layers by their names by using `ignore_if_contains` network
 `ignore_if_contains` takes priority over `only_if_contains`. So if a weight is covered by both,
 if will be ignored.
 
+To use approximate PiSSA-style initialization for **Linear** LoRA `lora_down` weights (Conv2d layers keep the default init), set:
+
+```yaml
+      network:
+        type: "lora"
+        linear: 128
+        linear_alpha: 128
+        network_kwargs:
+          init_lora_weights: "pissa"
+```
+
 ## LoKr Training
 
 To learn more about LoKr, read more about it at [KohakuBlueleaf/LyCORIS](https://github.com/KohakuBlueleaf/LyCORIS/blob/main/docs/Guidelines.md). To train a LoKr model, you can adjust the network type in the config file like so:

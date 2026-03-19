@@ -18,6 +18,7 @@ from toolkit.util.debug import memory_debug, is_debug_enabled
 
 from toolkit.kohya_lora import LoRANetwork
 from toolkit.models.DoRA import DoRAModule
+from toolkit.lora_utils.pissa import compute_pissa_linear_lora_down
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -117,18 +118,45 @@ class LoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
         self.scale = alpha / self.lora_dim
         self.register_buffer("alpha", torch.tensor(alpha))  # 定数として扱える
 
-        # same as microsoft's
-        torch.nn.init.kaiming_uniform_(self.lora_down.weight, a=math.sqrt(5))
-
-        # optional scale raises initial param RMS (e.g. for Adafactor update cap)
+        init_lora_weights = None
+        nk = {}
         if network is not None and getattr(network, "network_config", None) is not None:
             nk = getattr(network.network_config, "network_kwargs", None) or {}
+            init_lora_weights = nk.get("init_lora_weights")
+
+        use_pissa = (
+            init_lora_weights == "pissa"
+            and org_module.__class__.__name__ in LINEAR_MODULES
+            and not self.full_rank
+        )
+
+        if use_pissa:
+            pissa_down = compute_pissa_linear_lora_down(
+                org_module.weight.detach(), self.lora_dim
+            )
+            if pissa_down is not None:
+                with torch.no_grad():
+                    self.lora_down.weight.copy_(
+                        pissa_down.to(device=self.lora_down.weight.device, dtype=self.lora_down.weight.dtype)
+                    )
+                if is_debug_enabled():
+                    print(f"LoRA {lora_name}: init_lora_weights=pissa")
+            else:
+                torch.nn.init.kaiming_uniform_(self.lora_down.weight, a=math.sqrt(5))
+                if is_debug_enabled():
+                    print(f"LoRA {lora_name}: init_lora_weights=pissa failed, fallback kaiming_uniform_")
+        else:
+            # same as microsoft's
+            torch.nn.init.kaiming_uniform_(self.lora_down.weight, a=math.sqrt(5))
+
+        # optional scale raises initial param RMS (e.g. for Adafactor update cap)
+        if nk:
             lora_down_init_scale = nk.get("lora_down_init_scale") or 1.0
-  
+
             if lora_down_init_scale != 1.0:
                 with torch.no_grad():
                     self.lora_down.weight.mul_(lora_down_init_scale)
-  
+
                 if is_debug_enabled():
                     print(f"LoRA {lora_name}: applied lora_down_init_scale={lora_down_init_scale}")
 
