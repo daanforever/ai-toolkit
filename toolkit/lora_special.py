@@ -18,7 +18,7 @@ from toolkit.util.debug import memory_debug, is_debug_enabled
 
 from toolkit.kohya_lora import LoRANetwork
 from toolkit.models.DoRA import DoRAModule
-from toolkit.lora_utils.pissa import compute_pissa_linear_lora_down
+from toolkit.lora_utils.pissa import try_init_linear_lora_down_pissa
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -124,29 +124,19 @@ class LoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
             nk = getattr(network.network_config, "network_kwargs", None) or {}
             init_lora_weights = nk.get("init_lora_weights")
 
-        use_pissa = (
-            init_lora_weights == "pissa"
-            and org_module.__class__.__name__ in LINEAR_MODULES
-            and not self.full_rank
-        )
-
-        if use_pissa:
-            pissa_down = compute_pissa_linear_lora_down(
-                org_module.weight.detach(), self.lora_dim
-            )
-            if pissa_down is not None:
-                with torch.no_grad():
-                    self.lora_down.weight.copy_(
-                        pissa_down.to(device=self.lora_down.weight.device, dtype=self.lora_down.weight.dtype)
-                    )
-                if is_debug_enabled():
-                    print(f"LoRA {lora_name}: init_lora_weights=pissa")
-            else:
-                torch.nn.init.kaiming_uniform_(self.lora_down.weight, a=math.sqrt(5))
-                if is_debug_enabled():
-                    print(f"LoRA {lora_name}: init_lora_weights=pissa failed, fallback kaiming_uniform_")
-        else:
-            # same as microsoft's
+        if not try_init_linear_lora_down_pissa(
+            init_lora_weights=init_lora_weights,
+            org_module_class_name=org_module.__class__.__name__,
+            full_rank=self.full_rank,
+            org_weight=org_module.weight,
+            lora_down=self.lora_down,
+            lora_dim=self.lora_dim,
+            in_dim=in_dim,
+            out_dim=out_dim,
+            network=network,
+            lora_name=lora_name,
+        ):
+            # same as microsoft's when PiSSA not used / capped / failed
             torch.nn.init.kaiming_uniform_(self.lora_down.weight, a=math.sqrt(5))
 
         # optional scale raises initial param RMS (e.g. for Adafactor update cap)
