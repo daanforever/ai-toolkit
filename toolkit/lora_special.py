@@ -126,7 +126,8 @@ class LoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
             lora_down_init_scale = nk.get("lora_down_init_scale") or 1.0
   
             if lora_down_init_scale != 1.0:
-                self.lora_down.weight.mul_(lora_down_init_scale)
+                with torch.no_grad():
+                    self.lora_down.weight.mul_(lora_down_init_scale)
   
                 if is_debug_enabled():
                     print(f"LoRA {lora_name}: applied lora_down_init_scale={lora_down_init_scale}")
