@@ -12,6 +12,36 @@ from toolkit.util.debug import is_debug_enabled
 
 _DEFAULT_POWER_ITERS = 4
 
+
+def _materialize_float_weight_matrix(weight: torch.Tensor) -> torch.Tensor:
+    """
+    Convert quanto / torchao quantized tensor weights to a plain float matrix.
+
+    torchao's AffineQuantizedTensor registers ``aten.mm`` assuming the *second*
+    operand is the quantized weight; PiSSA uses ``W @ Q`` with a float ``Q``, which
+    mis-dispatches and can raise ``AttributeError: 'Tensor' object has no attribute
+    '_quantized_linear_op'``. Dequantizing ``W`` first avoids that path.
+    """
+    w: torch.Tensor = weight
+    while hasattr(w, "original_weight_tensor"):
+        w = w.original_weight_tensor
+    try:
+        from torchao.dtypes.affine_quantized_tensor import AffineQuantizedTensor
+
+        if isinstance(w, AffineQuantizedTensor):
+            return w.dequantize().to(dtype=torch.float32)
+    except ImportError:
+        pass
+    try:
+        from optimum.quanto import QTensor
+
+        if isinstance(w, QTensor):
+            return w.dequantize().to(dtype=torch.float32)
+    except ImportError:
+        pass
+    return w.detach().to(dtype=torch.float32)
+
+
 _PISSA_LINEAR_MODULE_NAMES = frozenset(
     ("Linear", "LoRACompatibleLinear", "QLinear"),
 )
@@ -44,9 +74,7 @@ def try_init_linear_lora_down_pissa(
     if lora_dim > pissa_max_rank:
         emit_pissa_rank_cap_notice_once(network)
         return False
-    pissa_down, pissa_fail_reason = compute_pissa_linear_lora_down(
-        org_weight.detach(), lora_dim
-    )
+    pissa_down, pissa_fail_reason = compute_pissa_linear_lora_down(org_weight, lora_dim)
     if pissa_down is not None:
         with torch.no_grad():
             lora_down.weight.copy_(
@@ -96,9 +124,10 @@ def compute_pissa_linear_lora_down(
     ``reason`` is a short diagnostic string (shape/rank/numerics/exception).
     """
     try:
-        if weight.dim() != 2:
-            return None, f"weight.dim()!=2 (dim={weight.dim()}, shape={tuple(weight.shape)})"
-        out_f, in_f = int(weight.shape[0]), int(weight.shape[1])
+        W = _materialize_float_weight_matrix(weight)
+        if W.dim() != 2:
+            return None, f"weight.dim()!=2 (dim={W.dim()}, shape={tuple(W.shape)})"
+        out_f, in_f = int(W.shape[0]), int(W.shape[1])
         if rank <= 0:
             return None, f"rank<=0 (rank={rank})"
         if out_f == 0 or in_f == 0:
@@ -107,9 +136,9 @@ def compute_pissa_linear_lora_down(
             m = min(out_f, in_f)
             return None, f"rank>min(out_f,in_f): rank={rank}, out_f={out_f}, in_f={in_f}, min={m}"
 
-        device = weight.device
+        device = W.device
         dtype_compute = torch.float32
-        W = weight.to(dtype=dtype_compute, device=device)
+        W = W.to(dtype=dtype_compute, device=device)
 
         Q = torch.randn(in_f, rank, device=device, dtype=dtype_compute)
         Q, _ = torch.linalg.qr(Q, mode="reduced")
