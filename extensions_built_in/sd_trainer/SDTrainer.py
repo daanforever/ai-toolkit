@@ -2214,7 +2214,6 @@ class SDTrainer(BaseSDTrainProcess):
             if len(batch_list) > 1 and self.model_config.low_vram:
                 torch.cuda.empty_cache()
 
-venv\Scripts\python.exe" -m py_compile "extensions_built_in\sd_trainer\SDTrainer.py
         if not self.is_grad_accumulation_step:
             # Minimal fail-fast check for bf16 LoRA training:
             # trainable grads must be fp32 before optimizer step.
