@@ -111,6 +111,75 @@ transforms_dict = {
 img_ext_list = ['.jpg', '.jpeg', '.png', '.webp']
 
 
+def spatial_resize_crop_pil(file_item: 'FileItemDTO', img: Image.Image) -> Image.Image:
+    """Resize and crop PIL RGB to training geometry (buckets or legacy). Caller applies flips before this."""
+    if file_item.dataset_config.buckets:
+        if file_item.scale_to_width <= 0 or file_item.scale_to_height <= 0:
+            raise ValueError(
+                f"Invalid scale dimensions for image {file_item.path}: "
+                f"scale_to_width={file_item.scale_to_width}, scale_to_height={file_item.scale_to_height}"
+            )
+        img = img.resize((file_item.scale_to_width, file_item.scale_to_height), Image.BICUBIC)
+        if img.width < file_item.crop_x + file_item.crop_width or img.height < file_item.crop_y + file_item.crop_height:
+            print_acc('size mismatch')
+        img = img.crop(
+            (
+                file_item.crop_x,
+                file_item.crop_y,
+                file_item.crop_x + file_item.crop_width,
+                file_item.crop_y + file_item.crop_height,
+            )
+        )
+    else:
+        img = img.resize(
+            (
+                int(img.size[0] * file_item.dataset_config.scale),
+                int(img.size[1] * file_item.dataset_config.scale),
+            ),
+            Image.BICUBIC,
+        )
+        min_img_size = min(img.size)
+        dc = file_item.dataset_config
+        if dc.random_crop:
+            if dc.random_scale and min_img_size > dc.resolution:
+                if min_img_size < dc.resolution:
+                    print_acc(
+                        f"Unexpected values: min_img_size={min_img_size}, "
+                        f"self.resolution={dc.resolution}, image file={file_item.path}"
+                    )
+                    scale_size = dc.resolution
+                else:
+                    scale_size = random.randint(dc.resolution, int(min_img_size))
+                scaler = scale_size / min_img_size
+                scale_width = int((img.width + 5) * scaler)
+                scale_height = int((img.height + 5) * scaler)
+                img = img.resize((scale_width, scale_height), Image.BICUBIC)
+            img = transforms.RandomCrop(dc.resolution)(img)
+        else:
+            img = transforms.CenterCrop(min_img_size)(img)
+            img = img.resize((dc.resolution, dc.resolution), Image.BICUBIC)
+    return img
+
+
+def apply_tone_correction_tensor(x: torch.Tensor, dataset_config: 'DatasetConfig') -> torch.Tensor:
+    """Linear mean/std match per channel on tensor in [0, 1]. No-op if disabled or targets missing."""
+    if not dataset_config.tone_correction:
+        return x
+    if dataset_config.tone_target_mean is None or dataset_config.tone_target_std is None:
+        return x
+    eps = dataset_config.tone_correction_epsilon
+    tm = torch.as_tensor(dataset_config.tone_target_mean, dtype=x.dtype, device=x.device).view(3, 1, 1)
+    ts = torch.as_tensor(dataset_config.tone_target_std, dtype=x.dtype, device=x.device).view(3, 1, 1)
+    m = x.mean(dim=(1, 2), keepdim=True)
+    s = x.std(dim=(1, 2), keepdim=True)
+    flat = (s.squeeze() < eps).view(3, 1, 1)
+    s_safe = s.clamp(min=eps)
+    scaled = (x - m) * (ts / s_safe) + tm
+    shifted = x - m + tm
+    out = torch.where(flat, shifted, scaled)
+    return out.clamp(0.0, 1.0)
+
+
 def standardize_images(images):
     """
     Standardize the given batch of images using the specified mean and std.
@@ -331,6 +400,44 @@ class BucketsMixin:
             for key, bucket in self.buckets.items():
                 print_acc(f'{key}: {len(bucket.file_list_idx)} files')
             print_acc(f'{len(self.buckets)} buckets made')
+
+    def compute_tone_targets(self: 'AiToolkitDataset'):
+        dc = self.dataset_config
+        if not dc.tone_correction or self.is_video:
+            return
+        reps = []
+        seen_paths = set()
+        for item in self.file_list:
+            if item.path not in seen_paths:
+                seen_paths.add(item.path)
+                reps.append(item)
+        print_acc("  -  Computing dataset tone targets (brightness & contrast)")
+        sum_m = torch.zeros(3, dtype=torch.float64)
+        sum_s = torch.zeros(3, dtype=torch.float64)
+        n = 0
+        for item in tqdm(reps, desc='Tone targets'):
+            try:
+                img = Image.open(item.path)
+                img = exif_transpose(img)
+                if item.use_alpha_as_mask:
+                    np_img = np.array(img)
+                    np_img = np_img[:, :, :3]
+                    img = Image.fromarray(np_img)
+                img = img.convert('RGB')
+                img = spatial_resize_crop_pil(item, img)
+                t = transforms.ToTensor()(img)
+                sum_m += t.mean(dim=(1, 2)).double()
+                sum_s += t.std(dim=(1, 2)).double()
+                n += 1
+            except Exception as e:
+                print_acc(f"tone scan skip {item.path}: {e}")
+        if n == 0:
+            print_acc("  -  WARNING: tone_correction: no images scanned, disabling targets")
+            dc.tone_target_mean = None
+            dc.tone_target_std = None
+            return
+        dc.tone_target_mean = (sum_m / n).tolist()
+        dc.tone_target_std = (sum_s / n).tolist()
 
 
 class CaptionProcessingDTOMixin:
@@ -828,46 +935,7 @@ class ImageProcessingDTOMixin:
             # do a flip
             img = img.transpose(Image.FLIP_TOP_BOTTOM)
 
-        if self.dataset_config.buckets:
-            # scale and crop based on file item
-            if self.scale_to_width <= 0 or self.scale_to_height <= 0:
-                raise ValueError(f"Invalid scale dimensions for image {self.path}: scale_to_width={self.scale_to_width}, scale_to_height={self.scale_to_height}")
-            img = img.resize((self.scale_to_width, self.scale_to_height), Image.BICUBIC)
-            # crop to x_crop, y_crop, x_crop + crop_width, y_crop + crop_height
-            if img.width < self.crop_x + self.crop_width or img.height < self.crop_y + self.crop_height:
-                # todo look into this. This still happens sometimes
-                print_acc('size mismatch')
-            img = img.crop((
-                self.crop_x,
-                self.crop_y,
-                self.crop_x + self.crop_width,
-                self.crop_y + self.crop_height
-            ))
-
-            # img = transforms.CenterCrop((self.crop_height, self.crop_width))(img)
-        else:
-            # Downscale the source image first
-            # TODO this is nto right
-            img = img.resize(
-                (int(img.size[0] * self.dataset_config.scale), int(img.size[1] * self.dataset_config.scale)),
-                Image.BICUBIC)
-            min_img_size = min(img.size)
-            if self.dataset_config.random_crop:
-                if self.dataset_config.random_scale and min_img_size > self.dataset_config.resolution:
-                    if min_img_size < self.dataset_config.resolution:
-                        print_acc(
-                            f"Unexpected values: min_img_size={min_img_size}, self.resolution={self.dataset_config.resolution}, image file={self.path}")
-                        scale_size = self.dataset_config.resolution
-                    else:
-                        scale_size = random.randint(self.dataset_config.resolution, int(min_img_size))
-                    scaler = scale_size / min_img_size
-                    scale_width = int((img.width + 5) * scaler)
-                    scale_height = int((img.height + 5) * scaler)
-                    img = img.resize((scale_width, scale_height), Image.BICUBIC)
-                img = transforms.RandomCrop(self.dataset_config.resolution)(img)
-            else:
-                img = transforms.CenterCrop(min_img_size)(img)
-                img = img.resize((self.dataset_config.resolution, self.dataset_config.resolution), Image.BICUBIC)
+        img = spatial_resize_crop_pil(self, img)
 
         if self.augments is not None and len(self.augments) > 0:
             # do augmentations

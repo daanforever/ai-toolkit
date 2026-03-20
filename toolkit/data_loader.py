@@ -19,7 +19,16 @@ import albumentations as A
 from toolkit import image_utils
 from toolkit.buckets import get_bucket_for_image_size, BucketResolution
 from toolkit.config_modules import DatasetConfig, preprocess_dataset_raw_config
-from toolkit.dataloader_mixins import CaptionMixin, BucketsMixin, LatentCachingMixin, Augments, CLIPCachingMixin, ControlCachingMixin, TextEmbeddingCachingMixin
+from toolkit.dataloader_mixins import (
+    CaptionMixin,
+    BucketsMixin,
+    LatentCachingMixin,
+    Augments,
+    CLIPCachingMixin,
+    ControlCachingMixin,
+    TextEmbeddingCachingMixin,
+    apply_tone_correction_tensor,
+)
 from toolkit.data_transfer_object.data_loader import FileItemDTO, DataLoaderBatchDTO
 from toolkit.print import print_acc
 from toolkit.accelerator import get_accelerator
@@ -57,6 +66,19 @@ class NormalizeSDXLTransform:
             mean=[0.0002, -0.1034, -0.1879],
             std=[0.5436, 0.5116, 0.5033],
         )(image)
+
+
+class ImageToModelSpaceTransform:
+    """PIL RGB -> ToTensor [0,1] -> optional dataset tone correction -> Rescale (+ optional SD normalize)."""
+
+    def __init__(self, dataset_config: DatasetConfig, tail_compose: transforms.Compose):
+        self.dataset_config = dataset_config
+        self.tail = tail_compose
+
+    def __call__(self, pil_img):
+        x = transforms.ToTensor()(pil_img)
+        x = apply_tone_correction_tensor(x, self.dataset_config)
+        return self.tail(x)
 
 
 class NormalizeSD15Transform:
@@ -448,16 +470,20 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
             else:
                 NormalizeMethod = NormalizeSD15Transform
 
-            self.transform = transforms.Compose([
-                transforms.ToTensor(),
-                RescaleTransform(),
-                NormalizeMethod(),
-            ])
+            self.transform = ImageToModelSpaceTransform(
+                dataset_config,
+                transforms.Compose([
+                    RescaleTransform(),
+                    NormalizeMethod(),
+                ]),
+            )
         else:
-            self.transform = transforms.Compose([
-                transforms.ToTensor(),
-                RescaleTransform(),
-            ])
+            self.transform = ImageToModelSpaceTransform(
+                dataset_config,
+                transforms.Compose([
+                    RescaleTransform(),
+                ]),
+            )
 
         # this might take a while
         print_acc(f"Dataset: {self.dataset_path}")
@@ -577,6 +603,8 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
             if self.dataset_config.buckets:
                 # setup buckets
                 self.setup_buckets()
+            if self.dataset_config.tone_correction and not self.is_video:
+                self.compute_tone_targets()
             if self.is_caching_latents:
                 self.cache_latents_all_latents()
             if self.is_caching_clip_vision_to_disk:

@@ -1,31 +1,40 @@
+import argparse
+import os
+import sys
 import time
+from pathlib import Path
 
-import numpy as np
 import torch
 from torch.utils.data import DataLoader
-from torchvision import transforms
-import sys
-import os
-import cv2
-import random
-from transformers import CLIPImageProcessor
-
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import torchvision.transforms.functional
-from toolkit.image_utils import save_tensors, show_img, show_tensors
-
-from toolkit.data_transfer_object.data_loader import DataLoaderBatchDTO
-from toolkit.data_loader import AiToolkitDataset, get_dataloader_from_datasets, \
-    trigger_dataloader_setup_epoch
-from toolkit.config_modules import DatasetConfig
-import argparse
 from tqdm import tqdm
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO_ROOT))
+
+from testing.fixture_paths import FIXTURE_IMAGES_DIR
+from toolkit.config_modules import DatasetConfig
+from toolkit.data_loader import get_dataloader_from_datasets, trigger_dataloader_setup_epoch
+from toolkit.image_utils import save_tensors, show_tensors
+
+from toolkit.data_transfer_object.data_loader import DataLoaderBatchDTO
+
+_DEFAULT_DATASET = str(FIXTURE_IMAGES_DIR)
+
 parser = argparse.ArgumentParser()
-parser.add_argument('dataset_folder', type=str, default='input')
+parser.add_argument(
+    'dataset_folder',
+    nargs='?',
+    default=_DEFAULT_DATASET,
+    help=f"Image folder (default: {_DEFAULT_DATASET})",
+)
 parser.add_argument('--epochs', type=int, default=1)
 parser.add_argument('--num_frames', type=int, default=1)
 parser.add_argument('--output_path', type=str, default=None)
+parser.add_argument(
+    '--show',
+    action='store_true',
+    help='Open CV windows via show_tensors (needs display); default is print stats only',
+)
 
 
 args = parser.parse_args()
@@ -39,19 +48,26 @@ resolution = 512
 bucket_tolerance = 64
 batch_size = 1
 
-clip_processor = CLIPImageProcessor.from_pretrained("openai/clip-vit-base-patch16")
 
-class FakeAdapter:
-    def __init__(self):
-        self.clip_image_processor = clip_processor
-
-
-## make fake sd
 class FakeSD:
+    """Minimal stub: no HF/CLIP — enough for image bucket dataloader smoke test."""
+
     def __init__(self):
-        self.adapter = FakeAdapter()
+        class MC:
+            latent_space_version = None
+            arch = "sd1"
+            is_pixart_sigma = False
+
+        self.model_config = MC()
         self.use_raw_control_images = False
-    
+        self.is_xl = False
+        self.is_vega = False
+        self.is_ssd = False
+        self.is_v3 = False
+        self.is_auraflow = False
+        self.is_flux = False
+        self.te_padding_side = "right"
+
     def encode_control_in_text_embeddings(self, *args, **kwargs):
         return None
 
@@ -85,8 +101,7 @@ dataset_config = DatasetConfig(
 dataloader: DataLoader = get_dataloader_from_datasets([dataset_config], batch_size=batch_size, sd=FakeSD())
 
 
-# run through an epoch ang check sizes
-dataloader_iterator = iter(dataloader)
+# run through an epoch and check sizes
 idx = 0
 for epoch in range(args.epochs):
     for batch in tqdm(dataloader):
@@ -129,20 +144,17 @@ for epoch in range(args.epochs):
                 save_tensors(big_img, os.path.join(args.output_path, f'{idx}.webp'), fps=16)
             else:
                 save_tensors(big_img, os.path.join(args.output_path, f'{idx}.png'))
-        else:
+        elif args.show:
             show_tensors(big_img)
-
-            # convert to image
-            # img = transforms.ToPILImage()(big_img)
-            #
-            # show_img(img)
-
             time.sleep(0.2)
+        else:
+            print(
+                f"batch {idx} tensor shape={tuple(img_batch.shape)} "
+                f"min={img_batch.min().item():.4f} max={img_batch.max().item():.4f}"
+            )
         idx += 1
     # if not last epoch
     if epoch < args.epochs - 1:
         trigger_dataloader_setup_epoch(dataloader)
-
-cv2.destroyAllWindows()
 
 print('done')

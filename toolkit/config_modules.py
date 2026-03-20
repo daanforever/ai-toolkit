@@ -1012,6 +1012,11 @@ class DatasetConfig:
         self.audio_preserve_pitch: bool = kwargs.get('audio_preserve_pitch', False) # preserve pitch when stretching audio to fit num_frames
         self.audio_normalize: bool = kwargs.get('audio_normalize', False) # normalize audio volume levels when loading
 
+        self.tone_correction: bool = kwargs.get('tone_correction', False)
+        self.tone_correction_epsilon: float = kwargs.get('tone_correction_epsilon', 1e-6)
+        self.tone_target_mean: Union[List[float], None] = None
+        self.tone_target_std: Union[List[float], None] = None
+
 
 def preprocess_dataset_raw_config(raw_config: List[dict]) -> List[dict]:
     """
