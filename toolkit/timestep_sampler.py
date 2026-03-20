@@ -76,6 +76,25 @@ class TimestepSampler:
         Returns TimestepSamplerResult with timesteps always set; timestep_indices
         is None only for fixed_cycle strategy.
         """
+        # Gaussian modes are chosen by `content_or_style` and must not be overridden by
+        # `timestep_type` in ('next_sample', 'one_step'). Otherwise runtime/UI updates to
+        # timestep_type (DiffusionTrainer.apply_runtime_timestep_type) can silently change
+        # sampling while loss still uses gaussian_* weighting.
+        if content_or_style == 'gaussian':
+            timestep_indices = self._sample_gaussian(
+                batch_size, latents, min_noise_steps, max_noise_steps,
+                num_train_timesteps,
+            )
+            timesteps = self.noise_scheduler.timesteps[timestep_indices.long()]
+            return TimestepSamplerResult(timesteps=timesteps, timestep_indices=timestep_indices)
+        if content_or_style == 'gaussian_bimodal':
+            timestep_indices = self._sample_gaussian_bimodal(
+                batch_size, latents, min_noise_steps, max_noise_steps,
+                num_train_timesteps,
+            )
+            timesteps = self.noise_scheduler.timesteps[timestep_indices.long()]
+            return TimestepSamplerResult(timesteps=timesteps, timestep_indices=timestep_indices)
+
         if self.train_config.timestep_type == 'next_sample':
             timestep_indices = self._sample_next_sample(
                 batch_size, num_train_timesteps, device
@@ -90,20 +109,6 @@ class TimestepSampler:
             timestep_indices = self._sample_content_style(
                 batch_size, latents, content_or_style,
                 min_noise_steps, max_noise_steps, num_train_timesteps
-            )
-            timesteps = self.noise_scheduler.timesteps[timestep_indices.long()]
-            return TimestepSamplerResult(timesteps=timesteps, timestep_indices=timestep_indices)
-        elif content_or_style == 'gaussian':
-            timestep_indices = self._sample_gaussian(
-                batch_size, latents, min_noise_steps, max_noise_steps,
-                num_train_timesteps
-            )
-            timesteps = self.noise_scheduler.timesteps[timestep_indices.long()]
-            return TimestepSamplerResult(timesteps=timesteps, timestep_indices=timestep_indices)
-        elif content_or_style == 'gaussian_bimodal':
-            timestep_indices = self._sample_gaussian_bimodal(
-                batch_size, latents, min_noise_steps, max_noise_steps,
-                num_train_timesteps
             )
             timesteps = self.noise_scheduler.timesteps[timestep_indices.long()]
             return TimestepSamplerResult(timesteps=timesteps, timestep_indices=timestep_indices)
@@ -147,18 +152,18 @@ class TimestepSampler:
     ) -> torch.Tensor:
         # FlowMatch (e.g. CustomFlowMatchEulerDiscreteScheduler) uses timesteps that run from high noise to low
         # noise in reverse index order, so smaller indices here can correspond to noisier states compared to DDPM.
-        ntt = self.train_config.num_train_timesteps
+        ntt = int(num_train_timesteps)
         orig_timesteps = torch.rand((batch_size,), device=latents.device)
 
         if content_or_style == 'content':
             timestep_indices = (
                 (1 - orig_timesteps) ** self.train_config.timestep_bias_exponent
-                * self.train_config.num_train_timesteps
+                * ntt
             )
         else:
             timestep_indices = (
                 orig_timesteps ** self.train_config.timestep_bias_exponent
-                * self.train_config.num_train_timesteps
+                * ntt
             )
 
         lo, hi = allowed_slot_index_range(ntt, min_noise_steps, max_noise_steps)
@@ -181,7 +186,7 @@ class TimestepSampler:
         max_noise_steps: int,
         num_train_timesteps: int,
     ) -> torch.Tensor:
-        ntt = self.train_config.num_train_timesteps
+        ntt = int(num_train_timesteps)
         allowed_start, allowed_end = allowed_slot_index_range(
             ntt, min_noise_steps, max_noise_steps
         )
@@ -210,7 +215,7 @@ class TimestepSampler:
         max_noise_steps: int,
         num_train_timesteps: int,
     ) -> torch.Tensor:
-        ntt = self.train_config.num_train_timesteps
+        ntt = int(num_train_timesteps)
         allowed_start, allowed_end = allowed_slot_index_range(
             ntt, min_noise_steps, max_noise_steps
         )

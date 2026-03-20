@@ -374,3 +374,31 @@ def test_map_then_evaluate_matches_slot_weight():
     )
     assert torch.isclose(w_mapped, w_slot, atol=1e-6)
 
+def test_gaussian_bimodal_content_or_style_overrides_one_step_timestep_type():
+    """If UI/runtime sets timestep_type=one_step, bimodal sampling must still follow content_or_style."""
+    torch.manual_seed(0)
+    ntt = 1000
+    sched = torch.linspace(1000, 1, ntt, dtype=torch.float32)
+    noise_scheduler = _DummyNoiseScheduler(sched)
+    train_config = _DummyTrainConfig()
+    train_config.timestep_type = "one_step"
+    train_config.gaussian_mean = 300.0
+    train_config.gaussian_std = 0.2
+    train_config.gaussian_mean_2 = 800.0
+    train_config.gaussian_std_2 = 0.2
+    train_config.num_train_timesteps = ntt
+    sampler = TimestepSampler(train_config, noise_scheduler)
+    result = sampler.sample(
+        batch_size=4000,
+        latents=torch.empty((4000, 1)),
+        content_or_style="gaussian_bimodal",
+        min_noise_steps=5,
+        max_noise_steps=995,
+        num_train_timesteps=ntt,
+        device=torch.device("cpu"),
+        step_num=0,
+    )
+    # Pure one_step: every index 0 → timestep value 1000, zero variance.
+    assert result.timesteps.float().std().item() > 40.0
+    assert result.timesteps.min().item() < 450.0
+

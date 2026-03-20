@@ -62,6 +62,12 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
             tc.min_snr_gamma = None
         else:
             self.print("ZImage DiffSynth: not using DiffSynth training loop (respecting train_config: timestep_type, content_or_style, SNR).")
+            # In toolkit-loop mode, the shared BatchProcessor chooses how it prepares
+            # the training timestep tensor based on `train_config.noise_scheduler`
+            # string. Without overriding the default `None`, it would fall back to
+            # the inference-style `set_timesteps()` path and produce a different
+            # timestep grid than `TimestepSampler`/gaussian weights expect.
+            tc.noise_scheduler = "flowmatch"
 
     def hook_after_sd_init_before_load(self):
         """

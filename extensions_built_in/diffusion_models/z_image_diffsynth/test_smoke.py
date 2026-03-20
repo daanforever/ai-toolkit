@@ -579,7 +579,7 @@ def main():
             }
             trainer2 = ZImageDiffSynthTrainer(0, None, cfg_with_flag)
             tc2 = trainer2.train_config
-            assert tc2.noise_scheduler is None, "trainer must still leave noise_scheduler=None when use_diffsynth_training_loop is False"
+            assert tc2.noise_scheduler == "flowmatch", "trainer must set noise_scheduler='flowmatch' in toolkit-loop mode (use_diffsynth_training_loop=False)"
             assert tc2.num_train_timesteps == 1000, "num_train_timesteps must still default to 1000 when use_diffsynth_training_loop is False"
             # From _fake_init defaults: loss_type/timestep_type remain None, linear_timesteps* and SNR flags unchanged.
             assert tc2.loss_type is None, "loss_type must not be forced when use_diffsynth_training_loop is False"
