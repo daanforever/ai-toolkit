@@ -7,7 +7,10 @@ from typing import Any, List, Optional
 import torch
 
 from toolkit.print import print_acc
-from extensions_built_in.sd_trainer.gaussian_timestep_weights import evaluate_gaussian_timestep
+from extensions_built_in.sd_trainer.gaussian_timestep_weights import (
+    evaluate_gaussian_timestep,
+    evaluate_gaussian_timestep_bimodal,
+)
 
 
 class TimestepDistributionLogger:
@@ -93,6 +96,26 @@ class TimestepDistributionLogger:
             weights_list = weights_tensor.tolist()
             pairs_10 = list(zip(self._collected_timesteps[:10], weights_list[:10]))
             print_acc(f"\nFirst 10 (timestep, loss_weight): {pairs_10}")
+        elif self.train_config.timestep_type == "gaussian_bimodal":
+            ntt = self.train_config.num_train_timesteps
+            ts_tensor = torch.tensor(
+                self._collected_timesteps[:num_samples],
+                device=torch.device("cpu"),
+                dtype=torch.long,
+            )
+            weights_tensor = evaluate_gaussian_timestep_bimodal(
+                ts_tensor,
+                self.train_config.gaussian_mean,
+                self.train_config.gaussian_std,
+                self.train_config.gaussian_mean_2,
+                self.train_config.gaussian_std_2,
+                torch.device("cpu"),
+                torch.float32,
+                ntt,
+            )
+            weights_list = weights_tensor.tolist()
+            pairs_10 = list(zip(self._collected_timesteps[:10], weights_list[:10]))
+            print_acc(f"\nFirst 10 (timestep, loss_weight): {pairs_10}")
 
         print_acc(f"Config:")
         print_acc(f"  content_or_style: {content_or_style}")
@@ -117,7 +140,8 @@ class TimestepDistributionLogger:
         print_acc(f"  max_denoising_steps: {max_noise_steps}")
         print_acc(f"  gaussian_mean: {self.train_config.gaussian_mean}")
         print_acc(f"  gaussian_std: {self.train_config.gaussian_std}")
-        print_acc(f"  gaussian_std_target: {self.train_config.gaussian_std_target}")
+        print_acc(f"  gaussian_mean_2: {self.train_config.gaussian_mean_2}")
+        print_acc(f"  gaussian_std_2: {self.train_config.gaussian_std_2}")
 
         indices_min = min(self._collected_indices[:num_samples])
         indices_max = max(self._collected_indices[:num_samples])
@@ -139,13 +163,6 @@ class TimestepDistributionLogger:
             print_acc(
                 f"  Loss weights: max={weights_max:.3f}, mean={weights_mean:.3f}, min={weights_min:.3f}"
             )
-        if self.train_config.gaussian_std_target is not None:
-            progress = step_num / self.train_config.steps
-            current_std = self.train_config.gaussian_std + progress * (
-                self.train_config.gaussian_std_target - self.train_config.gaussian_std
-            )
-            percent = progress * 100.0
-            print_acc(f"  current_std: {current_std:.3f} (progress: {percent:.1f}%)")
         print_acc(
             f"  Step: {step_num} ({step_num * 100 / self.train_config.steps:.1f}%)"
         )

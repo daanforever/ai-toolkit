@@ -74,3 +74,55 @@ def evaluate_gaussian_timestep(
     max_idx = cached_weights.shape[0]
     idx = timesteps.long().clamp(0, max_idx - 1).to(device=device)
     return cached_weights[idx].to(dtype=dtype)
+
+
+@lru_cache(maxsize=64)
+def _compute_bimodal_weights(ntt, mu1_normalized, sigma1, mu2_normalized, sigma2, device_str):
+    """Mixture of two truncated normals on [0,1], equal weights 0.5/0.5, then scale by global max."""
+    device = torch.device(device_str)
+    t = torch.arange(ntt, dtype=torch.float32, device=device) / float(ntt - 1)
+    s1 = float(sigma1)
+    s2 = float(sigma2)
+    m1 = float(mu1_normalized)
+    m2 = float(mu2_normalized)
+
+    def raw_truncnorm(mu_norm, sigma):
+        z_lower = (0.0 - mu_norm) / sigma
+        z_upper = (1.0 - mu_norm) / sigma
+        cdf_upper = 0.5 * (1 + math.erf(z_upper / 2**0.5))
+        cdf_lower = 0.5 * (1 + math.erf(z_lower / 2**0.5))
+        normalization = cdf_upper - cdf_lower
+        z = (t - mu_norm) / sigma
+        phi = torch.exp(-0.5 * z**2) / math.sqrt(2 * math.pi)
+        return phi / (sigma * normalization + 1e-8)
+
+    raw = 0.5 * raw_truncnorm(m1, s1) + 0.5 * raw_truncnorm(m2, s2)
+    return raw / raw.max().clamp(min=1e-8)
+
+
+def evaluate_gaussian_timestep_bimodal(
+    timesteps,
+    mu1,
+    sigma1,
+    mu2,
+    sigma2,
+    device,
+    dtype,
+    num_train_timesteps,
+):
+    """
+    Bimodal truncated-normal mixture (50/50), weights in [0, 1] with global max 1.
+    Same timestep / mu / sigma conventions as evaluate_gaussian_timestep.
+    """
+    ntt = int(num_train_timesteps)
+    mu1n = float(mu1) / float(ntt - 1)
+    mu2n = float(mu2) / float(ntt - 1)
+    device = torch.device(device)
+    device_str = str(device)
+
+    cached_weights = _compute_bimodal_weights(
+        ntt, mu1n, float(sigma1), mu2n, float(sigma2), device_str
+    )
+    max_idx = cached_weights.shape[0]
+    idx = timesteps.long().clamp(0, max_idx - 1).to(device=device)
+    return cached_weights[idx].to(dtype=dtype)

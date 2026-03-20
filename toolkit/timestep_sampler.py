@@ -9,7 +9,10 @@ from typing import List, Optional, Any
 import torch
 
 from toolkit.basic import value_map
-from extensions_built_in.sd_trainer.gaussian_timestep_weights import evaluate_gaussian_timestep
+from extensions_built_in.sd_trainer.gaussian_timestep_weights import (
+    evaluate_gaussian_timestep,
+    evaluate_gaussian_timestep_bimodal,
+)
 
 
 @dataclass
@@ -67,7 +70,14 @@ class TimestepSampler:
         elif content_or_style == 'gaussian':
             timestep_indices = self._sample_gaussian(
                 batch_size, latents, min_noise_steps, max_noise_steps,
-                num_train_timesteps, step_num
+                num_train_timesteps
+            )
+            timesteps = self.noise_scheduler.timesteps[timestep_indices.long()]
+            return TimestepSamplerResult(timesteps=timesteps, timestep_indices=timestep_indices)
+        elif content_or_style == 'gaussian_bimodal':
+            timestep_indices = self._sample_gaussian_bimodal(
+                batch_size, latents, min_noise_steps, max_noise_steps,
+                num_train_timesteps
             )
             timesteps = self.noise_scheduler.timesteps[timestep_indices.long()]
             return TimestepSamplerResult(timesteps=timesteps, timestep_indices=timestep_indices)
@@ -146,18 +156,8 @@ class TimestepSampler:
         min_noise_steps: int,
         max_noise_steps: int,
         num_train_timesteps: int,
-        step_num: int,
     ) -> torch.Tensor:
         ntt = self.train_config.num_train_timesteps
-        if self.train_config.gaussian_std_target is not None:
-            progress = step_num / self.train_config.steps
-            current_std = (
-                self.train_config.gaussian_std
-                + progress * (self.train_config.gaussian_std_target - self.train_config.gaussian_std)
-            )
-        else:
-            current_std = self.train_config.gaussian_std
-
         allowed_start = ntt - max_noise_steps
         allowed_end = ntt - min_noise_steps
         all_indices = torch.arange(
@@ -167,7 +167,38 @@ class TimestepSampler:
         weights = evaluate_gaussian_timestep(
             all_timestep_values,
             self.train_config.gaussian_mean,
-            current_std,
+            self.train_config.gaussian_std,
+            latents.device,
+            torch.float32,
+            ntt,
+        )
+        probs = weights / weights.sum().clamp(min=1e-8)
+        sampled_idx = torch.multinomial(probs, batch_size, replacement=True)
+        timestep_indices = all_indices[sampled_idx]
+        timestep_indices.sort()
+        return timestep_indices
+
+    def _sample_gaussian_bimodal(
+        self,
+        batch_size: int,
+        latents: torch.Tensor,
+        min_noise_steps: int,
+        max_noise_steps: int,
+        num_train_timesteps: int,
+    ) -> torch.Tensor:
+        ntt = self.train_config.num_train_timesteps
+        allowed_start = ntt - max_noise_steps
+        allowed_end = ntt - min_noise_steps
+        all_indices = torch.arange(
+            allowed_start, allowed_end + 1, device=latents.device, dtype=torch.long
+        )
+        all_timestep_values = self.noise_scheduler.timesteps[all_indices]
+        weights = evaluate_gaussian_timestep_bimodal(
+            all_timestep_values,
+            self.train_config.gaussian_mean,
+            self.train_config.gaussian_std,
+            self.train_config.gaussian_mean_2,
+            self.train_config.gaussian_std_2,
             latents.device,
             torch.float32,
             ntt,

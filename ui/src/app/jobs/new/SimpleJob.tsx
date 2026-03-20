@@ -530,6 +530,7 @@ export default function SimpleJob({
                       { value: 'shift', label: 'Shift' },
                       { value: 'weighted', label: 'Weighted' },
                       { value: 'gaussian', label: 'Gaussian' },
+                      { value: 'gaussian_bimodal', label: 'Bimodal Gaussian' },
                     ]}
                   />
                 )}
@@ -543,7 +544,8 @@ export default function SimpleJob({
                     { value: 'balanced', label: 'Balanced' },
                     { value: 'content', label: 'High Noise' },
                     { value: 'style', label: 'Low Noise' },
-                    { value: 'gaussian', label: 'Gaussian (Normal)' },
+                    { value: 'gaussian', label: 'Gaussian' },
+                    { value: 'gaussian_bimodal', label: 'Bimodal Gaussian' },
                     { value: 'fixed_cycle', label: 'Fixed Cycle' },
                   ]}
                 />

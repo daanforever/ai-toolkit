@@ -43,6 +43,8 @@ class DiffusionTrainer(SDTrainer):
             self._last_applied_runtime_min_lr = None
             self._last_applied_runtime_gaussian_mean = None
             self._last_applied_runtime_gaussian_std = None
+            self._last_applied_runtime_gaussian_mean_2 = None
+            self._last_applied_runtime_gaussian_std_2 = None
             self._last_applied_runtime_weight_decay = None
             self._last_applied_runtime_beta1 = None
             self._last_applied_runtime_beta2 = None
@@ -293,6 +295,54 @@ class DiffusionTrainer(SDTrainer):
         if is_debug_enabled():
             print_acc(
                 f"\nruntime gaussian_mean/std from UI/DB: {self.train_config.gaussian_mean}, {self.train_config.gaussian_std}"
+            )
+
+    def get_runtime_gaussian_peak2_params(self):
+        """Read runtime_gaussian_mean_2, runtime_gaussian_std_2 from DB. Returns (mean2, std2) or (None, None)."""
+        if not self.is_ui_trainer:
+            return (None, None)
+
+        def _read():
+            try:
+                with self._db_connect() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "SELECT runtime_gaussian_mean_2, runtime_gaussian_std_2 FROM RuntimeParams WHERE jobId = ?",
+                        (self.job_id,),
+                    )
+                    row = cursor.fetchone()
+                    if row is None:
+                        return (None, None)
+                    mean2 = float(row[0]) if row[0] is not None else None
+                    std2 = float(row[1]) if row[1] is not None else None
+                    return (mean2, std2)
+            except sqlite3.OperationalError:
+                # DB not migrated yet (columns missing)
+                return (None, None)
+
+        return _read()
+
+    def apply_runtime_gaussian_peak2_params(self):
+        """If runtime_gaussian_mean_2/std_2 are set in DB, apply to train_config (partial updates supported)."""
+        if not self.is_ui_trainer:
+            return
+        mean2, std2 = self.get_runtime_gaussian_peak2_params()
+        if mean2 is None and std2 is None:
+            return
+        if (
+            mean2 == self._last_applied_runtime_gaussian_mean_2
+            and std2 == self._last_applied_runtime_gaussian_std_2
+        ):
+            return
+        if mean2 is not None:
+            self.train_config.gaussian_mean_2 = mean2
+        if std2 is not None:
+            self.train_config.gaussian_std_2 = std2
+        self._last_applied_runtime_gaussian_mean_2 = mean2
+        self._last_applied_runtime_gaussian_std_2 = std2
+        if is_debug_enabled():
+            print_acc(
+                f"\nruntime gaussian_mean_2/std_2 from UI/DB: {self.train_config.gaussian_mean_2}, {self.train_config.gaussian_std_2}"
             )
 
     def get_runtime_batch_size(self):
@@ -791,6 +841,8 @@ class DiffusionTrainer(SDTrainer):
         self._last_applied_runtime_min_lr = None
         self._last_applied_runtime_gaussian_mean = None
         self._last_applied_runtime_gaussian_std = None
+        self._last_applied_runtime_gaussian_mean_2 = None
+        self._last_applied_runtime_gaussian_std_2 = None
         self._last_applied_runtime_weight_decay = None
         self._last_applied_runtime_beta1 = None
         self._last_applied_runtime_beta2 = None
@@ -918,6 +970,7 @@ class DiffusionTrainer(SDTrainer):
             self.apply_runtime_lr()
             self.apply_runtime_min_lr()
             self.apply_runtime_gaussian_params()
+            self.apply_runtime_gaussian_peak2_params()
             self.apply_runtime_weight_decay()
             self.apply_runtime_beta1()
             self.apply_runtime_beta2()

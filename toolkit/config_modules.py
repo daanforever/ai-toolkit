@@ -350,7 +350,7 @@ class DecoratorConfig:
         self.num_tokens: str = kwargs.get('num_tokens', 4)
 
 
-ContentOrStyleType = Literal['balanced', 'style', 'content', 'gaussian', 'fixed_cycle']
+ContentOrStyleType = Literal['balanced', 'style', 'content', 'gaussian', 'gaussian_bimodal', 'fixed_cycle']
 LossTarget = Literal['noise', 'source', 'unaugmented', 'differential_noise']
 
 
@@ -361,7 +361,8 @@ class TrainConfig:
         self.content_or_style_reg: ContentOrStyleType = kwargs.get('content_or_style', 'balanced')
         self.gaussian_mean: float = kwargs.get('gaussian_mean', 500)
         self.gaussian_std: float = kwargs.get('gaussian_std', 0.2)
-        self.gaussian_std_target: float = kwargs.get('gaussian_std_target', None)
+        self.gaussian_mean_2: float = kwargs.get('gaussian_mean_2', 750)
+        self.gaussian_std_2: float = kwargs.get('gaussian_std_2', 0.2)
         self.timestep_bias_exponent: float = kwargs.get('timestep_bias_exponent', 3.0)
         # fixed_cycle: deterministic cycle over fixed timestep values (for Turbo LoRA reproducibility)
         _default_fixed_cycle = [999, 875, 750, 625, 500, 375, 250, 125]
@@ -532,7 +533,7 @@ class TrainConfig:
         # adds an additional loss to the network to encourage it output a normalized standard deviation
         self.target_norm_std = kwargs.get('target_norm_std', None)
         self.target_norm_std_value = kwargs.get('target_norm_std_value', 1.0)
-        self.timestep_type = kwargs.get('timestep_type', 'sigmoid')  # sigmoid, linear, lognorm_blend, next_sample, weighted, gaussian, one_step
+        self.timestep_type = kwargs.get('timestep_type', 'sigmoid')  # sigmoid, linear, lognorm_blend, next_sample, weighted, gaussian, gaussian_bimodal, one_step
         self.next_sample_timesteps = kwargs.get('next_sample_timesteps', 8)
         self.linear_timesteps = kwargs.get('linear_timesteps', False)
         self.linear_timesteps2 = kwargs.get('linear_timesteps2', False)

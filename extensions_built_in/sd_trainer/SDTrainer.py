@@ -38,7 +38,10 @@ from toolkit.models.diffusion_feature_extraction import DiffusionFeatureExtracto
 from toolkit.util.debug import memory_debug, is_debug_enabled
 from toolkit.util.losses import wavelet_loss, stepped_loss
 from toolkit.util.tensorboard_timestep_weights import log_timestep_weights
-from extensions_built_in.sd_trainer.gaussian_timestep_weights import evaluate_gaussian_timestep
+from extensions_built_in.sd_trainer.gaussian_timestep_weights import (
+    evaluate_gaussian_timestep,
+    evaluate_gaussian_timestep_bimodal,
+)
 import torch.nn.functional as F
 from toolkit.unloader import unload_text_encoder
 from PIL import Image
@@ -867,6 +870,24 @@ class SDTrainer(BaseSDTrainProcess):
                     timesteps,
                     self.train_config.gaussian_mean,
                     self.train_config.gaussian_std,
+                    loss.device,
+                    loss.dtype,
+                    ntt,
+                )
+                if len(loss.shape) == 4:
+                    timestep_weight = timestep_weight.view(-1, 1, 1, 1).detach()
+                elif len(loss.shape) == 5:
+                    timestep_weight = timestep_weight.view(-1, 1, 1, 1, 1).detach()
+                loss = loss * timestep_weight
+                timestep_weight_for_logging = timestep_weight
+            elif self.train_config.timestep_type == "gaussian_bimodal":
+                ntt = self.sd.noise_scheduler.config.num_train_timesteps
+                timestep_weight = evaluate_gaussian_timestep_bimodal(
+                    timesteps,
+                    self.train_config.gaussian_mean,
+                    self.train_config.gaussian_std,
+                    self.train_config.gaussian_mean_2,
+                    self.train_config.gaussian_std_2,
                     loss.device,
                     loss.dtype,
                     ntt,

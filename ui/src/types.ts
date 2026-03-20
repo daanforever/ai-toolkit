@@ -125,6 +125,10 @@ export interface TrainConfig {
   noise_scheduler: string;
   timestep_type: string;
   content_or_style: string;
+  gaussian_mean?: number;
+  gaussian_std?: number;
+  gaussian_mean_2?: number;
+  gaussian_std_2?: number;
   optimizer: string;
   lr: number;
   ema_config?: EMAConfig;

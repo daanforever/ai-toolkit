@@ -11,7 +11,8 @@ const CONTENT_OR_STYLE_OPTIONS = [
   { value: 'balanced', label: 'Balanced' },
   { value: 'content', label: 'High Noise' },
   { value: 'style', label: 'Low Noise' },
-  { value: 'gaussian', label: 'Gaussian (Normal)' },
+  { value: 'gaussian', label: 'Gaussian' },
+  { value: 'gaussian_bimodal', label: 'Bimodal Gaussian' },
   { value: 'fixed_cycle', label: 'Fixed Cycle' },
 ];
 
@@ -21,6 +22,7 @@ const TIMESTEP_TYPE_OPTIONS = [
   { value: 'shift', label: 'Shift' },
   { value: 'weighted', label: 'Weighted' },
   { value: 'gaussian', label: 'Gaussian' },
+  { value: 'gaussian_bimodal', label: 'Bimodal Gaussian' },
 ];
 
 const TRAIN_PATH = 'config.process[0].train';
@@ -88,6 +90,14 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
   const gaussianStd = trainAny?.gaussian_std != null
     ? Number(trainAny.gaussian_std)
     : 0.2;
+  const gaussianMean2 = trainAny?.gaussian_mean_2 != null
+    ? Number(trainAny.gaussian_mean_2)
+    : 750;
+  const gaussianStd2 = trainAny?.gaussian_std_2 != null
+    ? Number(trainAny.gaussian_std_2)
+    : 0.2;
+  const showGaussianPeak2 =
+    contentOrStyle === 'gaussian_bimodal' || timestepType === 'gaussian_bimodal';
   const batchSize = trainAny?.batch_size != null
     ? Number(trainAny.batch_size)
     : 1;
@@ -139,6 +149,8 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     }
     (process.train as Record<string, number>).gaussian_mean = gaussianMean;
     (process.train as Record<string, number>).gaussian_std = gaussianStd;
+    (process.train as Record<string, number>).gaussian_mean_2 = gaussianMean2;
+    (process.train as Record<string, number>).gaussian_std_2 = gaussianStd2;
     (process.train as Record<string, number>).batch_size = batchSize;
     (process.train as Record<string, number>).gradient_accumulation = gradientAccumulation;
     (process.train as Record<string, number>).min_snr_gamma = minSnrGamma;
@@ -192,6 +204,8 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         timestep_type?: string;
         gaussian_mean?: number;
         gaussian_std?: number;
+        gaussian_mean_2?: number;
+        gaussian_std_2?: number;
         network_weights?: number[];
         batch_size?: number;
         gradient_accumulation?: number;
@@ -207,6 +221,8 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         timestep_type: timestepType,
         gaussian_mean: gaussianMean,
         gaussian_std: gaussianStd,
+        gaussian_mean_2: gaussianMean2,
+        gaussian_std_2: gaussianStd2,
         batch_size: batchSize,
         gradient_accumulation: gradientAccumulation,
         save_every: saveEvery,
@@ -252,6 +268,8 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     hasMinLr,
     gaussianMean,
     gaussianStd,
+    gaussianMean2,
+    gaussianStd2,
     batchSize,
     gradientAccumulation,
     saveEvery,
@@ -496,6 +514,44 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
             />
           </div>
         </div>
+
+        {showGaussianPeak2 ? (
+          <div className="flex items-end gap-4 flex-wrap">
+            <div className="space-y-2 flex-1 min-w-[140px]">
+              <p className="text-xs text-gray-400">Gaussian mean 2</p>
+              <input
+                type="number"
+                min={0}
+                max={999}
+                step="any"
+                placeholder="e.g. 750"
+                value={gaussianMean2}
+                onChange={(e) => {
+                  const v = parseFloat(e.target.value);
+                  if (Number.isFinite(v)) setValue(v, `${TRAIN_PATH}.gaussian_mean_2`);
+                  setApplyStatus('idle');
+                }}
+                className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+              />
+            </div>
+            <div className="space-y-2 flex-1 min-w-[140px]">
+              <p className="text-xs text-gray-400">Gaussian std 2</p>
+              <input
+                type="number"
+                min={1e-6}
+                step="any"
+                placeholder="e.g. 0.2"
+                value={gaussianStd2}
+                onChange={(e) => {
+                  const v = parseFloat(e.target.value);
+                  if (Number.isFinite(v)) setValue(v, `${TRAIN_PATH}.gaussian_std_2`);
+                  setApplyStatus('idle');
+                }}
+                className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+              />
+            </div>
+          </div>
+        ) : null}
 
         <div className="flex items-end gap-4 flex-wrap">
           <div className="space-y-2 flex-1 min-w-[140px]">
