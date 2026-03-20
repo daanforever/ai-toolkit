@@ -12,6 +12,8 @@ from toolkit.timestep_sampler import TimestepSampler
 from extensions_built_in.sd_trainer.gaussian_timestep_weights import (
     evaluate_gaussian_timestep,
     evaluate_gaussian_timestep_bimodal,
+    scheduler_timesteps_align_with_index_grid,
+    timestep_values_to_slot_indices,
 )
 
 
@@ -243,4 +245,100 @@ def test_timestep_sampler_gaussian_bimodal_narrow_window_stays_in_bounds():
     lo, hi = ntt - 600, ntt - 400
     assert result.timesteps.min() >= noise_scheduler.timesteps[lo]
     assert result.timesteps.max() <= noise_scheduler.timesteps[hi]
+
+
+def test_gaussian_bimodal_flowmatch_sigma_must_not_be_used_as_grid_index():
+    """
+    CustomFlowMatchEulerDiscreteScheduler uses timestep *values* ~1000→1. Gaussian weights are
+    defined on discrete training slots 0..ntt-1 (same axis as gaussian_mean / gaussian_mean_2).
+
+    Passing the float sigma (e.g. ~43.6) into evaluate_gaussian_timestep_bimodal() uses int(43)
+    as a grid row — far from both peaks (300, 800) — and yields an inappropriately low weight.
+
+    For the same batch row, timestep_index 987 should be looked up as slot 987 on that grid,
+    not as value 43.6. Regression: observed (43.60465 → ~0.377) vs slot 987 → higher weight.
+    """
+    ntt = 1000
+    mu1, s1, mu2, s2 = 300.0, 0.2, 800.0, 0.2
+    device = torch.device("cpu")
+    dtype = torch.float32
+
+    # From user log: actual timestep tensor value after indexing noise_scheduler.timesteps.
+    flow_sigma = torch.tensor([43.604652404785156], dtype=dtype)
+    w_if_treat_sigma_as_index = evaluate_gaussian_timestep_bimodal(
+        flow_sigma, mu1, s1, mu2, s2, device, dtype, ntt
+    )
+    # Same row: discrete scheduler index from the user's log.
+    w_for_step_slot_987 = evaluate_gaussian_timestep_bimodal(
+        torch.tensor([987.0], dtype=dtype), mu1, s1, mu2, s2, device, dtype, ntt
+    )
+
+    assert abs(w_if_treat_sigma_as_index.item() - 0.37732598185539246) < 1e-5
+    assert w_for_step_slot_987.item() > w_if_treat_sigma_as_index.item() + 0.2
+    assert w_for_step_slot_987.item() > 0.55
+
+    # Flow-style schedule: value at index 987 is ~13, not 43.6 — still must not use value as slot.
+    sched = torch.linspace(1000, 1, ntt, dtype=dtype)
+    w_at_linspace_987 = evaluate_gaussian_timestep_bimodal(
+        sched[987].unsqueeze(0), mu1, s1, mu2, s2, device, dtype, ntt
+    )
+    w_slot_987_again = evaluate_gaussian_timestep_bimodal(
+        torch.tensor([987.0], dtype=dtype), mu1, s1, mu2, s2, device, dtype, ntt
+    )
+    assert w_at_linspace_987.item() < w_slot_987_again.item() - 0.1
+
+    # Correct usage: map timestep values back to their slot indices using the actual scheduler `timesteps`.
+    # We can't reconstruct the full user's scheduler here, but if `schedule[987] == flow_sigma`,
+    # then mapping must return 987 and the resulting weight must match `w_for_step_slot_987`.
+    custom_schedule = torch.linspace(1000, 1, ntt, dtype=dtype)
+    custom_schedule[987] = flow_sigma.item()
+    mapped_slot = timestep_values_to_slot_indices(
+        flow_sigma, custom_schedule, ntt=ntt
+    )
+    assert int(mapped_slot.item()) == 987
+    w_mapped = evaluate_gaussian_timestep_bimodal(
+        mapped_slot, mu1, s1, mu2, s2, device, dtype, ntt
+    )
+    assert torch.isclose(w_mapped, w_for_step_slot_987, atol=1e-6)
+
+
+def test_scheduler_timesteps_align_with_index_grid_true_for_arange():
+    ntt = 1000
+    schedule = torch.arange(ntt, dtype=torch.float32)
+    assert scheduler_timesteps_align_with_index_grid(schedule, ntt) is True
+
+
+def test_scheduler_timesteps_align_with_index_grid_false_for_linspace():
+    ntt = 1000
+    schedule = torch.linspace(1000, 1, ntt, dtype=torch.float32)
+    assert scheduler_timesteps_align_with_index_grid(schedule, ntt) is False
+
+
+def test_timestep_values_to_slot_indices_maps_back_schedule_values():
+    ntt = 1000
+    schedule = torch.linspace(1000, 1, ntt, dtype=torch.float32)
+    slot = 987
+    value = schedule[slot].unsqueeze(0)
+    mapped = timestep_values_to_slot_indices(value, schedule, ntt=ntt)
+    assert int(mapped.item()) == slot
+
+
+def test_map_then_evaluate_matches_slot_weight():
+    ntt = 1000
+    mu1, s1, mu2, s2 = 300.0, 0.2, 800.0, 0.2
+    device = torch.device("cpu")
+    dtype = torch.float32
+
+    schedule = torch.linspace(1000, 1, ntt, dtype=dtype)
+    slot = 987
+    value = schedule[slot].unsqueeze(0)
+    mapped = timestep_values_to_slot_indices(value, schedule, ntt=ntt)
+
+    w_slot = evaluate_gaussian_timestep_bimodal(
+        torch.tensor([float(slot)]), mu1, s1, mu2, s2, device, dtype, ntt
+    )
+    w_mapped = evaluate_gaussian_timestep_bimodal(
+        mapped, mu1, s1, mu2, s2, device, dtype, ntt
+    )
+    assert torch.isclose(w_mapped, w_slot, atol=1e-6)
 

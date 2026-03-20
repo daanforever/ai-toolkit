@@ -8,6 +8,7 @@ from tqdm import tqdm
 import torch
 from torchvision.io import write_video
 import subprocess
+import pytest
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -22,6 +23,11 @@ parser.add_argument('--epochs', type=int, default=1)
 parser.add_argument('--num_frames', type=int, default=121)
 parser.add_argument('--output_path', type=str, default='output/dataset_test')
 
+
+# This file is a CLI script. Under pytest, its `argparse.parse_args()` can
+# crash collection because pytest passes flags like `-v`.
+if "pytest" in sys.modules:
+    pytest.skip("Skipping CLI-only ltx dataloader script under pytest.", allow_module_level=True)
 
 args = parser.parse_args()
 

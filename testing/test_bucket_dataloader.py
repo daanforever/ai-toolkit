@@ -7,6 +7,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT))
@@ -36,6 +37,11 @@ parser.add_argument(
     help='Open CV windows via show_tensors (needs display); default is print stats only',
 )
 
+
+# This file is primarily a CLI script. When imported by pytest, pytest's own
+# CLI flags (e.g. `-v`) can be routed into argparse and crash collection.
+if "pytest" in sys.modules:
+    pytest.skip("Skipping CLI-only bucket dataloader script under pytest.", allow_module_level=True)
 
 args = parser.parse_args()
 

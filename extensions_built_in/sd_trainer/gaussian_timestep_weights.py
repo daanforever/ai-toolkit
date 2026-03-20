@@ -1,14 +1,85 @@
 """
 Truncated Gaussian timestep weights for loss scaling and timestep sampling.
-Weights use a truncated normal distribution on [0, 1], normalized by maximum (peak at t = mu).
-Caches precomputed weights per (num_train_timesteps, mu, sigma).
-Works with timestep values directly (0-999), not indices.
+Weights use a truncated normal on [0, 1] (normalized by max); `mu` / `sigma` YAML fields
+refer to the discrete training **slot axis** 0 .. num_train_timesteps-1.
+
+`evaluate_gaussian_timestep*` index a precomputed table by slot (via `.long()` on the
+`timesteps` argument). When `noise_scheduler.timesteps[i]` is not ~`i` (e.g. flow match),
+map batch values with `timestep_values_to_slot_indices` first; use
+`scheduler_timesteps_align_with_index_grid` to decide. Cached per (ntt, mu, sigma, ...).
 """
 import math
 from functools import lru_cache
 
 import torch
 
+
+def scheduler_timesteps_align_with_index_grid(
+    schedule: torch.Tensor,
+    ntt: int,
+    *,
+    rtol: float = 1e-4,
+    atol: float = 1e-3,
+) -> bool:
+    """
+    Check whether a scheduler's `timesteps` tensor matches an index grid.
+
+    `evaluate_gaussian_timestep*` build a lookup table along a slot axis 0..ntt-1
+    and then do `timesteps.long()` to index that table. This helper verifies
+    whether the given scheduler values are numerically equal to their slots:
+      schedule[i] ~= i  for all i in [0, ntt-1].
+
+    If this is true, then passing `timesteps` values directly into `evaluate_*`
+    is consistent. If it's false (e.g. FlowMatch schedules use values 1000->1),
+    callers must map timestep values back to their slot indices.
+    """
+    schedule = schedule.detach()
+    if schedule.numel() != int(ntt):
+        return False
+    if schedule.numel() == 0:
+        return False
+
+    # Compare on CPU to avoid device-specific float quirks.
+    schedule_f = schedule.to(device="cpu", dtype=torch.float32)
+    expected = torch.arange(int(ntt), device="cpu", dtype=torch.float32)
+    return torch.allclose(schedule_f, expected, rtol=rtol, atol=atol)
+
+
+def timestep_values_to_slot_indices(
+    timestep_values: torch.Tensor,
+    schedule: torch.Tensor,
+    *,
+    ntt: int | None = None,
+) -> torch.Tensor:
+    """
+    Map scheduler timestep *values* to slot indices for gaussian lookup.
+
+    For each value `t` in `timestep_values`, returns:
+      argmin_j |schedule[j] - t|
+
+    Returned tensor is float (same shape as input) so it can be passed into
+    `evaluate_gaussian_timestep*`, which internally does `.long()` indexing.
+    """
+    if ntt is None:
+        ntt = int(schedule.numel())
+    else:
+        ntt = int(ntt)
+
+    if schedule.numel() != ntt:
+        # Still attempt mapping; the argmin will implicitly select among the
+        # provided schedule elements. This keeps the function usable even if
+        # the caller passes inconsistent `ntt`.
+        ntt = int(schedule.numel())
+
+    # Ensure numeric stability and device alignment for the argmin.
+    values = timestep_values.to(dtype=torch.float32, device=schedule.device)
+    schedule_f = schedule.to(dtype=torch.float32, device=schedule.device)
+
+    # values: [B] or [...], schedule_f: [ntt]
+    # diffs: [..., ntt]
+    diffs = (values.unsqueeze(-1) - schedule_f.view((1,) * values.dim() + (ntt,))).abs()
+    indices = diffs.argmin(dim=-1)
+    return indices.to(dtype=torch.float32)
 
 @lru_cache(maxsize=64)
 def _compute_weights(ntt, mu_normalized, sigma, device_str):
@@ -48,14 +119,16 @@ def evaluate_gaussian_timestep(
     num_train_timesteps,
 ):
     """
-    Return truncated normal weights in [0, 1] for the given timestep values.
+    Return truncated normal weights in [0, 1] per batch element.
 
     Weights are the truncated normal PDF on [0, 1] (CDF-normalized), then scaled by the maximum.
-    Works with actual timestep values (0-999), not scheduler indices.
+    The `timesteps` tensor selects **rows** of the precomputed length-`ntt` table (slot indices
+    0 .. ntt-1 after `.long().clamp`). When scheduler timestep *values* differ from slot indices,
+    pass mapped indices (see module docstring).
 
     Args:
-        timesteps: 1D tensor of timestep values in [0, num_train_timesteps].
-        mu: Gaussian mean in [0, 999] timestep space (e.g. 700 for high noise focus).
+        timesteps: 1D tensor of slot indices (float ok; cast to long inside), shape matches output.
+        mu: Gaussian mean on the same discrete slot scale as the table (e.g. 700).
         sigma: Gaussian std in [0, 1] (e.g. 0.2).
         device: Target device for the returned tensor.
         dtype: Target dtype for the returned tensor.
@@ -112,7 +185,8 @@ def evaluate_gaussian_timestep_bimodal(
 ):
     """
     Bimodal truncated-normal mixture (50/50), weights in [0, 1] with global max 1.
-    Same timestep / mu / sigma conventions as evaluate_gaussian_timestep.
+    Same slot-indexing contract for `timesteps` and same `mu` / `sigma` scale as
+    `evaluate_gaussian_timestep`.
     """
     ntt = int(num_train_timesteps)
     mu1n = float(mu1) / float(ntt - 1)

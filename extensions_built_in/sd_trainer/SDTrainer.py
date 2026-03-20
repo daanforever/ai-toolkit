@@ -41,6 +41,8 @@ from toolkit.util.tensorboard_timestep_weights import log_timestep_weights
 from extensions_built_in.sd_trainer.gaussian_timestep_weights import (
     evaluate_gaussian_timestep,
     evaluate_gaussian_timestep_bimodal,
+    scheduler_timesteps_align_with_index_grid,
+    timestep_values_to_slot_indices,
 )
 import torch.nn.functional as F
 from toolkit.unloader import unload_text_encoder
@@ -866,8 +868,27 @@ class SDTrainer(BaseSDTrainProcess):
                 timestep_weight_for_logging = timestep_weight
             elif self.train_config.timestep_type == "gaussian":
                 ntt = self.sd.noise_scheduler.config.num_train_timesteps
+                schedule = self.sd.noise_scheduler.timesteps
+                # Gaussian weights are indexed by slot id (0..ntt-1), not by raw
+                # scheduler timestep values. When the schedule values differ from
+                # their slot indices (e.g. FlowMatch), we must map values back
+                # to slot ids before doing table lookup in evaluate_gaussian_timestep.
+                cache_id = getattr(self, "_gaussian_schedule_cache_id", None)
+                if cache_id != id(schedule):
+                    setattr(self, "_gaussian_schedule_cache_id", id(schedule))
+                    setattr(
+                        self,
+                        "_gaussian_schedule_aligned",
+                        scheduler_timesteps_align_with_index_grid(schedule, ntt),
+                    )
+                schedule_aligned = getattr(self, "_gaussian_schedule_aligned", True)
+                timesteps_for_lookup = (
+                    timestep_values_to_slot_indices(timesteps, schedule, ntt=ntt)
+                    if not schedule_aligned
+                    else timesteps
+                )
                 timestep_weight = evaluate_gaussian_timestep(
-                    timesteps,
+                    timesteps_for_lookup,
                     self.train_config.gaussian_mean,
                     self.train_config.gaussian_std,
                     loss.device,
@@ -882,8 +903,23 @@ class SDTrainer(BaseSDTrainProcess):
                 timestep_weight_for_logging = timestep_weight
             elif self.train_config.timestep_type == "gaussian_bimodal":
                 ntt = self.sd.noise_scheduler.config.num_train_timesteps
+                schedule = self.sd.noise_scheduler.timesteps
+                cache_id = getattr(self, "_gaussian_schedule_cache_id", None)
+                if cache_id != id(schedule):
+                    setattr(self, "_gaussian_schedule_cache_id", id(schedule))
+                    setattr(
+                        self,
+                        "_gaussian_schedule_aligned",
+                        scheduler_timesteps_align_with_index_grid(schedule, ntt),
+                    )
+                schedule_aligned = getattr(self, "_gaussian_schedule_aligned", True)
+                timesteps_for_lookup = (
+                    timestep_values_to_slot_indices(timesteps, schedule, ntt=ntt)
+                    if not schedule_aligned
+                    else timesteps
+                )
                 timestep_weight = evaluate_gaussian_timestep_bimodal(
-                    timesteps,
+                    timesteps_for_lookup,
                     self.train_config.gaussian_mean,
                     self.train_config.gaussian_std,
                     self.train_config.gaussian_mean_2,

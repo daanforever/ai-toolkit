@@ -10,6 +10,7 @@ from toolkit.print import print_acc
 from extensions_built_in.sd_trainer.gaussian_timestep_weights import (
     evaluate_gaussian_timestep,
     evaluate_gaussian_timestep_bimodal,
+    scheduler_timesteps_align_with_index_grid,
 )
 
 
@@ -80,8 +81,15 @@ class TimestepDistributionLogger:
         weights_list: Optional[List[float]] = None
         if self.train_config.timestep_type == "gaussian":
             ntt = self.train_config.num_train_timesteps
+            schedule_aligned = scheduler_timesteps_align_with_index_grid(
+                scheduler_timesteps, ntt
+            )
             ts_tensor = torch.tensor(
-                self._collected_timesteps[:num_samples],
+                (
+                    self._collected_timesteps[:num_samples]
+                    if schedule_aligned
+                    else self._collected_indices[:num_samples]
+                ),
                 device=torch.device("cpu"),
                 dtype=torch.long,
             )
@@ -98,8 +106,15 @@ class TimestepDistributionLogger:
             print_acc(f"\nFirst 10 (timestep, loss_weight): {pairs_10}")
         elif self.train_config.timestep_type == "gaussian_bimodal":
             ntt = self.train_config.num_train_timesteps
+            schedule_aligned = scheduler_timesteps_align_with_index_grid(
+                scheduler_timesteps, ntt
+            )
             ts_tensor = torch.tensor(
-                self._collected_timesteps[:num_samples],
+                (
+                    self._collected_timesteps[:num_samples]
+                    if schedule_aligned
+                    else self._collected_indices[:num_samples]
+                ),
                 device=torch.device("cpu"),
                 dtype=torch.long,
             )

@@ -163,9 +163,8 @@ class TimestepSampler:
         all_indices = torch.arange(
             allowed_start, allowed_end + 1, device=latents.device, dtype=torch.long
         )
-        all_timestep_values = self.noise_scheduler.timesteps[all_indices]
         weights = evaluate_gaussian_timestep(
-            all_timestep_values,
+            all_indices.to(dtype=torch.float32),
             self.train_config.gaussian_mean,
             self.train_config.gaussian_std,
             latents.device,
@@ -192,9 +191,8 @@ class TimestepSampler:
         all_indices = torch.arange(
             allowed_start, allowed_end + 1, device=latents.device, dtype=torch.long
         )
-        all_timestep_values = self.noise_scheduler.timesteps[all_indices]
         weights = evaluate_gaussian_timestep_bimodal(
-            all_timestep_values,
+            all_indices.to(dtype=torch.float32),
             self.train_config.gaussian_mean,
             self.train_config.gaussian_std,
             self.train_config.gaussian_mean_2,
