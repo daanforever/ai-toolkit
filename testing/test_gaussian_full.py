@@ -114,6 +114,7 @@ def _loss_weights_bimodal_like_sdtrainer(
         timesteps.device,
         torch.float32,
         ntt,
+        noise_scheduler_timesteps=schedule,
     )
 
 
@@ -337,6 +338,7 @@ def _expected_index_moments_and_bin_probs(
     gaussian_std: float,
     gaussian_mean_2: float,
     gaussian_std_2: float,
+    noise_scheduler_timesteps: torch.Tensor | None = None,
 ) -> tuple[float, float, torch.Tensor]:
     lo, hi = allowed_slot_index_range(ntt, min_noise_steps, max_noise_steps)
     all_indices = torch.arange(lo, hi + 1, dtype=torch.float32)
@@ -349,6 +351,7 @@ def _expected_index_moments_and_bin_probs(
         torch.device("cpu"),
         torch.float32,
         ntt,
+        noise_scheduler_timesteps=noise_scheduler_timesteps,
     )
     probs = weights / weights.sum().clamp(min=1e-8)
     idx_long = all_indices.long()
@@ -405,6 +408,10 @@ def test_gaussian_bimodal_timesteps_match_index_distribution(tmp_path, monkeypat
     mu2 = float(train_cfg["gaussian_mean_2"])
     s2 = float(train_cfg["gaussian_std_2"])
 
+    flow_sched = None
+    if str(train_cfg.get("noise_scheduler", "")).lower() == "flowmatch":
+        flow_sched = torch.linspace(1000, 1, ntt, dtype=torch.float32)
+
     mean_exp, std_exp, bin_probs = _expected_index_moments_and_bin_probs(
         ntt=ntt,
         min_noise_steps=min_ns,
@@ -413,6 +420,7 @@ def test_gaussian_bimodal_timesteps_match_index_distribution(tmp_path, monkeypat
         gaussian_std=s1,
         gaussian_mean_2=mu2,
         gaussian_std_2=s2,
+        noise_scheduler_timesteps=flow_sched,
     )
     lo, hi = allowed_slot_index_range(ntt, min_ns, max_ns)
 

@@ -2,13 +2,14 @@
 Compare TensorBoard-exported timestep scalars to expected FlowMatch + gaussian_bimodal behavior.
 
 Training pipeline (same as SDTrainer + TimestepSampler + log_timestep_weights):
-  1) Sample integer slot indices in [allowed_lo, allowed_hi] from gaussian_bimodal weights
-     (YAML gaussian_mean / gaussian_mean_2 are means in *index* space, 0..ntt-1).
+  1) Sample integer slot indices in [allowed_lo, allowed_hi] from gaussian_bimodal weights.
+     For FlowMatch-style schedules (values not equal to slot indices), YAML gaussian_mean /
+     gaussian_mean_2 are interpreted as **scheduler timestep values** and mapped to slots
+     inside evaluate_gaussian_timestep_bimodal(noise_scheduler_timesteps=...).
   2) timesteps = noise_scheduler.timesteps[indices]  — FlowMatch: linspace(1000, 1, ntt).
   3) TensorBoard scalar timestep_weights/min_timestep = timesteps.min() over the batch.
 
-JSON therefore stores scheduler *values*, not slot indices. To compare with YAML peaks at
-300 and 850, map each logged value v to nearest i with schedule[i] ≈ v and histogram i.
+JSON stores scheduler *values*. For aligned schedulers (timesteps[i]≈i), YAML means are slot indices.
 """
 from __future__ import annotations
 
@@ -310,10 +311,16 @@ def main() -> None:
     ntt = args.ntt
     sched = flowmatch_schedule(ntt)
     obs_slots = nearest_slot_for_schedule_values(sched, obs_tensor).to(torch.float64)
-    mu1_slot = int(args.gaussian_mean)
-    mu2_slot = int(args.gaussian_mean_2)
-    mu1_slot = max(0, min(mu1_slot, ntt - 1))
-    mu2_slot = max(0, min(mu2_slot, ntt - 1))
+    mu1_slot = int(
+        nearest_slot_for_schedule_values(
+            sched, torch.tensor([float(args.gaussian_mean)], dtype=torch.float64)
+        )[0].item()
+    )
+    mu2_slot = int(
+        nearest_slot_for_schedule_values(
+            sched, torch.tensor([float(args.gaussian_mean_2)], dtype=torch.float64)
+        )[0].item()
+    )
     v_mu1 = float(sched[mu1_slot].item())
     v_mu2 = float(sched[mu2_slot].item())
     print("=== What training samples vs what JSON contains ===")
@@ -326,8 +333,8 @@ def main() -> None:
         "(toolkit/util/tensorboard_timestep_weights.py)."
     )
     print(
-        f"  YAML gaussian_mean / gaussian_mean_2 are means in *slot index* space "
-        f"(here ~{mu1_slot} and ~{mu2_slot}), not the numbers stored in JSON."
+        f"  YAML gaussian_mean / gaussian_mean_2 are scheduler *values* for this FlowMatch grid "
+        f"(nearest slots ~{mu1_slot} and ~{mu2_slot}; sched values ~{v_mu1:.2f} and ~{v_mu2:.2f})."
     )
     print()
     print("=== FlowMatch schedule (linspace 1000 -> 1, ntt=%d) ===" % ntt)
@@ -450,6 +457,7 @@ def main() -> None:
         torch.device("cpu"),
         torch.float32,
         ntt,
+        noise_scheduler_timesteps=sched,
     )
     am = int(w.argmax().item())
     print()

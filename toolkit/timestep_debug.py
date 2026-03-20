@@ -100,6 +100,7 @@ class TimestepDistributionLogger:
                 torch.device("cpu"),
                 torch.float32,
                 ntt,
+                noise_scheduler_timesteps=scheduler_timesteps,
             )
             weights_list = weights_tensor.tolist()
             pairs_10 = list(zip(self._collected_timesteps[:10], weights_list[:10]))
@@ -127,6 +128,7 @@ class TimestepDistributionLogger:
                 torch.device("cpu"),
                 torch.float32,
                 ntt,
+                noise_scheduler_timesteps=scheduler_timesteps,
             )
             weights_list = weights_tensor.tolist()
             pairs_10 = list(zip(self._collected_timesteps[:10], weights_list[:10]))

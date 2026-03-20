@@ -1,12 +1,16 @@
 """
 Truncated Gaussian timestep weights for loss scaling and timestep sampling.
-Weights use a truncated normal on [0, 1] (normalized by max); `mu` / `sigma` YAML fields
-refer to the discrete training **slot axis** 0 .. num_train_timesteps-1.
+Weights use a truncated normal on [0, 1] (normalized by max). The lookup table is indexed
+by discrete training **slots** 0 .. num_train_timesteps-1.
 
-`evaluate_gaussian_timestep*` index a precomputed table by slot (via `.long()` on the
-`timesteps` argument). When `noise_scheduler.timesteps[i]` is not ~`i` (e.g. flow match),
-map batch values with `timestep_values_to_slot_indices` first; use
-`scheduler_timesteps_align_with_index_grid` to decide. Cached per (ntt, mu, sigma, ...).
+`evaluate_gaussian_timestep*` take batch `timesteps` as slot indices (after `.long().clamp`).
+Optional `noise_scheduler_timesteps`: when set and the grid is *not* aligned with indices
+(`schedule[i] ≢ i`, e.g. FlowMatch linspace 1000→1), `mu` / `mu1` / `mu2` are interpreted as
+**scheduler values** and mapped to nearest slots; when aligned or when the argument is omitted,
+those means are **slot indices** (DDPM-style).
+
+For per-row batch values that are scheduler scalars, map with `timestep_values_to_slot_indices`
+before calling `evaluate_*`. Cached per (ntt, mu, sigma, ...).
 """
 import math
 from functools import lru_cache
@@ -81,6 +85,33 @@ def timestep_values_to_slot_indices(
     indices = diffs.argmin(dim=-1)
     return indices.to(dtype=torch.float32)
 
+
+def _resolve_gaussian_mus_to_slots(
+    noise_scheduler_timesteps: torch.Tensor | None,
+    ntt: int,
+    mu1: float,
+    mu2: float | None = None,
+) -> tuple[float, float | None]:
+    """
+    If `noise_scheduler_timesteps` is set and misaligned with 0..ntt-1, treat mu1/mu2 as
+    values on that schedule and return nearest slot indices; otherwise return mu1/mu2 unchanged.
+    """
+    if noise_scheduler_timesteps is None:
+        return float(mu1), (float(mu2) if mu2 is not None else None)
+
+    sched = noise_scheduler_timesteps
+    if scheduler_timesteps_align_with_index_grid(sched, ntt):
+        return float(mu1), (float(mu2) if mu2 is not None else None)
+
+    m1 = torch.tensor([float(mu1)], dtype=torch.float32, device=sched.device)
+    s1 = float(timestep_values_to_slot_indices(m1, sched, ntt=ntt)[0].item())
+    if mu2 is None:
+        return s1, None
+    m2 = torch.tensor([float(mu2)], dtype=torch.float32, device=sched.device)
+    s2 = float(timestep_values_to_slot_indices(m2, sched, ntt=ntt)[0].item())
+    return s1, s2
+
+
 @lru_cache(maxsize=64)
 def _compute_weights(ntt, mu_normalized, sigma, device_str):
     """
@@ -117,6 +148,8 @@ def evaluate_gaussian_timestep(
     device,
     dtype,
     num_train_timesteps,
+    *,
+    noise_scheduler_timesteps: torch.Tensor | None = None,
 ):
     """
     Return truncated normal weights in [0, 1] per batch element.
@@ -128,17 +161,20 @@ def evaluate_gaussian_timestep(
 
     Args:
         timesteps: 1D tensor of slot indices (float ok; cast to long inside), shape matches output.
-        mu: Gaussian mean on the same discrete slot scale as the table (e.g. 700).
+        mu: Gaussian mean in slot space, or in scheduler *value* space if
+            `noise_scheduler_timesteps` is passed and misaligned (see module docstring).
         sigma: Gaussian std in [0, 1] (e.g. 0.2).
         device: Target device for the returned tensor.
         dtype: Target dtype for the returned tensor.
         num_train_timesteps: Number of diffusion timesteps (e.g. 1000).
+        noise_scheduler_timesteps: Optional `noise_scheduler.timesteps` for mean resolution.
 
     Returns:
         1D tensor of weights, same shape as timesteps, on the given device and dtype.
     """
     ntt = int(num_train_timesteps)
-    mu_normalized = float(mu) / float(ntt - 1)
+    mu_res, _ = _resolve_gaussian_mus_to_slots(noise_scheduler_timesteps, ntt, mu, None)
+    mu_normalized = float(mu_res) / float(ntt - 1)
     sigma = float(sigma)
     device = torch.device(device)
     device_str = str(device)
@@ -182,15 +218,21 @@ def evaluate_gaussian_timestep_bimodal(
     device,
     dtype,
     num_train_timesteps,
+    *,
+    noise_scheduler_timesteps: torch.Tensor | None = None,
 ):
     """
     Bimodal truncated-normal mixture (50/50), weights in [0, 1] with global max 1.
-    Same slot-indexing contract for `timesteps` and same `mu` / `sigma` scale as
+    Same slot-indexing contract for `timesteps` and same `mu` / `sigma` resolution rules as
     `evaluate_gaussian_timestep`.
     """
     ntt = int(num_train_timesteps)
-    mu1n = float(mu1) / float(ntt - 1)
-    mu2n = float(mu2) / float(ntt - 1)
+    mu1_res, mu2_res = _resolve_gaussian_mus_to_slots(
+        noise_scheduler_timesteps, ntt, mu1, mu2
+    )
+    assert mu2_res is not None
+    mu1n = float(mu1_res) / float(ntt - 1)
+    mu2n = float(mu2_res) / float(ntt - 1)
     device = torch.device(device)
     device_str = str(device)
 

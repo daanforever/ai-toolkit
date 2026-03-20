@@ -346,6 +346,26 @@ def test_scheduler_timesteps_align_with_index_grid_false_for_linspace():
     assert scheduler_timesteps_align_with_index_grid(schedule, ntt) is False
 
 
+def test_evaluate_gaussian_bimodal_flowmatch_resolves_means_as_scheduler_values():
+    """With noise_scheduler_timesteps=linspace(1000→1), μ are values → peaks near matching slots."""
+    ntt = 1000
+    sched = torch.linspace(1000, 1, ntt, dtype=torch.float32)
+    t = torch.arange(ntt, dtype=torch.float32)
+    w = evaluate_gaussian_timestep_bimodal(
+        t,
+        300.0,
+        0.05,
+        850.0,
+        0.05,
+        torch.device("cpu"),
+        torch.float32,
+        ntt,
+        noise_scheduler_timesteps=sched,
+    )
+    assert w[700] > w[300]
+    assert w[150] > w[850]
+
+
 def test_timestep_values_to_slot_indices_maps_back_schedule_values():
     ntt = 1000
     schedule = torch.linspace(1000, 1, ntt, dtype=torch.float32)

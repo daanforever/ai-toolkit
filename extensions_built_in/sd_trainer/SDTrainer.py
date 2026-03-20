@@ -894,6 +894,7 @@ class SDTrainer(BaseSDTrainProcess):
                     loss.device,
                     loss.dtype,
                     ntt,
+                    noise_scheduler_timesteps=schedule,
                 )
                 if len(loss.shape) == 4:
                     timestep_weight = timestep_weight.view(-1, 1, 1, 1).detach()
@@ -927,6 +928,7 @@ class SDTrainer(BaseSDTrainProcess):
                     loss.device,
                     loss.dtype,
                     ntt,
+                    noise_scheduler_timesteps=schedule,
                 )
                 if len(loss.shape) == 4:
                     timestep_weight = timestep_weight.view(-1, 1, 1, 1).detach()

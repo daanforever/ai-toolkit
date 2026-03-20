@@ -200,6 +200,7 @@ class TimestepSampler:
             latents.device,
             torch.float32,
             ntt,
+            noise_scheduler_timesteps=self.noise_scheduler.timesteps,
         )
         probs = weights / weights.sum().clamp(min=1e-8)
         sampled_idx = torch.multinomial(probs, batch_size, replacement=True)
@@ -231,6 +232,7 @@ class TimestepSampler:
             latents.device,
             torch.float32,
             ntt,
+            noise_scheduler_timesteps=self.noise_scheduler.timesteps,
         )
         probs = weights / weights.sum().clamp(min=1e-8)
         sampled_idx = torch.multinomial(probs, batch_size, replacement=True)
