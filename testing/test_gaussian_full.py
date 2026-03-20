@@ -7,7 +7,7 @@ on TimestepDistributionLogger.collect.
 
 After training, writes TensorBoard-style scalars JSON to ``temp/test_gaussian_full.json``
 (same structure as ``scripts/tensorboard_extract.py``) for
-``testing/verify_flowmatch_bimodal_scalars.py`` (expects ``timestep_weights/min_timestep``).
+``testing/verify_flowmatch_bimodal_scalars.py`` (expects ``sampled_diffusion_timesteps/min``).
 
 Requires CUDA, local Z-Image weights, and dataset under repo ``temp/test_train/`` (same
 convention as ``extensions_built_in/.../test_train.py``). Paths default to
@@ -75,10 +75,10 @@ from toolkit.timestep_sampler import allowed_slot_index_range  # noqa: E402
 
 TB_JSON_REL = Path("temp") / "test_gaussian_full.json"
 TB_TAGS = (
-    "timestep_weights/min_timestep",
-    "timestep_weights/max_timestep",
-    "timestep_weights/mean_timestep",
-    "timestep_weights/mean_weight",
+    "sampled_diffusion_timesteps/min",
+    "sampled_diffusion_timesteps/max",
+    "sampled_diffusion_timesteps/mean",
+    "per_sample_loss_weights/mean",
 )
 
 
@@ -128,22 +128,22 @@ def _append_tb_scalars(
     """One training micro-batch → one row per tag (TensorBoard scalar JSON shape)."""
     t = timesteps.detach().cpu().flatten().float()
     wt = time.time()
-    payload["timestep_weights/min_timestep"].append(
+    payload["sampled_diffusion_timesteps/min"].append(
         {"step": int(step_num), "value": float(t.min().item()), "wall_time": wt}
     )
-    payload["timestep_weights/max_timestep"].append(
+    payload["sampled_diffusion_timesteps/max"].append(
         {"step": int(step_num), "value": float(t.max().item()), "wall_time": wt}
     )
-    payload["timestep_weights/mean_timestep"].append(
+    payload["sampled_diffusion_timesteps/mean"].append(
         {"step": int(step_num), "value": float(t.mean().item()), "wall_time": wt}
     )
     if weights is not None:
         w = weights.detach().cpu().flatten().float()
-        payload["timestep_weights/mean_weight"].append(
+        payload["per_sample_loss_weights/mean"].append(
             {"step": int(step_num), "value": float(w.mean().item()), "wall_time": wt}
         )
     else:
-        payload["timestep_weights/mean_weight"].append(
+        payload["per_sample_loss_weights/mean"].append(
             {"step": int(step_num), "value": 1.0, "wall_time": wt}
         )
 

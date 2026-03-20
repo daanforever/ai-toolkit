@@ -7,7 +7,7 @@ Training pipeline (same as SDTrainer + TimestepSampler + log_timestep_weights):
      gaussian_mean_2 are interpreted as **scheduler timestep values** and mapped to slots
      inside evaluate_gaussian_timestep_bimodal(noise_scheduler_timesteps=...).
   2) timesteps = noise_scheduler.timesteps[indices]  — FlowMatch: linspace(1000, 1, ntt).
-  3) TensorBoard scalar timestep_weights/min_timestep = timesteps.min() over the batch.
+  3) TensorBoard scalar sampled_diffusion_timesteps/min = timesteps.min() over the batch.
 
 JSON stores scheduler *values*. For aligned schedulers (timesteps[i]≈i), YAML means are slot indices.
 """
@@ -44,7 +44,7 @@ def nearest_slot_for_schedule_values(
 
 def analyze_json(path: Path) -> tuple[dict, torch.Tensor, list[dict]]:
     data = json.loads(path.read_text(encoding="utf-8"))
-    key = "timestep_weights/min_timestep"
+    key = "sampled_diffusion_timesteps/min"
     if key not in data:
         keys = list(data.keys())
         raise SystemExit(f"Missing {key!r}. Keys: {keys}")
@@ -329,7 +329,7 @@ def main() -> None:
         "timesteps = noise_scheduler.timesteps[i] (FlowMatch linspace 1000→1)."
     )
     print(
-        "  TensorBoard timestep_weights/min_timestep = min(timesteps) on the batch "
+        "  TensorBoard sampled_diffusion_timesteps/min = min(timesteps) on the batch "
         "(toolkit/util/tensorboard_timestep_weights.py)."
     )
     print(
@@ -341,7 +341,7 @@ def main() -> None:
     print(f"  slot {mu1_slot:4d}  ->  scheduler value {v_mu1:.4f}   (mode 1 after index→value map)")
     print(f"  slot {mu2_slot:4d}  ->  scheduler value {v_mu2:.4f}   (mode 2 after index→value map)")
     print()
-    print("=== Observed TensorBoard scalar: timestep_weights/min_timestep ===")
+    print("=== Observed TensorBoard scalar: sampled_diffusion_timesteps/min ===")
     for k, v in obs.items():
         print(f"  {k}: {v}")
     print()
