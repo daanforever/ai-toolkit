@@ -1344,6 +1344,12 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 if hasattr(self.sd, 'target_lora_modules'):
                     network_kwargs['target_lin_modules'] = self.sd.target_lora_modules
 
+                lora_name_for_resume = self.name
+                if self.named_lora:
+                    lora_name_for_resume = f"{lora_name_for_resume}_LoRA"
+                resume_path = self.get_latest_save_path(lora_name_for_resume)
+                deferred_lora_init = resume_path is not None
+
                 self.network = NetworkClass(
                     text_encoder=text_encoder,
                     unet=self.sd.get_model_to_train(),
@@ -1375,6 +1381,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     transformer_only=self.network_config.transformer_only,
                     is_transformer=self.sd.is_transformer,
                     base_model=self.sd,
+                    deferred_lora_init=deferred_lora_init,
                     **network_kwargs
                 )
 
@@ -1449,6 +1456,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
                             transformer_only=self.network_config.transformer_only,
                             is_transformer=self.sd.is_transformer,
                             base_model=self.sd,
+                            ephemeral_lora=True,
+                            deferred_lora_init=False,
                             **network_kwargs
                         )
                         
@@ -1490,17 +1499,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 if self.train_config.gradient_checkpointing:
                     self.network.enable_gradient_checkpointing()
 
-                lora_name = self.name
-                # need to adapt name so they are not mixed up
-                if self.named_lora:
-                    lora_name = f"{lora_name}_LoRA"
-
-                latest_save_path = self.get_latest_save_path(lora_name)
-                if latest_save_path is not None:
+                if resume_path is not None:
                     with memory_debug(print_acc, "pretrained_lora_load"):
-                        print_acc(f"#### IMPORTANT RESUMING FROM {latest_save_path} ####")
-                        print_acc(f"Loading from {latest_save_path}")
-                        self.load_weights(latest_save_path)
+                        print_acc(f"#### IMPORTANT RESUMING FROM {resume_path} ####")
+                        print_acc(f"Loading from {resume_path}")
+                        self.load_weights(resume_path)
                         self.network.multiplier = 1.0
                         flush()
 

@@ -5,7 +5,7 @@ import weakref
 import os
 import re
 import sys
-from typing import List, Optional, Dict, Type, Union
+from typing import List, Optional, Dict, Type, Union, AbstractSet
 import torch
 from diffusers import UNet2DConditionModel, PixArtTransformer2DModel, AuraFlowTransformer2DModel, WanTransformer3DModel
 from transformers import CLIPTextModel
@@ -18,6 +18,10 @@ from toolkit.util.debug import memory_debug, is_debug_enabled
 
 from toolkit.kohya_lora import LoRANetwork
 from toolkit.models.DoRA import DoRAModule
+from toolkit.lora_utils.deferred_lora_init import (
+    finalize_deferred_lora_init,
+    lora_down_present_in_loaded_keys,
+)
 from toolkit.lora_utils.pissa import try_init_linear_lora_down_pissa
 from typing import TYPE_CHECKING
 
@@ -124,31 +128,46 @@ class LoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
             nk = getattr(network.network_config, "network_kwargs", None) or {}
             init_lora_weights = nk.get("init_lora_weights")
 
-        if not try_init_linear_lora_down_pissa(
-            init_lora_weights=init_lora_weights,
-            org_module_class_name=org_module.__class__.__name__,
-            full_rank=self.full_rank,
-            org_weight=org_module.weight,
-            lora_down=self.lora_down,
-            lora_dim=self.lora_dim,
-            in_dim=in_dim,
-            out_dim=out_dim,
-            network=network,
-            lora_name=lora_name,
-        ):
-            # same as microsoft's when PiSSA not used / capped / failed
-            torch.nn.init.kaiming_uniform_(self.lora_down.weight, a=math.sqrt(5))
+        self._deferred_lora_init_pending = False
+        ephemeral = network is not None and getattr(network, "ephemeral_lora", False)
 
-        # optional scale raises initial param RMS (e.g. for Adafactor update cap)
-        if nk:
-            lora_down_init_scale = nk.get("lora_down_init_scale") or 1.0
+        if ephemeral:
+            with torch.no_grad():
+                torch.nn.init.zeros_(self.lora_down.weight)
+            if not self.full_rank and hasattr(self.lora_up, "weight"):
+                torch.nn.init.zeros_(self.lora_up.weight)
+        else:
+            deferred_pissa = (
+                network is not None
+                and getattr(network, "deferred_lora_init", False)
+                and init_lora_weights == "pissa"
+                and org_module.__class__.__name__ in LINEAR_MODULES
+                and not self.full_rank
+            )
+            if deferred_pissa:
+                torch.nn.init.kaiming_uniform_(self.lora_down.weight, a=math.sqrt(5))
+                self._deferred_lora_init_pending = True
+            elif not try_init_linear_lora_down_pissa(
+                init_lora_weights=init_lora_weights,
+                org_module_class_name=org_module.__class__.__name__,
+                full_rank=self.full_rank,
+                org_weight=org_module.weight,
+                lora_down=self.lora_down,
+                lora_dim=self.lora_dim,
+                in_dim=in_dim,
+                out_dim=out_dim,
+                network=network,
+                lora_name=lora_name,
+            ):
+                torch.nn.init.kaiming_uniform_(self.lora_down.weight, a=math.sqrt(5))
 
-            if lora_down_init_scale != 1.0:
-                with torch.no_grad():
-                    self.lora_down.weight.mul_(lora_down_init_scale)
-
-                if is_debug_enabled():
-                    print(f"LoRA {lora_name}: applied lora_down_init_scale={lora_down_init_scale}")
+            if nk:
+                lora_down_init_scale = nk.get("lora_down_init_scale") or 1.0
+                if lora_down_init_scale != 1.0 and not self._deferred_lora_init_pending:
+                    with torch.no_grad():
+                        self.lora_down.weight.mul_(lora_down_init_scale)
+                    if is_debug_enabled():
+                        print(f"LoRA {lora_name}: applied lora_down_init_scale={lora_down_init_scale}")
 
         if not self.full_rank:
             torch.nn.init.zeros_(self.lora_up.weight)
@@ -165,6 +184,46 @@ class LoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
         self.org_forward = self.org_module[0].forward
         self.org_module[0].forward = self.forward
         # del self.org_module
+
+    def finalize_deferred_lora_init_if_needed(self, loaded_keys: AbstractSet[str]) -> None:
+        if not getattr(self, "_deferred_lora_init_pending", False):
+            return
+        if lora_down_present_in_loaded_keys(self.lora_name, loaded_keys):
+            self._deferred_lora_init_pending = False
+            return
+        org = self.orig_module_ref()
+        if org is None:
+            self._deferred_lora_init_pending = False
+            return
+        if org.__class__.__name__ in CONV_MODULES:
+            self._deferred_lora_init_pending = False
+            return
+        nk = {}
+        network = self.network_ref()
+        if network is not None and getattr(network, "network_config", None) is not None:
+            nk = getattr(network.network_config, "network_kwargs", None) or {}
+        init_lora_weights = nk.get("init_lora_weights")
+        in_dim = org.in_features
+        out_dim = org.out_features
+        try_init_linear_lora_down_pissa(
+            init_lora_weights=init_lora_weights,
+            org_module_class_name=org.__class__.__name__,
+            full_rank=self.full_rank,
+            org_weight=org.weight,
+            lora_down=self.lora_down,
+            lora_dim=self.lora_dim,
+            in_dim=in_dim,
+            out_dim=out_dim,
+            network=network,
+            lora_name=self.lora_name,
+        )
+        lora_down_init_scale = nk.get("lora_down_init_scale") or 1.0
+        if lora_down_init_scale != 1.0:
+            with torch.no_grad():
+                self.lora_down.weight.mul_(lora_down_init_scale)
+            if is_debug_enabled():
+                print(f"LoRA {self.lora_name}: applied lora_down_init_scale={lora_down_init_scale}")
+        self._deferred_lora_init_pending = False
 
 
 class LoRASpecialNetwork(ToolkitNetworkMixin, LoRANetwork):
@@ -231,6 +290,8 @@ class LoRASpecialNetwork(ToolkitNetworkMixin, LoRANetwork):
             is_transformer: bool = False,
             base_model: 'StableDiffusion' = None,
             is_ara: bool = False,
+            ephemeral_lora: bool = False,
+            deferred_lora_init: bool = False,
             **kwargs
     ) -> None:
         """
@@ -293,6 +354,13 @@ class LoRASpecialNetwork(ToolkitNetworkMixin, LoRANetwork):
             self.module_class = LokrModule
             module_class = LokrModule
         self.network_config: NetworkConfig = kwargs.get("network_config", None)
+        self.ephemeral_lora = ephemeral_lora
+        self.deferred_lora_init = deferred_lora_init
+        if deferred_lora_init and not ephemeral_lora:
+            print(
+                "LoRA (resume): deferred initialization until after checkpoint load "
+                "(e.g. PiSSA runs in a post-load finalize step for layers missing from the file)."
+            )
 
         self.peft_format = peft_format
         self.is_transformer = is_transformer
@@ -612,6 +680,9 @@ class LoRASpecialNetwork(ToolkitNetworkMixin, LoRANetwork):
                 self.unet_conv_out = copy.deepcopy(unet_conv_out)
                 unet.conv_in = self.unet_conv_in
                 unet.conv_out = self.unet_conv_out
+
+    def _after_load_weights(self, file, loaded_keys):
+        finalize_deferred_lora_init(self, loaded_keys)
 
     def share_parameters_with(self, other: "LoRASpecialNetwork") -> None:
         """

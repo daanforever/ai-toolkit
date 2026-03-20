@@ -1,7 +1,7 @@
 import json
 import os
 from collections import OrderedDict
-from typing import Optional, Union, List, Type, TYPE_CHECKING, Dict, Any, Literal
+from typing import Optional, Union, List, Type, TYPE_CHECKING, Dict, Any, Literal, Tuple, FrozenSet
 
 import torch
 from optimum.quanto import QTensor
@@ -600,14 +600,18 @@ class ToolkitNetworkMixin:
         else:
             torch.save(save_dict, file)
 
-    def load_weights(self: Network, file, force_weight_mapping=False):
-        # allows us to save and load to and from ldm weights
+    def _prepare_load_state_dict_for_network(
+        self: Network, file, force_weight_mapping: bool
+    ) -> Tuple[OrderedDict, FrozenSet[str], bool]:
+        """
+        Build ``load_sd`` ready for ``load_state_dict`` and the set of keys that will be applied.
+        Returns ``(load_sd, loaded_keys, retry_with_forced_keymap)``.
+        """
         keymap = self.get_keymap(force_weight_mapping)
         keymap = {} if keymap is None else keymap
 
         if isinstance(file, str):
             if self.base_model_ref is not None and hasattr(self.base_model_ref(), 'load_lora'):
-                # call the base model load lora method
                 weights_sd = self.base_model_ref().load_lora(file)
             else:
                 if os.path.splitext(file)[1] == ".safetensors":
@@ -616,46 +620,35 @@ class ToolkitNetworkMixin:
                 else:
                     weights_sd = torch.load(file, map_location="cpu")
         else:
-            # probably a state dict
             weights_sd = file
-        
+
         if self.base_model_ref is not None:
             weights_sd = self.base_model_ref().convert_lora_weights_before_load(weights_sd)
 
         load_sd = OrderedDict()
         for key, value in weights_sd.items():
             load_key = keymap[key] if key in keymap else key
-            # replace old double __ with single _
             if self.is_pixart:
                 load_key = load_key.replace('__', '_')
 
             if self.peft_format:
-                # lora_down = lora_A
-                # lora_up = lora_B
-                # no alpha
-                # if load_key.endswith('.alpha') and self.network_type.lower() != "lokr":
-                #     continue
                 load_key = load_key.replace('lora_A', 'lora_down')
                 load_key = load_key.replace('lora_B', 'lora_up')
-                # replace all . with $$
                 load_key = load_key.replace('.', '$$')
                 load_key = load_key.replace('$$lora_down$$', '.lora_down.')
                 load_key = load_key.replace('$$lora_up$$', '.lora_up.')
                 if load_key.endswith('$$alpha'):
                     load_key = load_key[:-7] + '.alpha'
 
-                # patch lokr, not sure why we need to but whatever
                 if self.network_type.lower() == "lokr":
                     load_key = load_key.replace('$$lokr_w1', '.lokr_w1')
                     load_key = load_key.replace('$$lokr_w2', '.lokr_w2')
-            
+
             if self.network_type.lower() == "lokr":
-                # lora_transformer_transformer_blocks_7_attn_to_v.lokr_w1 to lycoris_transformer_blocks_7_attn_to_v.lokr_w1
                 load_key = load_key.replace('lycoris_', 'lora_transformer_')
 
             load_sd[load_key] = value
 
-        # extract extra items from state dict
         current_state_dict = self.state_dict()
         extra_dict = OrderedDict()
         to_delete = []
@@ -664,28 +657,26 @@ class ToolkitNetworkMixin:
                 extra_dict[key] = load_sd[key]
                 to_delete.append(key)
             elif "lora_down" in key or "lora_up" in key:
-                # handle expanding/shrinking LoRA (linear only)
                 if len(load_sd[key].shape) == 2:
-                    load_value = load_sd[key]                 # from checkpoint
-                    blank_val = current_state_dict[key]       # shape we need in the target model
+                    load_value = load_sd[key]
+                    blank_val = current_state_dict[key]
                     tgt_h, tgt_w = blank_val.shape
                     src_h, src_w = load_value.shape
 
                     if (src_h, src_w) == (tgt_h, tgt_w):
-                        # shapes already match: keep original
                         pass
 
                     elif "lora_down" in key and src_h < tgt_h:
                         print_once(f"Expanding {key} from {load_value.shape} to {blank_val.shape}")
                         new_val = torch.zeros((tgt_h, tgt_w), device=load_value.device, dtype=load_value.dtype)
-                        new_val[:src_h, :src_w] = load_value  # src_w should already match
+                        new_val[:src_h, :src_w] = load_value
                         load_sd[key] = new_val
                         self.did_change_weights = True
 
                     elif "lora_up" in key and src_w < tgt_w:
                         print_once(f"Expanding {key} from {load_value.shape} to {blank_val.shape}")
                         new_val = torch.zeros((tgt_h, tgt_w), device=load_value.device, dtype=load_value.dtype)
-                        new_val[:src_h, :src_w] = load_value  # src_h should already match
+                        new_val[:src_h, :src_w] = load_value
                         load_sd[key] = new_val
                         self.did_change_weights = True
 
@@ -700,23 +691,38 @@ class ToolkitNetworkMixin:
                         self.did_change_weights = True
 
                     else:
-                        # unexpected mismatch (e.g., both dims differ in a way that doesn't match lora_up/down semantics)
                         raise ValueError(f"Unhandled LoRA shape change for {key}: src={load_value.shape}, tgt={blank_val.shape}")
 
         for key in to_delete:
             del load_sd[key]
 
         print(f"Missing keys: {to_delete}")
-        if len(to_delete) > 0 and self.is_v1 and not force_weight_mapping and not (
-                len(to_delete) == 1 and 'emb_params' in to_delete):
-            print(" Attempting to load with forced keymap")
-            return self.load_weights(file, force_weight_mapping=True)
-
-        info = self.load_state_dict(load_sd, False)
-        del load_sd
+        retry = bool(
+            len(to_delete) > 0 and self.is_v1 and not force_weight_mapping and not (
+                len(to_delete) == 1 and 'emb_params' in to_delete)
+        )
+        loaded_keys = frozenset(load_sd.keys())
         if isinstance(file, str):
             del weights_sd
-        return None
+        return load_sd, loaded_keys, retry
+
+    def _after_load_weights(self: Network, file, loaded_keys: FrozenSet[str]) -> None:
+        """Hook after a successful ``load_state_dict`` from :meth:`load_weights`."""
+        pass
+
+    def load_weights(self: Network, file, force_weight_mapping=False):
+        # allows us to save and load to and from ldm weights
+        while True:
+            load_sd, loaded_keys, retry = self._prepare_load_state_dict_for_network(file, force_weight_mapping)
+            if retry:
+                print(" Attempting to load with forced keymap")
+                del load_sd
+                force_weight_mapping = True
+                continue
+            self.load_state_dict(load_sd, False)
+            self._after_load_weights(file, loaded_keys)
+            del load_sd
+            return None
 
     @torch.no_grad()
     def _update_torch_multiplier(self: Network):
