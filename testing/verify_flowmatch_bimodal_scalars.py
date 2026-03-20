@@ -1,15 +1,14 @@
 """
 Compare TensorBoard-exported timestep scalars to expected FlowMatch + gaussian_bimodal behavior.
 
-YAML reference:
-  noise_scheduler: flowmatch
-  gaussian_mean: 300, gaussian_std: 0.2
-  gaussian_mean_2: 800, gaussian_std_2: 0.2
+Training pipeline (same as SDTrainer + TimestepSampler + log_timestep_weights):
+  1) Sample integer slot indices in [allowed_lo, allowed_hi] from gaussian_bimodal weights
+     (YAML gaussian_mean / gaussian_mean_2 are means in *index* space, 0..ntt-1).
+  2) timesteps = noise_scheduler.timesteps[indices]  — FlowMatch: linspace(1000, 1, ntt).
+  3) TensorBoard scalar timestep_weights/min_timestep = timesteps.min() over the batch.
 
-`gaussian_mean*` are slot indices 0..ntt-1. FlowMatch uses linspace(1000, 1, ntt),
-so sampled *values* should cluster near schedule[300] and schedule[800], not near 300/800.
-
-`timestep_weights/min_timestep` is min over the logged batch of *values* (not slot indices).
+JSON therefore stores scheduler *values*, not slot indices. To compare with YAML peaks at
+300 and 850, map each logged value v to nearest i with schedule[i] ≈ v and histogram i.
 """
 from __future__ import annotations
 
@@ -20,6 +19,11 @@ from pathlib import Path
 
 import torch
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    # Ensure imports like `extensions_built_in/...` work when running from any CWD.
+    sys.path.insert(0, str(REPO_ROOT))
+
 from extensions_built_in.sd_trainer.gaussian_timestep_weights import evaluate_gaussian_timestep_bimodal
 from toolkit.timestep_sampler import TimestepSampler, allowed_slot_index_range
 
@@ -28,13 +32,23 @@ def flowmatch_schedule(ntt: int = 1000) -> torch.Tensor:
     return torch.linspace(1000, 1, ntt, dtype=torch.float32)
 
 
-def analyze_json(path: Path) -> tuple[dict, torch.Tensor]:
+def nearest_slot_for_schedule_values(
+    schedule: torch.Tensor, values: torch.Tensor
+) -> torch.Tensor:
+    """For each scalar v, index i minimizing |schedule[i] - v| (same discrete grid as the trainer)."""
+    s = schedule.to(dtype=torch.float64).view(-1)
+    v = values.to(dtype=torch.float64).view(-1, 1)
+    return (v - s.view(1, -1)).abs().argmin(dim=1).to(torch.int64)
+
+
+def analyze_json(path: Path) -> tuple[dict, torch.Tensor, list[dict]]:
     data = json.loads(path.read_text(encoding="utf-8"))
     key = "timestep_weights/min_timestep"
     if key not in data:
         keys = list(data.keys())
         raise SystemExit(f"Missing {key!r}. Keys: {keys}")
-    vals = [entry["value"] for entry in data[key]]
+    raw_entries = list(data[key])
+    vals = [entry["value"] for entry in raw_entries]
     t = torch.tensor(vals, dtype=torch.float64)
     stats = {
         "n": len(vals),
@@ -50,7 +64,42 @@ def analyze_json(path: Path) -> tuple[dict, torch.Tensor]:
         "frac_150_250": float(((t >= 150) & (t <= 250)).float().mean()),
         "frac_650_750": float(((t >= 650) & (t <= 750)).float().mean()),
     }
-    return stats, t
+    return stats, t, raw_entries
+
+
+def histogram_by_100_timesteps(
+    t: torch.Tensor,
+    *,
+    t_min: float = 0.0,
+    t_max: float = 1000.0,
+    bucket_size: float = 100.0,
+) -> tuple[torch.Tensor, torch.Tensor, list[str], float]:
+    """
+    Histogram for timestep *values* into fixed-width buckets (default width=100).
+
+    Buckets are intervals [t, t+bucket_size) and are printed as e.g. "0-99", "100-199".
+    """
+    if t.numel() == 0:
+        bucket_count = int((t_max - t_min) / bucket_size)
+        empty = torch.zeros((bucket_count,), dtype=torch.int64)
+        labels = [f"{int(t_min + i * bucket_size)}-{int(t_min + (i + 1) * bucket_size - 1)}" for i in range(bucket_count)]
+        return empty, empty.to(torch.float64), labels, float("nan")
+
+    t = t.to(torch.float64).view(-1)
+    bucket_count = int((t_max - t_min) / bucket_size)
+    edges = torch.linspace(t_min, t_max, bucket_count + 1, dtype=t.dtype)
+    # With right=False, edge is inclusive on the lower side:
+    # bucket i covers [edges[i], edges[i+1]).
+    bucket_idx = torch.bucketize(t, edges[1:-1], right=False)
+    counts = torch.bincount(bucket_idx, minlength=bucket_count).to(torch.int64)
+    perc = (counts.to(torch.float64) / float(t.numel())) * 100.0
+
+    labels = [
+        f"{int(edges[i].item())}-{int(edges[i + 1].item() - 1)}" for i in range(bucket_count)
+    ]
+    peak_bucket = int(torch.argmax(counts).item())
+    peak_perc = float(perc[peak_bucket].item())
+    return counts, perc, labels, peak_perc
 
 
 def simulate_min_timestep(
@@ -88,6 +137,7 @@ def simulate_min_timestep(
     latents = torch.zeros(1, device=device)
 
     mins = []
+    min_slots = []
     for _ in range(n_steps):
         r = sampler.sample(
             batch_size,
@@ -99,9 +149,13 @@ def simulate_min_timestep(
             device,
             0,
         )
-        mins.append(float(r.timesteps.min().item()))
+        assert r.timestep_indices is not None
+        pos = int(torch.argmin(r.timesteps).item())
+        mins.append(float(r.timesteps[pos].item()))
+        min_slots.append(int(r.timestep_indices[pos].item()))
 
     t = torch.tensor(mins, dtype=torch.float64)
+    t_slots = torch.tensor(min_slots, dtype=torch.float64)
     return {
         "batch_size": batch_size,
         "min_noise_steps": min_noise_steps,
@@ -116,7 +170,12 @@ def simulate_min_timestep(
         "frac_gt_800": float((t > 800).float().mean()),
         "frac_150_250": float(((t >= 150) & (t <= 250)).float().mean()),
         "frac_650_750": float(((t >= 650) & (t <= 750)).float().mean()),
+        "slot_mean": float(t_slots.mean()),
+        "slot_p50": float(t_slots.quantile(0.50)),
+        "frac_slot_250_350": float(((t_slots >= 250) & (t_slots <= 350)).float().mean()),
+        "frac_slot_800_900": float(((t_slots >= 800) & (t_slots <= 900)).float().mean()),
         "_tensor": t,
+        "_slot_tensor": t_slots.to(torch.int64),
     }
 
 
@@ -231,6 +290,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--gaussian-std", type=float, default=0.2)
     p.add_argument("--gaussian-mean-2", type=float, default=800.0)
     p.add_argument("--gaussian-std-2", type=float, default=0.2)
+    p.add_argument(
+        "--preview-rows",
+        type=int,
+        default=16,
+        help="Print first N JSON rows: step, logged scheduler value, nearest slot index",
+    )
     return p.parse_args()
 
 
@@ -241,18 +306,75 @@ def main() -> None:
         print(f"File not found: {json_path}")
         sys.exit(1)
 
-    obs, obs_tensor = analyze_json(json_path)
+    obs, obs_tensor, json_rows = analyze_json(json_path)
     ntt = args.ntt
     sched = flowmatch_schedule(ntt)
-    v300 = float(sched[300].item())
-    v800 = float(sched[800].item())
+    obs_slots = nearest_slot_for_schedule_values(sched, obs_tensor).to(torch.float64)
+    mu1_slot = int(args.gaussian_mean)
+    mu2_slot = int(args.gaussian_mean_2)
+    mu1_slot = max(0, min(mu1_slot, ntt - 1))
+    mu2_slot = max(0, min(mu2_slot, ntt - 1))
+    v_mu1 = float(sched[mu1_slot].item())
+    v_mu2 = float(sched[mu2_slot].item())
+    print("=== What training samples vs what JSON contains ===")
+    print(
+        "  Sampler draws slot indices i in [allowed_lo, hi], then "
+        "timesteps = noise_scheduler.timesteps[i] (FlowMatch linspace 1000→1)."
+    )
+    print(
+        "  TensorBoard timestep_weights/min_timestep = min(timesteps) on the batch "
+        "(toolkit/util/tensorboard_timestep_weights.py)."
+    )
+    print(
+        f"  YAML gaussian_mean / gaussian_mean_2 are means in *slot index* space "
+        f"(here ~{mu1_slot} and ~{mu2_slot}), not the numbers stored in JSON."
+    )
+    print()
     print("=== FlowMatch schedule (linspace 1000 -> 1, ntt=%d) ===" % ntt)
-    print(f"  schedule[300] = {v300:.4f}   (peak 1 in slot space)")
-    print(f"  schedule[800] = {v800:.4f}   (peak 2 in slot space)")
+    print(f"  slot {mu1_slot:4d}  ->  scheduler value {v_mu1:.4f}   (mode 1 after index→value map)")
+    print(f"  slot {mu2_slot:4d}  ->  scheduler value {v_mu2:.4f}   (mode 2 after index→value map)")
     print()
     print("=== Observed TensorBoard scalar: timestep_weights/min_timestep ===")
     for k, v in obs.items():
         print(f"  {k}: {v}")
+    print()
+    print(
+        "=== Inferred slot index per JSON point (nearest i: |schedule[i] - logged_value| min) ==="
+    )
+    print(
+        f"  (batch_size=1: this is the training slot; batch>1: slot of the sample that had batch min value)"
+    )
+    print(f"  n: {int(obs_slots.numel())}  mean: {float(obs_slots.mean()):.2f}  "
+          f"p50: {float(obs_slots.quantile(0.5)):.1f}  "
+          f"P(slot in [250,350]): {float(((obs_slots >= 250) & (obs_slots <= 350)).float().mean()):.4f}  "
+          f"P(slot in [800,900]): {float(((obs_slots >= 800) & (obs_slots <= 900)).float().mean()):.4f}")
+    print()
+    pr = max(0, args.preview_rows)
+    if pr > 0:
+        print(f"=== JSON preview (first {pr} rows): global_step, logged value, inferred slot ===")
+        for row in json_rows[:pr]:
+            st = row.get("step", "")
+            val = float(row["value"])
+            si = int(
+                nearest_slot_for_schedule_values(
+                    sched, torch.tensor([val], dtype=torch.float64)
+                )[0].item()
+            )
+            print(f"  step {st:6}  logged={val:8.2f}  nearest_slot={si:4d}  sched[{si}]={float(sched[si].item()):.4f}")
+        print()
+
+    hist_counts, hist_perc, labels, peak_perc = histogram_by_100_timesteps(obs_tensor)
+    print("=== Histogram: logged scheduler values (same units as JSON / TensorBoard) ===")
+    print(f"  peak bucket count={int(hist_counts.max().item())} ({peak_perc:.2f}%)")
+    for label, p in zip(labels, hist_perc.tolist()):
+        print(f"  {label} {p:.2f}%")
+    print()
+
+    sh_counts, sh_perc, slabels, speak = histogram_by_100_timesteps(obs_slots)
+    print("=== Histogram: inferred slot indices (compare to YAML gaussian_mean / gaussian_mean_2) ===")
+    print(f"  peak bucket count={int(sh_counts.max().item())} ({speak:.2f}%)")
+    for label, p in zip(slabels, sh_perc.tolist()):
+        print(f"  {label} {p:.2f}%")
     print()
 
     sim_ref = simulate_min_timestep(
@@ -268,6 +390,7 @@ def main() -> None:
         seed=args.ref_seed,
     )
     ref_tensor = sim_ref.pop("_tensor")
+    ref_slot_tensor = sim_ref.pop("_slot_tensor")
     print(
         f"=== Reference MC (batch={args.batch_size}, "
         f"min_denoising={args.min_noise_steps}, max_denoising={args.max_noise_steps}, "
@@ -283,8 +406,19 @@ def main() -> None:
         "frac_gt_800",
         "frac_150_250",
         "frac_650_750",
+        "slot_mean",
+        "slot_p50",
+        "frac_slot_250_350",
+        "frac_slot_800_900",
     ):
         print(f"  {k}: {sim_ref[k]}")
+    rh_counts, rh_perc, rlabels, rpeak = histogram_by_100_timesteps(
+        ref_slot_tensor.to(torch.float64)
+    )
+    print("  slot histogram (bucket size=100 on index axis):")
+    print(f"    peak {int(rh_counts.max().item())} ({rpeak:.2f}%)")
+    for label, p in zip(rlabels, rh_perc.tolist()):
+        print(f"    {label} {p:.2f}%")
     print()
 
     print("=== Reference table: other batch sizes (min=0, max=999) ===")
@@ -324,8 +458,12 @@ def main() -> None:
         f"  argmax slot {am} (sched value {sched[am].item():.2f}) — can differ slightly from mean_2"
         f" due to overlap of the two truncated normals"
     )
-    print(f"  weight at slot 300: {w[300].item():.6f}  (sched {sched[300].item():.2f})")
-    print(f"  weight at slot 800: {w[800].item():.6f}  (sched {sched[800].item():.2f})")
+    print(
+        f"  weight at slot {mu1_slot}: {w[mu1_slot].item():.6f}  (sched {sched[mu1_slot].item():.2f})"
+    )
+    print(
+        f"  weight at slot {mu2_slot}: {w[mu2_slot].item():.6f}  (sched {sched[mu2_slot].item():.2f})"
+    )
 
     if args.skip_checks:
         return
