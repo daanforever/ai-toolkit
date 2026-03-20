@@ -12,7 +12,7 @@ const CONTENT_OR_STYLE_OPTIONS = [
   { value: 'content', label: 'High Noise' },
   { value: 'style', label: 'Low Noise' },
   { value: 'gaussian', label: 'Gaussian' },
-  { value: 'gaussian_bimodal', label: 'Bimodal Gaussian' },
+  { value: 'gaussian_bimodal', label: 'Gaussian Bimodal' },
   { value: 'fixed_cycle', label: 'Fixed Cycle' },
 ];
 
@@ -22,7 +22,7 @@ const TIMESTEP_TYPE_OPTIONS = [
   { value: 'shift', label: 'Shift' },
   { value: 'weighted', label: 'Weighted' },
   { value: 'gaussian', label: 'Gaussian' },
-  { value: 'gaussian_bimodal', label: 'Bimodal Gaussian' },
+  { value: 'gaussian_bimodal', label: 'Gaussian Bimodal' },
 ];
 
 const TRAIN_PATH = 'config.process[0].train';
@@ -623,24 +623,25 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
               {datasets.map((d: { folder_path?: string; network_weight?: number }, i: number) => {
                 const name = folderNameFromPath(d.folder_path) || `Dataset ${i + 1}`;
                 return (
-                <div key={i} className="space-y-1 min-w-[100px]">
-                  <label className="block text-xs text-gray-500">Dataset {name}</label>
-                  <input
-                    type="number"
-                    min={1e-6}
-                    step="any"
-                    value={d.network_weight ?? 1}
-                    onChange={(e) => {
-                      const v = parseFloat(e.target.value);
-                      if (Number.isFinite(v) && v > 0) {
-                        setValue(v, `config.process[0].datasets[${i}].network_weight`);
-                        setApplyStatus('idle');
-                      }
-                    }}
-                    className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none"
-                  />
-                </div>
-              ); })}
+                  <div key={i} className="space-y-1 min-w-[100px]">
+                    <label className="block text-xs text-gray-500">Dataset {name}</label>
+                    <input
+                      type="number"
+                      min={1e-6}
+                      step="any"
+                      value={d.network_weight ?? 1}
+                      onChange={(e) => {
+                        const v = parseFloat(e.target.value);
+                        if (Number.isFinite(v) && v > 0) {
+                          setValue(v, `config.process[0].datasets[${i}].network_weight`);
+                          setApplyStatus('idle');
+                        }
+                      }}
+                      className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none"
+                    />
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}

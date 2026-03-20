@@ -530,7 +530,7 @@ export default function SimpleJob({
                       { value: 'shift', label: 'Shift' },
                       { value: 'weighted', label: 'Weighted' },
                       { value: 'gaussian', label: 'Gaussian' },
-                      { value: 'gaussian_bimodal', label: 'Bimodal Gaussian' },
+                      { value: 'gaussian_bimodal', label: 'Gaussian Bimodal' },
                     ]}
                   />
                 )}
@@ -545,7 +545,7 @@ export default function SimpleJob({
                     { value: 'content', label: 'High Noise' },
                     { value: 'style', label: 'Low Noise' },
                     { value: 'gaussian', label: 'Gaussian' },
-                    { value: 'gaussian_bimodal', label: 'Bimodal Gaussian' },
+                    { value: 'gaussian_bimodal', label: 'Gaussian Bimodal' },
                     { value: 'fixed_cycle', label: 'Fixed Cycle' },
                   ]}
                 />
@@ -670,7 +670,7 @@ export default function SimpleJob({
               </div>
               <div>
                 {disableSections.includes('train.diff_output_preservation') ||
-                disableSections.includes('train.blank_prompt_preservation') ? null : (
+                  disableSections.includes('train.blank_prompt_preservation') ? null : (
                   <FormGroup label="Regularization">
                     <></>
                   </FormGroup>

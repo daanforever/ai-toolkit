@@ -132,7 +132,7 @@ const docs: { [key: string]: ConfigDoc } = {
       <>
         When loading audio to match the number of frames requested, this option will preserve the pitch of the audio if
         the length does not match training target. It is recommended to have a dataset that matches your target length,
-        as this option can add sound distortions. 
+        as this option can add sound distortions.
       </>
     ),
   },
@@ -291,10 +291,10 @@ const docs: { [key: string]: ConfigDoc } = {
     title: 'BPP Probability',
     description: (
       <>
-        Controls how often the Blank Prompt Preservation check runs during training. 
-        Value between 0.0 and 1.0. Default is 1.0 (runs every step). 
-        Setting to 0.1 means BPP runs ~10% of steps, reducing training time by up to 45% 
-        while still preventing model degradation. Lower values give the model more freedom 
+        Controls how often the Blank Prompt Preservation check runs during training.
+        Value between 0.0 and 1.0. Default is 1.0 (runs every step).
+        Setting to 0.1 means BPP runs ~10% of steps, reducing training time by up to 45%
+        while still preventing model degradation. Lower values give the model more freedom
         to adapt to new concepts between BPP corrections. Recommended: 0.1-0.2 for Turbo models.
       </>
     ),
@@ -317,7 +317,7 @@ const docs: { [key: string]: ConfigDoc } = {
         <br />
         • <code>gaussian_std</code> (default 0.2): Spread in normalized [0, 1] space. Smaller = narrower focus, larger = wider coverage.
         <br />
-        <b>Bimodal Gaussian</b>: Set <code>content_or_style</code> and/or <code>timestep_type</code> to <code>gaussian_bimodal</code>. Mixture of two truncated normals with equal weight (50/50). Use <code>gaussian_mean</code>, <code>gaussian_std</code> for the first peak and <code>gaussian_mean_2</code>, <code>gaussian_std_2</code> (defaults 750, 0.2) for the second.
+        <b>Gaussian Bimodal</b>: Set <code>content_or_style</code> and/or <code>timestep_type</code> to <code>gaussian_bimodal</code>. Mixture of two truncated normals with equal weight (50/50). Use <code>gaussian_mean</code>, <code>gaussian_std</code> for the first peak and <code>gaussian_mean_2</code>, <code>gaussian_std_2</code> (defaults 750, 0.2) for the second.
         <br />
         • <code>timestep_bias_exponent</code> (default 3.0): Controls the cubic bias exponent for content/style timestep distribution. Higher values create stronger bias toward edges (early timesteps for content, late timesteps for style). Lower values create more uniform distribution.
         <br /><br />
@@ -383,7 +383,7 @@ const docs: { [key: string]: ConfigDoc } = {
     description: (
       <>
         Number of Repeats will allow you to repeate the items in a dataset multiple times. This is useful when you are using multiple
-        datasets and want to balance the number of samples from each dataset. For instance, if you have a small dataset of 10 images 
+        datasets and want to balance the number of samples from each dataset. For instance, if you have a small dataset of 10 images
         and a large dataset of 100 images, you can set the small dataset to have 10 repeats to effectively make it 100 images, making
         the two datasets occour equally during training.
       </>
