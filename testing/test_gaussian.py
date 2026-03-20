@@ -8,7 +8,7 @@ import torch
 # Add project root to sys.path for `import toolkit...` when running tests from repo root.
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from toolkit.timestep_sampler import TimestepSampler
+from toolkit.timestep_sampler import TimestepSampler, allowed_slot_index_range
 from extensions_built_in.sd_trainer.gaussian_timestep_weights import (
     evaluate_gaussian_timestep,
     evaluate_gaussian_timestep_bimodal,
@@ -217,6 +217,38 @@ def test_evaluate_gaussian_clamps_timestep_values_to_grid():
     assert torch.isclose(w[2], w_full[250])
     assert torch.isclose(w[3], w_full[ntt - 1])
     assert torch.isclose(w[4], w_full[ntt - 1])
+
+
+def test_allowed_slot_index_range_min_denoising_zero_clamps_hi():
+    assert allowed_slot_index_range(1000, 0, 999) == (1, 999)
+    assert allowed_slot_index_range(1000, 1, 999) == (1, 999)
+
+
+def test_gaussian_bimodal_min_denoising_steps_zero_no_oob():
+    """min_denoising_steps=0 used to extend arange to index ntt; must not crash or OOB."""
+    torch.manual_seed(0)
+    ntt = 1000
+    sched = torch.linspace(1000, 1, ntt, dtype=torch.float32)
+    noise_scheduler = _DummyNoiseScheduler(sched)
+    train_config = _DummyTrainConfig()
+    train_config.gaussian_mean = 300.0
+    train_config.gaussian_std = 0.2
+    train_config.gaussian_mean_2 = 800.0
+    train_config.gaussian_std_2 = 0.2
+    train_config.num_train_timesteps = ntt
+    sampler = TimestepSampler(train_config, noise_scheduler)
+    result = sampler.sample(
+        batch_size=128,
+        latents=torch.empty((128, 1), device=torch.device("cpu")),
+        content_or_style="gaussian_bimodal",
+        min_noise_steps=0,
+        max_noise_steps=999,
+        num_train_timesteps=ntt,
+        device=torch.device("cpu"),
+        step_num=0,
+    )
+    assert torch.isfinite(result.timesteps).all()
+    assert (result.timesteps >= sched[-1]).all() and (result.timesteps <= sched[0]).all()
 
 
 def test_timestep_sampler_gaussian_bimodal_narrow_window_stays_in_bounds():

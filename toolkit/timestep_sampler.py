@@ -15,6 +15,32 @@ from extensions_built_in.sd_trainer.gaussian_timestep_weights import (
 )
 
 
+def allowed_slot_index_range(
+    num_train_timesteps: int,
+    min_noise_steps: int,
+    max_noise_steps: int,
+) -> tuple[int, int]:
+    """
+    Inclusive scheduler slot bounds [lo, hi] for indices into `noise_scheduler.timesteps`.
+
+    `min_denoising_steps` / `max_denoising_steps` map to slot indices via the same
+    formulas as historical code, but `hi` is clamped to `num_train_timesteps - 1` so
+    `min_denoising_steps == 0` never produces an out-of-range index (previously
+    `ntt - 0 == ntt`, invalid for 0-based timesteps of length `ntt`).
+    """
+    ntt = int(num_train_timesteps)
+    last = ntt - 1
+    if last < 0:
+        return 0, 0
+    lo = ntt - int(max_noise_steps)
+    hi = ntt - int(min_noise_steps)
+    lo = max(0, min(lo, last))
+    hi = max(0, min(hi, last))
+    if lo > hi:
+        lo = hi
+    return lo, hi
+
+
 @dataclass
 class TimestepSamplerResult:
     """Result of timestep sampling: final timesteps and optional indices (None for fixed_cycle)."""
@@ -135,17 +161,15 @@ class TimestepSampler:
                 * self.train_config.num_train_timesteps
             )
 
+        lo, hi = allowed_slot_index_range(ntt, min_noise_steps, max_noise_steps)
         timestep_indices = value_map(
             timestep_indices,
             0,
             ntt,
-            ntt - max_noise_steps,
-            ntt - min_noise_steps,
+            lo,
+            hi,
         )
-        timestep_indices = timestep_indices.long().clamp(
-            ntt - max_noise_steps,
-            ntt - min_noise_steps,
-        )
+        timestep_indices = timestep_indices.long().clamp(lo, hi)
         timestep_indices.sort()
         return timestep_indices
 
@@ -158,8 +182,9 @@ class TimestepSampler:
         num_train_timesteps: int,
     ) -> torch.Tensor:
         ntt = self.train_config.num_train_timesteps
-        allowed_start = ntt - max_noise_steps
-        allowed_end = ntt - min_noise_steps
+        allowed_start, allowed_end = allowed_slot_index_range(
+            ntt, min_noise_steps, max_noise_steps
+        )
         all_indices = torch.arange(
             allowed_start, allowed_end + 1, device=latents.device, dtype=torch.long
         )
@@ -186,8 +211,9 @@ class TimestepSampler:
         num_train_timesteps: int,
     ) -> torch.Tensor:
         ntt = self.train_config.num_train_timesteps
-        allowed_start = ntt - max_noise_steps
-        allowed_end = ntt - min_noise_steps
+        allowed_start, allowed_end = allowed_slot_index_range(
+            ntt, min_noise_steps, max_noise_steps
+        )
         all_indices = torch.arange(
             allowed_start, allowed_end + 1, device=latents.device, dtype=torch.long
         )
