@@ -59,8 +59,16 @@ def main():
         metavar="N-M",
         help="Step range: N-M (inclusive) or M (0-M). Example: 10-50 or 100",
     )
+    parser.add_argument(
+        "--only",
+        type=str,
+        default=None,
+        metavar="metric_name",
+        help="Extract only a single scalar series by tag name.",
+    )
     args = parser.parse_args()
     step_range = args.range
+    only_metric = args.only
 
     event_path = os.path.abspath(args.event_file)
     if not os.path.isfile(event_path):
@@ -85,6 +93,15 @@ def main():
         print("No scalars found in the event file.", file=sys.stderr)
         out_data = {}
     else:
+        if only_metric is not None:
+            if only_metric not in scalar_tags:
+                print(
+                    f"Warning: metric tag not found: {only_metric}",
+                    file=sys.stderr,
+                )
+                scalar_tags = []
+            else:
+                scalar_tags = [only_metric]
         out_data = {}
         min_step, max_step = step_range if step_range else (None, None)
         for tag in scalar_tags:
