@@ -539,6 +539,169 @@ class SDTrainer(BaseSDTrainProcess):
 
         return output, batch.tensor.to(self.device_torch, dtype=get_torch_dtype(self.train_config.dtype))
 
+    def _apply_flow_timestep_element_weights(self, loss: torch.Tensor, timesteps: torch.Tensor) -> torch.Tensor:
+        do_weighted_timesteps = False
+        if self.sd.is_flow_matching:
+            if self.train_config.linear_timesteps or self.train_config.linear_timesteps2:
+                do_weighted_timesteps = True
+            if self.train_config.timestep_type == "weighted":
+                # use the noise scheduler to get the weights for the timesteps
+                do_weighted_timesteps = True
+
+        timestep_weight_for_logging = None
+
+        # handle linear timesteps and only adjust the weight of the timesteps
+        if do_weighted_timesteps:
+            # calculate the weights for the timesteps
+            timestep_weight = self.sd.noise_scheduler.get_weights_for_timesteps(
+                timesteps,
+                v2=self.train_config.linear_timesteps2,
+                timestep_type=self.train_config.timestep_type
+            ).to(loss.device, dtype=loss.dtype)
+            if len(loss.shape) == 4:
+                timestep_weight = timestep_weight.view(-1, 1, 1, 1).detach()
+            elif len(loss.shape) == 5:
+                timestep_weight = timestep_weight.view(-1, 1, 1, 1, 1).detach()
+            loss = loss * timestep_weight
+            timestep_weight_for_logging = timestep_weight
+        elif self.train_config.timestep_type == "gaussian":
+            ntt = self.sd.noise_scheduler.config.num_train_timesteps
+            schedule = self.sd.noise_scheduler.timesteps
+            # Gaussian weights are indexed by slot id (0..ntt-1), not by raw
+            # scheduler timestep values. When the schedule values differ from
+            # their slot indices (e.g. FlowMatch), we must map values back
+            # to slot ids before doing table lookup in evaluate_gaussian_timestep.
+            cache_id = getattr(self, "_gaussian_schedule_cache_id", None)
+            if cache_id != id(schedule):
+                setattr(self, "_gaussian_schedule_cache_id", id(schedule))
+                setattr(
+                    self,
+                    "_gaussian_schedule_aligned",
+                    scheduler_timesteps_align_with_index_grid(schedule, ntt),
+                )
+            schedule_aligned = getattr(self, "_gaussian_schedule_aligned", True)
+            timesteps_for_lookup = (
+                timestep_values_to_slot_indices(timesteps, schedule, ntt=ntt)
+                if not schedule_aligned
+                else timesteps
+            )
+            timestep_weight = evaluate_gaussian_timestep(
+                timesteps_for_lookup,
+                self.train_config.gaussian_mean,
+                self.train_config.gaussian_std,
+                loss.device,
+                loss.dtype,
+                ntt,
+                noise_scheduler_timesteps=schedule,
+            )
+            if len(loss.shape) == 4:
+                timestep_weight = timestep_weight.view(-1, 1, 1, 1).detach()
+            elif len(loss.shape) == 5:
+                timestep_weight = timestep_weight.view(-1, 1, 1, 1, 1).detach()
+            loss = loss * timestep_weight
+            timestep_weight_for_logging = timestep_weight
+        elif self.train_config.timestep_type == "gaussian_bimodal":
+            ntt = self.sd.noise_scheduler.config.num_train_timesteps
+            schedule = self.sd.noise_scheduler.timesteps
+            cache_id = getattr(self, "_gaussian_schedule_cache_id", None)
+            if cache_id != id(schedule):
+                setattr(self, "_gaussian_schedule_cache_id", id(schedule))
+                setattr(
+                    self,
+                    "_gaussian_schedule_aligned",
+                    scheduler_timesteps_align_with_index_grid(schedule, ntt),
+                )
+            schedule_aligned = getattr(self, "_gaussian_schedule_aligned", True)
+            timesteps_for_lookup = (
+                timestep_values_to_slot_indices(timesteps, schedule, ntt=ntt)
+                if not schedule_aligned
+                else timesteps
+            )
+            timestep_weight = evaluate_gaussian_timestep_bimodal(
+                timesteps_for_lookup,
+                self.train_config.gaussian_mean,
+                self.train_config.gaussian_std,
+                self.train_config.gaussian_mean_2,
+                self.train_config.gaussian_std_2,
+                loss.device,
+                loss.dtype,
+                ntt,
+                noise_scheduler_timesteps=schedule,
+            )
+            if len(loss.shape) == 4:
+                timestep_weight = timestep_weight.view(-1, 1, 1, 1).detach()
+            elif len(loss.shape) == 5:
+                timestep_weight = timestep_weight.view(-1, 1, 1, 1, 1).detach()
+            loss = loss * timestep_weight
+            timestep_weight_for_logging = timestep_weight
+        elif self.train_config.content_or_style == 'fixed_cycle' and self.train_config.fixed_cycle_weight_peak_timesteps:
+            # fixed_cycle: weight loss by Gaussian peaks at fixed_cycle_weight_peak_timesteps (e.g. 500, 375), mean-normalized
+            peaks = self.train_config.fixed_cycle_weight_peak_timesteps
+            sigma = self.train_config.fixed_cycle_weight_sigma
+            peaks_t = torch.tensor(peaks, device=timesteps.device, dtype=timesteps.dtype)
+            diff = timesteps.unsqueeze(1).float() - peaks_t.unsqueeze(0)
+            weight_per_timestep = torch.exp(-(diff / sigma) ** 2).max(dim=1)[0]
+            cycle_ts = torch.tensor(self.train_config.fixed_cycle_timesteps, device=timesteps.device, dtype=timesteps.dtype)
+            diff_cycle = cycle_ts.unsqueeze(1).float() - peaks_t.unsqueeze(0)
+            mean_w = torch.exp(-(diff_cycle / sigma) ** 2).max(dim=1)[0].mean().clamp(min=1e-8)
+            timestep_weight = (weight_per_timestep / mean_w).to(loss.device, dtype=loss.dtype)
+            if len(loss.shape) == 4:
+                timestep_weight = timestep_weight.view(-1, 1, 1, 1).detach()
+            elif len(loss.shape) == 5:
+                timestep_weight = timestep_weight.view(-1, 1, 1, 1, 1).detach()
+            loss = loss * timestep_weight
+            timestep_weight_for_logging = timestep_weight
+
+        if self.writer is not None and self.accelerator.is_main_process:
+            log_timestep_weights(
+                self.writer,
+                self.step_num,
+                timesteps,
+                timestep_weight_for_logging,
+                log_every=getattr(self.logging_config, "log_every", None),
+            )
+
+        return loss
+
+    def _aggregate_flow_matching_mse_loss(
+            self,
+            pred: torch.Tensor,
+            target: torch.Tensor,
+            timesteps: torch.Tensor,
+            mask_multiplier: Union[torch.Tensor, float],
+            noise_pred: torch.Tensor,
+            prior_pred: Optional[torch.Tensor],
+            batch: 'DataLoaderBatchDTO',
+    ) -> torch.Tensor:
+        loss = torch.nn.functional.mse_loss(pred.float(), target.float(), reduction="none")
+        loss = self._apply_flow_timestep_element_weights(loss, timesteps)
+
+        if self.train_config.do_prior_divergence and prior_pred is not None:
+            loss = loss + (torch.nn.functional.mse_loss(pred.float(), prior_pred.float(), reduction="none") * -1.0)
+
+        if self.train_config.train_turbo:
+            mask_multiplier = mask_multiplier[:, 3:, :, :]
+            mask_multiplier = torch.nn.functional.interpolate(
+                mask_multiplier, size=(pred.shape[2], pred.shape[3]), mode='nearest'
+            )
+
+        try:
+            if len(noise_pred.shape) == 5:
+                mask_multiplier = mask_multiplier.unsqueeze(2)
+                mask_multiplier = mask_multiplier.repeat(1, 1, noise_pred.shape[2], 1, 1)
+            loss = loss * mask_multiplier
+        except Exception as e:
+            print("Could not apply mask multiplier to loss")
+            print(e)
+            pass
+
+        if len(noise_pred.shape) == 5:
+            loss = loss.mean([1, 2, 3, 4])
+        else:
+            loss = loss.mean([1, 2, 3])
+
+        return loss
+
     # you can expand these in a child class to make customization easier
     def calculate_loss(
             self,
@@ -840,149 +1003,45 @@ class SDTrainer(BaseSDTrainProcess):
                 # the way this loss works, it is low, increase it to match predictable LR effects
                 loss = loss * 10.0
             else:
-                loss = torch.nn.functional.mse_loss(pred.float(), target.float(), reduction="none")
-                
-            do_weighted_timesteps = False
-            if self.sd.is_flow_matching:
-                if self.train_config.linear_timesteps or self.train_config.linear_timesteps2:
-                    do_weighted_timesteps = True
-                if self.train_config.timestep_type == "weighted":
-                    # use the noise scheduler to get the weights for the timesteps
-                    do_weighted_timesteps = True
-
-            timestep_weight_for_logging = None
-
-            # handle linear timesteps and only adjust the weight of the timesteps
-            if do_weighted_timesteps:
-                # calculate the weights for the timesteps
-                timestep_weight = self.sd.noise_scheduler.get_weights_for_timesteps(
+                loss = self._aggregate_flow_matching_mse_loss(
+                    pred,
+                    target,
                     timesteps,
-                    v2=self.train_config.linear_timesteps2,
-                    timestep_type=self.train_config.timestep_type
-                ).to(loss.device, dtype=loss.dtype)
-                if len(loss.shape) == 4:
-                    timestep_weight = timestep_weight.view(-1, 1, 1, 1).detach()
-                elif len(loss.shape) == 5:
-                    timestep_weight = timestep_weight.view(-1, 1, 1, 1, 1).detach()
-                loss = loss * timestep_weight
-                timestep_weight_for_logging = timestep_weight
-            elif self.train_config.timestep_type == "gaussian":
-                ntt = self.sd.noise_scheduler.config.num_train_timesteps
-                schedule = self.sd.noise_scheduler.timesteps
-                # Gaussian weights are indexed by slot id (0..ntt-1), not by raw
-                # scheduler timestep values. When the schedule values differ from
-                # their slot indices (e.g. FlowMatch), we must map values back
-                # to slot ids before doing table lookup in evaluate_gaussian_timestep.
-                cache_id = getattr(self, "_gaussian_schedule_cache_id", None)
-                if cache_id != id(schedule):
-                    setattr(self, "_gaussian_schedule_cache_id", id(schedule))
-                    setattr(
-                        self,
-                        "_gaussian_schedule_aligned",
-                        scheduler_timesteps_align_with_index_grid(schedule, ntt),
-                    )
-                schedule_aligned = getattr(self, "_gaussian_schedule_aligned", True)
-                timesteps_for_lookup = (
-                    timestep_values_to_slot_indices(timesteps, schedule, ntt=ntt)
-                    if not schedule_aligned
-                    else timesteps
-                )
-                timestep_weight = evaluate_gaussian_timestep(
-                    timesteps_for_lookup,
-                    self.train_config.gaussian_mean,
-                    self.train_config.gaussian_std,
-                    loss.device,
-                    loss.dtype,
-                    ntt,
-                    noise_scheduler_timesteps=schedule,
-                )
-                if len(loss.shape) == 4:
-                    timestep_weight = timestep_weight.view(-1, 1, 1, 1).detach()
-                elif len(loss.shape) == 5:
-                    timestep_weight = timestep_weight.view(-1, 1, 1, 1, 1).detach()
-                loss = loss * timestep_weight
-                timestep_weight_for_logging = timestep_weight
-            elif self.train_config.timestep_type == "gaussian_bimodal":
-                ntt = self.sd.noise_scheduler.config.num_train_timesteps
-                schedule = self.sd.noise_scheduler.timesteps
-                cache_id = getattr(self, "_gaussian_schedule_cache_id", None)
-                if cache_id != id(schedule):
-                    setattr(self, "_gaussian_schedule_cache_id", id(schedule))
-                    setattr(
-                        self,
-                        "_gaussian_schedule_aligned",
-                        scheduler_timesteps_align_with_index_grid(schedule, ntt),
-                    )
-                schedule_aligned = getattr(self, "_gaussian_schedule_aligned", True)
-                timesteps_for_lookup = (
-                    timestep_values_to_slot_indices(timesteps, schedule, ntt=ntt)
-                    if not schedule_aligned
-                    else timesteps
-                )
-                timestep_weight = evaluate_gaussian_timestep_bimodal(
-                    timesteps_for_lookup,
-                    self.train_config.gaussian_mean,
-                    self.train_config.gaussian_std,
-                    self.train_config.gaussian_mean_2,
-                    self.train_config.gaussian_std_2,
-                    loss.device,
-                    loss.dtype,
-                    ntt,
-                    noise_scheduler_timesteps=schedule,
-                )
-                if len(loss.shape) == 4:
-                    timestep_weight = timestep_weight.view(-1, 1, 1, 1).detach()
-                elif len(loss.shape) == 5:
-                    timestep_weight = timestep_weight.view(-1, 1, 1, 1, 1).detach()
-                loss = loss * timestep_weight
-                timestep_weight_for_logging = timestep_weight
-            elif self.train_config.content_or_style == 'fixed_cycle' and self.train_config.fixed_cycle_weight_peak_timesteps:
-                # fixed_cycle: weight loss by Gaussian peaks at fixed_cycle_weight_peak_timesteps (e.g. 500, 375), mean-normalized
-                peaks = self.train_config.fixed_cycle_weight_peak_timesteps
-                sigma = self.train_config.fixed_cycle_weight_sigma
-                peaks_t = torch.tensor(peaks, device=timesteps.device, dtype=timesteps.dtype)
-                diff = timesteps.unsqueeze(1).float() - peaks_t.unsqueeze(0)
-                weight_per_timestep = torch.exp(-(diff / sigma) ** 2).max(dim=1)[0]
-                cycle_ts = torch.tensor(self.train_config.fixed_cycle_timesteps, device=timesteps.device, dtype=timesteps.dtype)
-                diff_cycle = cycle_ts.unsqueeze(1).float() - peaks_t.unsqueeze(0)
-                mean_w = torch.exp(-(diff_cycle / sigma) ** 2).max(dim=1)[0].mean().clamp(min=1e-8)
-                timestep_weight = (weight_per_timestep / mean_w).to(loss.device, dtype=loss.dtype)
-                if len(loss.shape) == 4:
-                    timestep_weight = timestep_weight.view(-1, 1, 1, 1).detach()
-                elif len(loss.shape) == 5:
-                    timestep_weight = timestep_weight.view(-1, 1, 1, 1, 1).detach()
-                loss = loss * timestep_weight
-                timestep_weight_for_logging = timestep_weight
-
-            if self.writer is not None and self.accelerator.is_main_process:
-                log_timestep_weights(
-                    self.writer,
-                    self.step_num,
-                    timesteps,
-                    timestep_weight_for_logging,
-                    log_every=getattr(self.logging_config, "log_every", None),
+                    mask_multiplier,
+                    noise_pred,
+                    prior_pred,
+                    batch,
                 )
 
-        if self.train_config.do_prior_divergence and prior_pred is not None:
-            loss = loss + (torch.nn.functional.mse_loss(pred.float(), prior_pred.float(), reduction="none") * -1.0)
+            if self.train_config.loss_type in ("mae", "wavelet", "stepped"):
+                loss = self._apply_flow_timestep_element_weights(loss, timesteps)
 
-        if self.train_config.train_turbo:
-            mask_multiplier = mask_multiplier[:, 3:, :, :]
-            # resize to the size of the loss
-            mask_multiplier = torch.nn.functional.interpolate(mask_multiplier, size=(pred.shape[2], pred.shape[3]), mode='nearest')
+        if loss.dim() > 1:
+            if self.train_config.do_prior_divergence and prior_pred is not None:
+                loss = loss + (torch.nn.functional.mse_loss(pred.float(), prior_pred.float(), reduction="none") * -1.0)
 
-        # multiply by our mask
-        try:
+            if self.train_config.train_turbo:
+                mask_multiplier = mask_multiplier[:, 3:, :, :]
+                # resize to the size of the loss
+                mask_multiplier = torch.nn.functional.interpolate(mask_multiplier, size=(pred.shape[2], pred.shape[3]), mode='nearest')
+
+            # multiply by our mask
+            try:
+                if len(noise_pred.shape) == 5:
+                    # video B,C,T,H,W
+                    mask_multiplier = mask_multiplier.unsqueeze(2)  # add time dimension back for video
+                    mask_multiplier = mask_multiplier.repeat(1, 1, noise_pred.shape[2], 1, 1)
+                loss = loss * mask_multiplier
+            except Exception as e:
+                # todo handle mask with video models
+                print("Could not apply mask multiplier to loss")
+                print(e)
+                pass
+
             if len(noise_pred.shape) == 5:
-                # video B,C,T,H,W
-                mask_multiplier = mask_multiplier.unsqueeze(2)  # add time dimension back for video
-                mask_multiplier = mask_multiplier.repeat(1, 1, noise_pred.shape[2], 1, 1)
-            loss = loss * mask_multiplier
-        except Exception as e:
-            # todo handle mask with video models
-            print("Could not apply mask multiplier to loss")
-            print(e)
-            pass
+                loss = loss.mean([1, 2, 3, 4])
+            else:
+                loss = loss.mean([1, 2, 3])
 
         prior_loss = None
         if self.train_config.inverted_mask_prior and prior_pred is not None and prior_mask_multiplier is not None:
@@ -1005,10 +1064,6 @@ class SDTrainer(BaseSDTrainProcess):
                 # loss = loss + prior_loss
                 # loss = loss + prior_loss
             # loss = loss + prior_loss
-        if len(noise_pred.shape) == 5:
-            loss = loss.mean([1, 2, 3, 4])
-        else:
-            loss = loss.mean([1, 2, 3])
 
         # Log files with high loss for debugging
         if is_debug_enabled() and batch.file_items is not None:

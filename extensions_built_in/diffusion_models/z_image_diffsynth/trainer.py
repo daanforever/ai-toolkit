@@ -4,6 +4,20 @@ from toolkit.extension import Extension
 from extensions_built_in.sd_trainer.DiffusionTrainer import DiffusionTrainer
 
 
+def _read_use_diffsynth_training_loop_from_config(config) -> bool:
+    use_diffsynth_training_loop = True
+    if isinstance(config, dict):
+        try:
+            model_cfg = config.get("model", {}) or {}
+            model_kwargs = model_cfg.get("model_kwargs", {}) or {}
+            use_diffsynth_training_loop = model_kwargs.get(
+                "use_diffsynth_training_loop", True
+            )
+        except Exception:
+            use_diffsynth_training_loop = True
+    return bool(use_diffsynth_training_loop)
+
+
 class ZImageDiffSynthTrainer(DiffusionTrainer):
     """
     Trainer for Z-Image DiffSynth (arch zimage_diffsynth).
@@ -21,24 +35,9 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
 
         tc = self.train_config
 
-        # Decide whether to use the original DiffSynth training loop behaviour.
-        # Default is True for backwards compatibility; when model_kwargs contains
-        # use_diffsynth_training_loop: false we fall back to the generic toolkit
-        # behaviour (respect timestep_type, content_or_style, SNR settings, etc.).
-        use_diffsynth_training_loop = True
         cfg = getattr(self, "config", None)
-        if isinstance(cfg, dict):
-            try:
-                # self.config is the current process config (one element of job config.process).
-                model_cfg = cfg.get("model", {}) or {}
-                model_kwargs = model_cfg.get("model_kwargs", {}) or {}
-                use_diffsynth_training_loop = model_kwargs.get(
-                    "use_diffsynth_training_loop", True
-                )
-            except Exception:
-                # On any unexpected shape, keep the default (True) so existing
-                # configs and smoke tests remain unchanged.
-                use_diffsynth_training_loop = True
+        use_diffsynth_training_loop = _read_use_diffsynth_training_loop_from_config(cfg)
+        self.use_diffsynth_training_loop = use_diffsynth_training_loop
 
         # Always train Z-Image in flow-matching mode with 1000 train timesteps.
         # We let ZImageDiffSynthModel.get_train_scheduler() provide the actual
@@ -54,7 +53,13 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
 
             # Let our FlowMatch scheduler control weighting; keep timesteps linear.
             tc.timestep_type = "linear"
-            tc.linear_timesteps = False
+            # True: keeps train_config aligned with DiffSynth-style timestep weights (same family as
+            # Z-Image.sh / FlowMatchSFTLoss). In the usual MSE path, weights are applied inside
+            # ZImageDiffSynthTrainer._aggregate_flow_matching_mse_loss → aggregate_flow_matching_mse_diffsynth
+            # (get_weights_for_timesteps, then multiply per batch after spatial mean)—not only via SDTrainer._apply.
+            # If we fall back to super()._aggregate_flow_matching_mse_loss (e.g. do_prior_divergence), SDTrainer
+            # uses _apply_flow_timestep_element_weights, which also keys off linear_timesteps for flow matching.
+            tc.linear_timesteps = True
             tc.linear_timesteps2 = False
 
             # Disable SNR re-weighting — DiffSynth already applies its own weighting.
@@ -82,6 +87,57 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
         sd = getattr(self, "sd", None)
         if sd is not None and hasattr(sd, "is_flow_matching"):
             sd.is_flow_matching = True
+
+    def _aggregate_flow_matching_mse_loss(
+        self,
+        pred,
+        target,
+        timesteps,
+        mask_multiplier,
+        noise_pred,
+        prior_pred,
+        batch,
+    ):
+        if not self.use_diffsynth_training_loop:
+            return super()._aggregate_flow_matching_mse_loss(
+                pred,
+                target,
+                timesteps,
+                mask_multiplier,
+                noise_pred,
+                prior_pred,
+                batch,
+            )
+        if self.train_config.do_prior_divergence and prior_pred is not None:
+            return super()._aggregate_flow_matching_mse_loss(
+                pred,
+                target,
+                timesteps,
+                mask_multiplier,
+                noise_pred,
+                prior_pred,
+                batch,
+            )
+        from . import diffsynth_training as dst
+
+        w = self.sd.noise_scheduler.get_weights_for_timesteps(
+            timesteps,
+            v2=self.train_config.linear_timesteps2,
+            timestep_type=self.train_config.timestep_type,
+        )
+        return dst.aggregate_flow_matching_mse_diffsynth(
+            pred,
+            target,
+            timesteps,
+            w,
+            mask_multiplier,
+            noise_pred,
+            train_turbo=self.train_config.train_turbo,
+            log_writer=self.writer,
+            step_num=self.step_num,
+            is_main_process=self.accelerator.is_main_process,
+            log_every=getattr(self.logging_config, "log_every", None),
+        )
 
 
 class ZImageDiffSynthTrainerExtension(Extension):

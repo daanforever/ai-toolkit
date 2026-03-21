@@ -557,12 +557,16 @@ def main():
             # 7a. Default behaviour (no flag or flag True): must hard-wire DiffSynth config.
             trainer = ZImageDiffSynthTrainer(0, None, {})
             tc = trainer.train_config
+            assert getattr(trainer, "use_diffsynth_training_loop", None) is True, (
+                "trainer.use_diffsynth_training_loop must mirror model.model_kwargs default True"
+            )
             # After trainer init, config must be hard-wired for DiffSynth Z-Image.
             assert tc.noise_scheduler is None, "trainer must leave noise_scheduler=None to use model.get_train_scheduler()"
             assert tc.num_train_timesteps == 1000, "num_train_timesteps must default to 1000"
             assert tc.loss_type == "mse", "loss_type must be mse when use_diffsynth_training_loop is True/default"
             assert tc.timestep_type == "linear", "timestep_type must be linear when use_diffsynth_training_loop is True/default"
-            assert tc.linear_timesteps is False, "linear_timesteps must be False when use_diffsynth_training_loop is True/default"
+            # Enables get_weights_for_timesteps / DiffSynth linear_timesteps_weights (Z-Image.sh); YAML override when flag True.
+            assert tc.linear_timesteps is True, "linear_timesteps must be True when use_diffsynth_training_loop is True/default"
             assert tc.linear_timesteps2 is False, "linear_timesteps2 must be False when use_diffsynth_training_loop is True/default"
             assert tc.snr_gamma is None, "snr_gamma must be disabled (None) when use_diffsynth_training_loop is True/default"
             assert tc.min_snr_gamma is None, "min_snr_gamma must be disabled (None) when use_diffsynth_training_loop is True/default"
@@ -579,6 +583,7 @@ def main():
             }
             trainer2 = ZImageDiffSynthTrainer(0, None, cfg_with_flag)
             tc2 = trainer2.train_config
+            assert getattr(trainer2, "use_diffsynth_training_loop", None) is False
             assert tc2.noise_scheduler == "flowmatch", "trainer must set noise_scheduler='flowmatch' in toolkit-loop mode (use_diffsynth_training_loop=False)"
             assert tc2.num_train_timesteps == 1000, "num_train_timesteps must still default to 1000 when use_diffsynth_training_loop is False"
             # From _fake_init defaults: loss_type/timestep_type remain None, linear_timesteps* and SNR flags unchanged.

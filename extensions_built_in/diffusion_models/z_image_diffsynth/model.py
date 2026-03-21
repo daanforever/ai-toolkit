@@ -18,6 +18,7 @@ from toolkit.util.debug import memory_debug, is_debug_enabled
 from . import loader as loader_mod
 from . import forward as forward_mod
 from . import prompt_encoding as prompt_encoding_mod
+from . import diffsynth_training as diffsynth_training_mod
 from . import sampling as sampling_mod
 from . import lora as lora_mod
 from .vae_wrapper import DiffSynthVAEWrapper
@@ -409,6 +410,20 @@ class ZImageDiffSynthModel(BaseModel):
                     pass
                 else:
                     raise
+        use_diffsynth_loop = True
+        try:
+            mk = getattr(self.model_config, "model_kwargs", {}) or {}
+            use_diffsynth_loop = mk.get("use_diffsynth_training_loop", True)
+        except Exception:
+            use_diffsynth_loop = True
+        if use_diffsynth_loop:
+            return diffsynth_training_mod.encode_prompt_diffsynth_literal_t2i(
+                tok,
+                te,
+                prompt,
+                self.device_torch,
+                dtype=torch.float32,
+            )
         return prompt_encoding_mod.encode_prompt(
             tok,
             te,

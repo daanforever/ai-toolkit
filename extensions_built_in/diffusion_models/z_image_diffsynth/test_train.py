@@ -660,6 +660,7 @@ def _train_lora(work_root: Path, dataset_dir: Path, model_path: str, sampling_pa
                         "arch": "zimage_diffsynth",
                         "low_vram": False,
                         "model_kwargs": {
+                            # Toolkit loop: trainer.use_diffsynth_training_loop False; gaussian timestep sampling in train section.
                             "use_diffsynth_training_loop": False,
                             "disable_noise_refiner": False,
                             "disable_context_refiner": False,
