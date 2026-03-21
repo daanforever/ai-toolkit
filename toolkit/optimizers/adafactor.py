@@ -170,9 +170,9 @@ class Adafactor(torch.optim.Optimizer):
             "scale_parameter": scale_parameter,
             "relative_step": relative_step,
             "warmup_init": warmup_init,
+            "warmup_steps": warmup_steps,
             "min_lr": min_lr,
             "lr_smoothing_rate": lr_smoothing_rate,
-            "warmup_steps": warmup_steps,
             "factored": factored,
             "emergency_brake": emergency_brake,
             "instability_score": 0.0,  # cumulative instability tracking for soft brake
@@ -199,11 +199,10 @@ class Adafactor(torch.optim.Optimizer):
         # Increment/decrement applied to group-level saddle-point score per step.
         self._saddle_point_step = float(saddle_point_step)
 
-        # Store LR limits, lr_smoothing_rate, rms_max_decay_rate and lr so they can be reapplied after load_state_dict (restart with new config).
-        self._min_lr = min_lr
-        self._lr_smoothing_rate = lr_smoothing_rate
-        self._rms_max_decay_rate = rms_max_decay_rate
+        # Store LR limits, rms_max_decay_rate and lr so they can be reapplied after load_state_dict (restart with new config).
         self._lr = lr
+        self._min_lr = min_lr
+        self._rms_max_decay_rate = rms_max_decay_rate
         self._warmup_init = warmup_init
         self._warmup_steps = warmup_steps
         self._beta1 = beta1
@@ -284,16 +283,20 @@ class Adafactor(torch.optim.Optimizer):
 
     def load_state_dict(self, state_dict):
         super().load_state_dict(state_dict)
-        # Apply current run's min_lr/lr_smoothing_rate/rms_max_decay_rate/lr so changed config is used after restart.
+        # Apply current run's min_lr, rms_max_decay_rate and lr so changed config is used after restart.
         for group in self.param_groups:
-            group["min_lr"] = max(group["eps"][0], self._min_lr)
-            group["lr"] = max(group["eps"][0], self._lr)
-            group["lr_smoothing_rate"] = self._lr_smoothing_rate
+            group["lr"] = self._lr
+            group["min_lr"] = self._min_lr
             group["rms_max_decay_rate"] = self._rms_max_decay_rate
             group["warmup_init"] = self._warmup_init
-            group["warmup_steps"] = self._warmup_steps
-            group["warmup_active"] = False
+            group["warmup_active"] = group.get("warmup_active", self._warmup_init)
+            group["warmup_target"] = group.get("warmup_target", self._lr)
+            group["warmup_steps"] = group.get("warmup_steps", self._warmup_steps)
+            group["warmup_steps_old"] = group.get("warmup_steps_old", self._warmup_steps)
             group["warmup_lr"] = group.get("warmup_lr", 0.0)
+            group["warmup_start"] = group.get("warmup_start", 0.0)
+            group["warmup_progress"] = group.get("warmup_progress", 0.0)
+            group["warmup_delta"] = group.get("warmup_delta", 0.0)
             group["beta1"] = self._beta1
             group["beta2"] = self._beta2
             group["emergency_brake"] = self._emergency_brake
@@ -346,7 +349,7 @@ class Adafactor(torch.optim.Optimizer):
         param_group["warmup_active"] = False
         for k in ("warmup_progress", "warmup_delta", "warmup_start", "warmup_lr"):
             param_group.pop(k, None)
-        # Keep warmup_target: _warmup_update_group uses it vs group["lr"] to detect set_lr; equals lr at segment end.
+
         if is_debug_enabled():
             print_acc(f"Adafactor: warmup stopped")
 
@@ -379,9 +382,9 @@ class Adafactor(torch.optim.Optimizer):
         present, else ``group["lr"] * eps[1]``. After ``warmup_steps`` updates, calls ``stop_warmup``.
         """
         lr_target = group["lr"]
-        lr_target_old = group["warmup_target"] if "warmup_target" in group else 0.0
+        lr_target_old = group.get("warmup_target", 0.0)
         warmup_steps = group["warmup_steps"]
-        warmup_steps_old = group.get("warmup_steps_old", 0)
+        warmup_steps_old = group.get("warmup_steps_old", warmup_steps)
 
         if self._scheduled_lr_changed(lr_target, lr_target_old) or warmup_steps != warmup_steps_old:
             if "warmup_lr" in group:
