@@ -289,14 +289,6 @@ class Adafactor(torch.optim.Optimizer):
             group["min_lr"] = self._min_lr
             group["rms_max_decay_rate"] = self._rms_max_decay_rate
             group["warmup_init"] = self._warmup_init
-            group["warmup_active"] = group.get("warmup_active", self._warmup_init)
-            group["warmup_target"] = group.get("warmup_target", self._lr)
-            group["warmup_steps"] = group.get("warmup_steps", self._warmup_steps)
-            group["warmup_steps_old"] = group.get("warmup_steps_old", self._warmup_steps)
-            group["warmup_lr"] = group.get("warmup_lr", 0.0)
-            group["warmup_start"] = group.get("warmup_start", 0.0)
-            group["warmup_progress"] = group.get("warmup_progress", 0.0)
-            group["warmup_delta"] = group.get("warmup_delta", 0.0)
             group["beta1"] = self._beta1
             group["beta2"] = self._beta2
             group["emergency_brake"] = self._emergency_brake
@@ -309,6 +301,10 @@ class Adafactor(torch.optim.Optimizer):
             # Ensure saddle-point keys exist for backward compatibility.
             group["saddle_point_score"] = float(group.get("saddle_point_score", 0.0))
             group["saddle_point_detected"] = False
+
+            if group.get("warmup_active", False):
+               self.stop_warmup(group)
+
         # Normalize state from old checkpoints: update_rms_max/update_rms must be tensors for step().
         for group in self.param_groups:
             for param in group["params"]:
@@ -344,15 +340,6 @@ class Adafactor(torch.optim.Optimizer):
             if total_parameters >= target_parameters:
                 break
 
-    @staticmethod
-    def stop_warmup(param_group):
-        param_group["warmup_active"] = False
-        for k in ("warmup_progress", "warmup_delta", "warmup_start", "warmup_lr"):
-            param_group.pop(k, None)
-
-        if is_debug_enabled():
-            print_acc(f"Adafactor: warmup stopped")
-
     def set_warmup_steps(self, value: int) -> None:
         """Update warmup_steps at runtime (e.g. from UI)."""
         self._warmup_steps = value
@@ -370,9 +357,18 @@ class Adafactor(torch.optim.Optimizer):
             self._warmup_update_group(group)
 
     @staticmethod
-    def _scheduled_lr_changed(new_lr: float, old_lr: float) -> bool:
+    def scheduled_lr_changed(new_lr: float, old_lr: float) -> bool:
         """True if scheduled group lr should be treated as changed (``math.isclose`` with fixed tolerances)."""
         return not math.isclose(new_lr, old_lr, rel_tol=1e-7, abs_tol=1e-12)
+
+    @staticmethod
+    def stop_warmup(param_group):
+        param_group["warmup_active"] = False
+        for k in ("warmup_progress", "warmup_delta", "warmup_start", "warmup_lr"):
+            param_group.pop(k, None)
+
+        if is_debug_enabled():
+            print_acc(f"Adafactor: warmup stopped")
 
     def _warmup_update_group(self, group) -> None:
         """Advance group warmup by one optimizer step.
@@ -384,9 +380,9 @@ class Adafactor(torch.optim.Optimizer):
         lr_target = group["lr"]
         lr_target_old = group.get("warmup_target", 0.0)
         warmup_steps = group["warmup_steps"]
-        warmup_steps_old = group.get("warmup_steps_old", warmup_steps)
+        warmup_steps_old = group.get("warmup_steps_old", 0)
 
-        if self._scheduled_lr_changed(lr_target, lr_target_old) or warmup_steps != warmup_steps_old:
+        if self.scheduled_lr_changed(lr_target, lr_target_old) or warmup_steps != warmup_steps_old:
             if "warmup_lr" in group:
                 lr_start = group["warmup_lr"]
             else:
@@ -395,7 +391,7 @@ class Adafactor(torch.optim.Optimizer):
             group["warmup_start"]     = lr_start
             group["warmup_target"]    = lr_target
             group["warmup_active"]    = True
-            group["warmup_progress"]  = 0.0
+            group["warmup_progress"]  = 0
             group["warmup_delta"]     = (lr_target - lr_start) / warmup_steps
             group["warmup_steps_old"] = warmup_steps
 
