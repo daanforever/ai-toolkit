@@ -57,9 +57,18 @@ class Adafactor(torch.optim.Optimizer):
         relative_step (`bool`, *optional*, defaults to `False`):
             If True, time-dependent learning rate is computed instead of external learning rate
         warmup_init (`bool`, *optional*, defaults to `False`):
-            Time-dependent learning rate computation depends on whether warm-up initialization is being used
+            When True, the group learning rate `lr` is approached smoothly: one interpolation segment per change of
+            `lr`, progress tracked once per group per step (see `_global_lr`). Works with both `relative_step=True` and
+            manual mode (`relative_step=False`). If `lr` changes during a segment (e.g. via `set_lr`), a new segment
+            starts from the current interpolated level toward the new `lr` (up or down). Runtime toggling of
+            `warmup_init` is not supported.
+        warmup_steps (`int`, *optional*, defaults to `100`):
+            When `warmup_init=True`, number of optimizer steps to interpolate each warmup segment from its start
+            toward `lr`. Progress is advanced once per group per `step()` (see `_warmup_update_group`).
         min_lr (`float`, *optional*, defaults to `1e-6`):
-            Minimum learning rate multiplier for warmup phase when `warmup_init=True` and `relative_step=True`.
+            Minimum learning rate multiplier used in the relative-step formula when `relative_step=True` (also affects
+            warmup only indirectly through that formula). When `warmup_init=True` and `relative_step=False`, smoothing
+            applies to group `lr` before scale/relative multipliers.
         lr_smoothing_rate (`float`, *optional*, defaults to `100.0`):
             Divisor for the smoothing scale in step-to-step learning rate smoothing in `_smooth_lr`.
             Larger values yield stronger smoothing (smaller step-to-step LR changes).
@@ -171,11 +180,11 @@ class Adafactor(torch.optim.Optimizer):
         super().__init__(params, defaults)
 
         for group in self.param_groups:
-            group["base_lr_previous"] = 0.0
             group["scale_parameter"] = scale_parameter
             group["relative_step"] = relative_step
             group["warmup_init"] = warmup_init
             group["warmup_steps"] = warmup_steps
+            group["warmup_active"] = False
             group["factored"] = factored
             group["emergency_brake"] = emergency_brake
             group["saddle_point_score"] = 0.0
@@ -283,24 +292,16 @@ class Adafactor(torch.optim.Optimizer):
             group["rms_max_decay_rate"] = self._rms_max_decay_rate
             group["warmup_init"] = self._warmup_init
             group["warmup_steps"] = self._warmup_steps
+            group["warmup_active"] = False
+            group["warmup_lr"] = group.get("warmup_lr", 0.0)
             group["beta1"] = self._beta1
             group["beta2"] = self._beta2
             group["emergency_brake"] = self._emergency_brake
             # Normalize group_rms_max if present (old checkpoints may not have it)
             if "group_rms_max" in group and not isinstance(group["group_rms_max"], torch.Tensor):
                 group["group_rms_max"] = torch.tensor(group["group_rms_max"], dtype=torch.float32)
-            restored_lr = None
-            for param in group["params"]:
-                if param in self.state and "lr_previous" in self.state[param]:
-                    lr_prev_val = self.state[param]["lr_previous"]
-                    restored_lr = lr_prev_val.item() if isinstance(lr_prev_val, torch.Tensor) else lr_prev_val
-                    break
-            group["base_lr_previous"] = restored_lr if restored_lr is not None else 0.0
             # Restore instability_score for soft brake continuity across restarts
             group["instability_score"] = group.get("instability_score", 0.0)
-            # Ensure warmup_target is initialized if warmup was active at checkpoint time
-            if group.get("warmup_active", False) and "warmup_target" not in group:
-                group["warmup_target"] = group["lr"]
 
             # Ensure saddle-point keys exist for backward compatibility.
             group["saddle_point_score"] = float(group.get("saddle_point_score", 0.0))
@@ -341,13 +342,11 @@ class Adafactor(torch.optim.Optimizer):
                 break
 
     @staticmethod
-    def stop_warmup(param_group, param_state=None):
+    def stop_warmup(param_group):
         param_group["warmup_active"] = False
-        if param_state is not None:
-            param_state.pop("warmup_delta", None)
-            param_state.pop("warmup_factor", None)
-            param_state.pop("warmup_start", None)
-        param_group.pop("warmup_target", None)
+        for k in ("warmup_progress", "warmup_delta", "warmup_start", "warmup_lr"):
+            param_group.pop(k, None)
+        # Keep warmup_target: _warmup_update_group uses it vs group["lr"] to detect set_lr; equals lr at segment end.
         if is_debug_enabled():
             print_acc(f"Adafactor: warmup stopped")
 
@@ -359,52 +358,90 @@ class Adafactor(torch.optim.Optimizer):
         if is_debug_enabled():
             print_acc(f"Adafactor: applied runtime warmup_steps={value}")
 
+    def _global_lr(self) -> None:
+        """Once per optimizer step: group-level warmup before any per-parameter _get_lr."""
+        groups = self.param_groups
+        if not groups or not groups[0].get("warmup_init"):
+            return
+        for group in groups:
+            self._warmup_update_group(group)
+
+    @staticmethod
+    def _scheduled_lr_changed(new_lr: float, old_lr: float) -> bool:
+        """True if scheduled group lr should be treated as changed (``math.isclose`` with fixed tolerances)."""
+        return not math.isclose(new_lr, old_lr, rel_tol=1e-7, abs_tol=1e-12)
+
+    def _warmup_update_group(self, group) -> None:
+        """Advance group warmup by one optimizer step.
+
+        Starts a new segment when ``group["lr"]`` or ``warmup_steps`` changes.
+        Segment: linear ramp stored in ``warmup_lr``; start level is prior ``warmup_lr`` if
+        present, else ``group["lr"] * eps[1]``. After ``warmup_steps`` updates, calls ``stop_warmup``.
+        """
+        lr_target = group["lr"]
+        lr_target_old = group["warmup_target"] if "warmup_target" in group else 0.0
+        warmup_steps = group["warmup_steps"]
+        warmup_steps_old = group.get("warmup_steps_old", 0)
+
+        if self._scheduled_lr_changed(lr_target, lr_target_old) or warmup_steps != warmup_steps_old:
+            if "warmup_lr" in group:
+                lr_start = group["warmup_lr"]
+            else:
+                lr_start = lr_target * group["eps"][1]
+
+            group["warmup_start"]     = lr_start
+            group["warmup_target"]    = lr_target
+            group["warmup_active"]    = True
+            group["warmup_progress"]  = 0.0
+            group["warmup_delta"]     = (lr_target - lr_start) / warmup_steps
+            group["warmup_steps_old"] = warmup_steps
+
+            if is_debug_enabled():
+                direction = "up" if lr_target > lr_target_old else "down"
+                print_acc(
+                    f"Adafactor: base_lr changed ({lr_start:.2e} -> {lr_target:.2e}, {direction}), starting warmup"
+                )
+
+        if not group.get("warmup_active", False):
+            return
+
+        warmup_start    = group["warmup_start"]
+        warmup_progress = group["warmup_progress"]
+        warmup_delta    = group["warmup_delta"]
+        warmup_steps    = group["warmup_steps"]
+
+        group["warmup_lr"] = warmup_start + warmup_progress * warmup_delta
+        group["warmup_progress"]  += 1
+
+        if group["warmup_progress"] >= warmup_steps:
+            self.stop_warmup(group)
+
     def _get_lr(self, param_group, param_state):
         """
         Compute per-parameter learning rate.
 
         Manual mode (relative_step=False):
-          Returns group["lr"]. If scale_parameter=True, multiplies by max(eps1, param_rms).
+          Group lr before scale/relative may be warmup_lr when warmup_init=True; see _global_lr.
+          If scale_parameter=True, multiplies by max(eps1, param_rms).
 
         Adaptive mode (relative_step=True):
-
-        Warmup (warmup_init=True, requires relative_step=True):
+          Same group-lr handling; additional relative LR factors from gradients and group statistics.
 
         Returns:
             float: learning rate for this parameter
         """
         # Extract LR config parameters
-        base_lr    = param_group["lr"]              # Maximum (cap) learning rate
+        if "warmup_lr" in param_group:
+            base_lr = param_group["warmup_lr"]
+        else:
+            base_lr = param_group["lr"]
+
         min_lr     = param_group["min_lr"]          # Minimum learning rate
         eps0       = param_group["eps"][0]          # Small constant for numerical stability (division guard)
         eps1       = param_group["eps"][1]          # Parameter scale regularization constant
         param_rms  = param_state["RMS"].item()      # Current parameter RMS magnitude
         scale      = 1.0                            # Default scale for LR
         relative   = 1.0                            # Default relative for LR
-        warmup     = 1.0                            # Default warmup for LR
-
-        # Initialize warmup_active on first use if not present
-        if "warmup_active" not in param_group:
-            param_group["warmup_active"] = param_group["warmup_init"]
-
-        # Track base_lr changes and activate warmup for both increase and decrease
-        base_lr_prev = param_group.get("base_lr_previous", 0.0)
-        if base_lr != base_lr_prev and param_group["warmup_init"]:
-            # Get current effective LR (what was actually applied last step)
-            # This ensures smooth transition from current interpolated LR, not from old target
-            current_effective_lr = param_state.get("lr_previous", base_lr_prev)
-
-            param_state["warmup_start"] = current_effective_lr
-            param_group["warmup_target"] = base_lr
-            param_group["warmup_active"] = True
-            param_state.pop("warmup_factor", None)
-            param_state.pop("warmup_delta", None)
-            if is_debug_enabled():
-                direction = "up" if base_lr > base_lr_prev else "down"
-                print_acc(
-                    f"Adafactor: base_lr changed ({current_effective_lr:.2e} -> {base_lr:.2e}, {direction}), starting warmup"
-                )
-        param_group["base_lr_previous"] = base_lr
 
         if param_group["scale_parameter"]:
             # Scale LR by parameter magnitude for better adaptation to parameter scale
@@ -442,33 +479,6 @@ class Adafactor(torch.optim.Optimizer):
 
             saddle_point_mult = 2.0 if param_group.get("saddle_point_detected", False) else 1.0
             relative = (1 + min_lr * ratio) * brake * soft_brake * saddle_point_mult
-
-        if param_group.get("warmup_active", False):
-            warmup_steps = param_group.get("warmup_steps", self._warmup_steps)
-            warmup_start = param_state.get("warmup_start", 0.0)
-            warmup_target = param_group.get("warmup_target", base_lr)
-
-            # Initialize warmup_factor: progress from 0.0 to 1.0
-            if "warmup_factor" not in param_state:
-                param_state["warmup_factor"] = 0.0
-                param_state["warmup_delta"] = 1.0 / max(1, warmup_steps)
-
-            warmup_factor = param_state["warmup_factor"]
-            delta = param_state["warmup_delta"]
-
-            # Increment warmup progress
-            new_warmup_factor = min(1.0, warmup_factor + delta)
-            param_state["warmup_factor"] = new_warmup_factor
-
-            # Interpolate base_lr from start to target
-            interpolated_base_lr = warmup_start + new_warmup_factor * (warmup_target - warmup_start)
-
-            # Stop warmup when factor reaches 1.0
-            if new_warmup_factor >= 1.0:
-                self.stop_warmup(param_group, param_state)
-                base_lr = warmup_target
-            else:
-                base_lr = interpolated_base_lr
 
         new_lr = base_lr * scale * relative
 
@@ -656,6 +666,8 @@ class Adafactor(torch.optim.Optimizer):
         # Detect RMS(parameter) stagnation from previous steps.
         current_rms = self.get_avg_param_rms_ema()
         self._detect_saddle_point(current_rms)
+
+        self._global_lr()
 
         for group in self.param_groups:
             # Decay group_rms_max once per step
