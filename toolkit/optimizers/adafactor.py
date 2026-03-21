@@ -302,7 +302,8 @@ class Adafactor(torch.optim.Optimizer):
             group["saddle_point_score"] = float(group.get("saddle_point_score", 0.0))
             group["saddle_point_detected"] = False
 
-            if group.get("warmup_active", False):
+            # stop warmup if it is not active
+            if not group.get("warmup_active", False):
                self.stop_warmup(group)
 
         # Normalize state from old checkpoints: update_rms_max/update_rms must be tensors for step().
