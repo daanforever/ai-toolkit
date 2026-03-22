@@ -1956,7 +1956,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 dir_consistency = 0.0  # Directional consistency with EMA (Adafactor with momentum)
                 dir_consistency_mean = 0.0  # Mean directional consistency per group (Adafactor emergency brake)
                 instability_score = 0.0  # Soft brake cumulative instability score per group (Adafactor emergency brake)
-                saddle_point_score = 0.0  # RMS(parameter) stagnation heuristic score (Adafactor)
+                saddle_point_boost = 1.0  # RMS stagnation LR multiplier on relative_step (Adafactor)
                 step_efficiency = 0.0  # Step efficiency: update_rms / update_rms_max (Adafactor)
                 dynamic_gain = 0.0  # Dynamic gain (Adafactor)
                 beta1 = 0.0  # Momentum coefficient (Adafactor)
@@ -1993,8 +1993,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         dir_consistency_mean = optimizer.get_mean_dir_consistency()
                     if hasattr(optimizer, 'get_avg_instability_score'):
                         instability_score = optimizer.get_avg_instability_score()
-                    if hasattr(optimizer, 'get_avg_saddle_point_score'):
-                        saddle_point_score = optimizer.get_avg_saddle_point_score()
+                    if hasattr(optimizer, 'get_avg_saddle_point_boost'):
+                        saddle_point_boost = optimizer.get_avg_saddle_point_boost()
                     if hasattr(optimizer, 'get_avg_step_efficiency'):
                         step_efficiency = optimizer.get_avg_step_efficiency()
                     if hasattr(optimizer, 'get_avg_dynamic_gain'):
@@ -2094,7 +2094,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                             self.writer.add_scalar(f"train/dir_consistency", dir_consistency, self.step_num)
                                             self.writer.add_scalar(f"train/dir_consistency_mean", dir_consistency_mean, self.step_num)
                                             self.writer.add_scalar(f"train/instability_score", instability_score, self.step_num)
-                                            self.writer.add_scalar(f"train/saddle_point_score", saddle_point_score, self.step_num)
+                                            self.writer.add_scalar(f"train/saddle_point_boost", saddle_point_boost, self.step_num)
                                             self.writer.add_scalar(f"train/step_efficiency", step_efficiency, self.step_num)
                                             self.writer.add_scalar(f"train/dynamic_gain", dynamic_gain, self.step_num)
                                             self.writer.add_scalar(f"train/beta1", beta1, self.step_num)
@@ -2150,7 +2150,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                             })
 
                             self.logger.log({
-                                'train/saddle_point_score': saddle_point_score,
+                                'train/saddle_point_boost': saddle_point_boost,
                             })
 
                             self.logger.log({
@@ -2219,7 +2219,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                             })
 
                             self.logger.log({
-                                'train/saddle_point_score': saddle_point_score,
+                                'train/saddle_point_boost': saddle_point_boost,
                             })
 
                             self.logger.log({
