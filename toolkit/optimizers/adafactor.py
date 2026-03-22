@@ -384,8 +384,8 @@ class Adafactor(torch.optim.Optimizer):
         warmup_steps_old = group.get("warmup_steps_old", 0)
 
         if self.scheduled_lr_changed(lr_target, lr_target_old) or warmup_steps != warmup_steps_old:
-            if "warmup_lr" in group:
-                lr_start = group["warmup_lr"]
+            if "warmup_target" in group:
+                lr_start = group["warmup_target"]
             else:
                 lr_start = lr_target * group["eps"][1]
 
