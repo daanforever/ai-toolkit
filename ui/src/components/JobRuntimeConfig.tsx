@@ -103,11 +103,27 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
   const showGaussianPeak2 =
     contentOrStyle === 'gaussian_bimodal' || timestepType === 'gaussian_bimodal';
   const showFixedCycle = contentOrStyle === 'fixed_cycle';
-  const fixedCycleTimestepsRaw = trainAny?.fixed_cycle_timesteps;
-  const fixedCycleTimestepsStr =
-    Array.isArray(fixedCycleTimestepsRaw) && fixedCycleTimestepsRaw.length > 0
-      ? (fixedCycleTimestepsRaw as number[]).join(', ')
-      : DEFAULT_FIXED_CYCLE_TIMESTEPS_STR;
+  const [fixedCycleTimestepsInput, setFixedCycleTimestepsInput] = useState(() => {
+    const p = parseJobConfig(job.job_config);
+    const t = p?.config?.process?.[0]?.train as Record<string, unknown> | undefined;
+    const raw = t?.fixed_cycle_timesteps;
+    if (Array.isArray(raw) && raw.length > 0) {
+      return (raw as number[]).join(', ');
+    }
+    return DEFAULT_FIXED_CYCLE_TIMESTEPS_STR;
+  });
+
+  useEffect(() => {
+    const p = parseJobConfig(job.job_config);
+    const t = p?.config?.process?.[0]?.train as Record<string, unknown> | undefined;
+    const raw = t?.fixed_cycle_timesteps;
+    if (Array.isArray(raw) && raw.length > 0) {
+      setFixedCycleTimestepsInput((raw as number[]).join(', '));
+    } else {
+      setFixedCycleTimestepsInput(DEFAULT_FIXED_CYCLE_TIMESTEPS_STR);
+    }
+  }, [job.job_config]);
+
   const fixedCyclePeaksRaw = trainAny?.fixed_cycle_weight_peak_timesteps;
   const fixedCycleWeightPeaksStr =
     Array.isArray(fixedCyclePeaksRaw) && fixedCyclePeaksRaw.length > 0
@@ -203,7 +219,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     (process.logging as Record<string, boolean>).debug = debug;
 
     if (contentOrStyle === 'fixed_cycle') {
-      const tsArr = fixedCycleTimestepsStr
+      const tsArr = fixedCycleTimestepsInput
         .split(',')
         .map((s) => parseFloat(s.trim()))
         .filter((n) => !Number.isNaN(n));
@@ -362,7 +378,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     debug,
     datasets,
     onRefresh,
-    fixedCycleTimestepsStr,
+    fixedCycleTimestepsInput,
     fixedCycleWeightPeaksStr,
     fixedCycleSeedStr,
     fixedCycleWeightSigma,
@@ -649,16 +665,9 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
               <input
                 type="text"
                 placeholder={DEFAULT_FIXED_CYCLE_TIMESTEPS_STR}
-                value={fixedCycleTimestepsStr}
+                value={fixedCycleTimestepsInput}
                 onChange={(e) => {
-                  const arr = e.target.value
-                    .split(',')
-                    .map((s) => parseFloat(s.trim()))
-                    .filter((n) => !Number.isNaN(n));
-                  setValue(
-                    arr.length > 0 ? arr : [],
-                    `${TRAIN_PATH}.fixed_cycle_timesteps`
-                  );
+                  setFixedCycleTimestepsInput(e.target.value);
                   setApplyStatus('idle');
                 }}
                 className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
