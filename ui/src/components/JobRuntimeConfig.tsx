@@ -110,11 +110,9 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
       : DEFAULT_FIXED_CYCLE_TIMESTEPS_STR;
   const fixedCyclePeaksRaw = trainAny?.fixed_cycle_weight_peak_timesteps;
   const fixedCycleWeightPeaksStr =
-    fixedCyclePeaksRaw == null
-      ? DEFAULT_FIXED_CYCLE_WEIGHT_PEAKS_STR
-      : Array.isArray(fixedCyclePeaksRaw) && fixedCyclePeaksRaw.length > 0
-        ? (fixedCyclePeaksRaw as number[]).join(', ')
-        : '';
+    Array.isArray(fixedCyclePeaksRaw) && fixedCyclePeaksRaw.length > 0
+      ? (fixedCyclePeaksRaw as number[]).join(', ')
+      : '';
   const fixedCycleSeedStr =
     trainAny?.fixed_cycle_seed != null && trainAny.fixed_cycle_seed !== ''
       ? String(trainAny.fixed_cycle_seed)
