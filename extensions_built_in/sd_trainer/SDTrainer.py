@@ -659,6 +659,7 @@ class SDTrainer(BaseSDTrainProcess):
                 timesteps,
                 timestep_weight_for_logging,
                 log_every=getattr(self.logging_config, "log_every", None),
+                logger=self.logger,
             )
 
         return loss

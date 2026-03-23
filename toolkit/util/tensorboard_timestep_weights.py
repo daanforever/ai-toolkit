@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 
@@ -78,6 +78,7 @@ def log_timestep_weights(
     timestep_weights: Optional[torch.Tensor] = None,
     log_every: Optional[int] = None,
     default_weight: float = 1.0,
+    logger: Optional[Any] = None,
 ) -> None:
     """
     Log batch timesteps and per-sample loss weights to TensorBoard.
@@ -119,5 +120,9 @@ def log_timestep_weights(
 
     _log_batch_stats(writer, "sampled_diffusion_timesteps", t, step_num)
     _log_batch_stats(writer, "per_sample_loss_weights", w, step_num)
+
+    if logger is not None:
+        logger.log({"train/timesteps/mean": t.float().mean().item()})
+        logger.log({"train/timestep_weights/mean": w.float().mean().item()})
 
     _log_timestep_weight_heatmap(writer, t, w, step_num)
