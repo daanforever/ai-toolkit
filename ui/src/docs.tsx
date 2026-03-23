@@ -321,7 +321,7 @@ const docs: { [key: string]: ConfigDoc } = {
         <br />
         • <code>timestep_bias_exponent</code> (default 3.0): Controls the cubic bias exponent for content/style timestep distribution. Higher values create stronger bias toward edges (early timesteps for content, late timesteps for style). Lower values create more uniform distribution.
         <br /><br />
-        <b>Fixed Cycle</b>: Deterministic cycle over a fixed list of timestep values. Same step number always gets the same timestep, so training is reproducible. Recommended for distilled/Turbo models (e.g. Z-Image-Turbo LoRA) that are sensitive to random timestep sampling. Configure via YAML: <code>fixed_cycle_timesteps</code>, <code>fixed_cycle_seed</code>, <code>fixed_cycle_weight_peak_timesteps</code>.
+        <b>Fixed Cycle</b>: Deterministic cycle over a fixed list of timestep values. Same step number always gets the same timestep, so training is reproducible. Recommended for distilled/Turbo models (e.g. Z-Image-Turbo LoRA) that are sensitive to random timestep sampling. Configure via YAML: <code>fixed_cycle_timesteps</code>, <code>fixed_cycle_seed</code>, <code>fixed_cycle_weight_peak_timesteps</code>. With <code>content_or_style: fixed_cycle</code>, you can also adjust these from the job <b>Runtime config</b> UI (same pattern as Gaussian runtime fields).
       </>
     ),
   },
@@ -331,7 +331,7 @@ const docs: { [key: string]: ConfigDoc } = {
       <>
         Used when <code>content_or_style</code> is <code>fixed_cycle</code>. List of timestep values (scheduler scale, typically 0–1000) to cycle through deterministically. At step <code>s</code>, the whole batch uses <code>fixed_cycle_timesteps[s % length]</code> (after optional shuffle by <code>fixed_cycle_seed</code>). Values are snapped to the nearest scheduler timestep.
         <br /><br />
-        Default: <code>[999, 875, 750, 625, 500, 375, 250, 125]</code>. Set in config file (e.g. YAML) as an array of numbers.
+        Default: <code>[999, 875, 750, 625, 500, 375, 250, 125]</code>. Set in config file (e.g. YAML) as an array of numbers, or change at runtime from <b>Runtime config</b> when using Fixed Cycle.
       </>
     ),
   },

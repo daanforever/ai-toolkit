@@ -9,7 +9,7 @@ from toolkit.accelerator import unwrap_model
 from toolkit.data_loader import get_dataloader_datasets
 from toolkit.print import print_acc
 from toolkit.util.debug import is_debug_enabled
-from typing import Literal, Optional
+from typing import List, Literal, Optional, Tuple
 import threading
 import time
 import signal
@@ -57,6 +57,14 @@ class DiffusionTrainer(SDTrainer):
             self._last_applied_runtime_sample_every = None
             self._last_applied_runtime_min_snr_gamma = None
             self._last_applied_runtime_debug = None
+            self._last_applied_runtime_fc_key: Optional[
+                Tuple[
+                    Optional[Tuple[float, ...]],
+                    Optional[int],
+                    Optional[Tuple[float, ...]],
+                    Optional[float],
+                ]
+            ] = None
             # Initialize the status
             self._run_async_operation(self._update_status("running", "Starting"))
             self._stop_watcher_started = False
@@ -819,6 +827,136 @@ class DiffusionTrainer(SDTrainer):
         if is_debug_enabled():
             print_acc(f"\nruntime network_weights from UI/DB applied: {list(weights_tuple)}")
 
+    def _reset_fixed_cycle_sampling_cache(self) -> None:
+        """Invalidate TimestepSampler fixed_cycle resolution after timesteps/seed change."""
+        bp = getattr(self, "_batch_processor", None)
+        if bp is None:
+            return
+        sampler = getattr(bp, "_timestep_sampler", None)
+        if sampler is not None:
+            sampler.reset_cache()
+
+    def get_runtime_fixed_cycle_params(self):
+        """
+        Read fixed-cycle runtime columns from DB.
+        Returns (timesteps, seed, weight_peak_timesteps, weight_sigma); each None if missing/invalid.
+        weight_peak_timesteps may be [] when DB stores empty JSON array.
+        """
+        if not self.is_ui_trainer:
+            return (None, None, None, None)
+
+        def _parse_json_float_list(raw, min_length: int) -> Optional[List[float]]:
+            if raw is None or (isinstance(raw, str) and raw.strip() == ""):
+                return None
+            try:
+                s = raw if isinstance(raw, str) else str(raw)
+                parsed = json.loads(s)
+                if not isinstance(parsed, list):
+                    return None
+                out: List[float] = []
+                for x in parsed:
+                    if not isinstance(x, (int, float)):
+                        return None
+                    v = float(x)
+                    if v != v or abs(v) == float("inf") or v < 0.0 or v > 1000.0:
+                        return None
+                    out.append(v)
+                if len(out) < min_length:
+                    return None
+                return out
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return None
+
+        def _read():
+            try:
+                with self._db_connect() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "SELECT runtime_fixed_cycle_timesteps, runtime_fixed_cycle_seed, "
+                        "runtime_fixed_cycle_weight_peak_timesteps, runtime_fixed_cycle_weight_sigma "
+                        "FROM RuntimeParams WHERE jobId = ?",
+                        (self.job_id,),
+                    )
+                    row = cursor.fetchone()
+                    if row is None:
+                        return (None, None, None, None)
+                    ts_raw, seed_raw, peaks_raw, sigma_raw = (
+                        row[0],
+                        row[1],
+                        row[2],
+                        row[3],
+                    )
+                    ts_p = _parse_json_float_list(ts_raw, min_length=1)
+                    peaks_p = _parse_json_float_list(peaks_raw, min_length=0)
+                    seed_p = int(seed_raw) if seed_raw is not None else None
+                    sigma_p = (
+                        float(sigma_raw) if sigma_raw is not None else None
+                    )
+                    return (ts_p, seed_p, peaks_p, sigma_p)
+            except sqlite3.OperationalError:
+                return (None, None, None, None)
+
+        return _read()
+
+    def apply_runtime_fixed_cycle_params(self):
+        """Apply runtime fixed-cycle fields from DB when Timestep Bias uses fixed_cycle (main or reg)."""
+        if not self.is_ui_trainer:
+            return
+        cos = self.train_config.content_or_style
+        cos_reg = getattr(self.train_config, "content_or_style_reg", cos)
+        if cos != "fixed_cycle" and cos_reg != "fixed_cycle":
+            return
+
+        ts_db, seed_db, peaks_db, sigma_db = self.get_runtime_fixed_cycle_params()
+        if (
+            ts_db is None
+            and seed_db is None
+            and peaks_db is None
+            and sigma_db is None
+        ):
+            return
+
+        fc_key = (
+            tuple(ts_db) if ts_db is not None else None,
+            seed_db,
+            tuple(peaks_db) if peaks_db is not None else None,
+            sigma_db,
+        )
+        if fc_key == self._last_applied_runtime_fc_key:
+            return
+
+        need_reset_cache = False
+        old_ts = tuple(self.train_config.fixed_cycle_timesteps or [])
+        old_seed = self.train_config.fixed_cycle_seed
+
+        if ts_db is not None:
+            new_ts = tuple(ts_db)
+            if new_ts != old_ts:
+                need_reset_cache = True
+            self.train_config.fixed_cycle_timesteps = list(ts_db)
+        if seed_db is not None:
+            if seed_db != old_seed:
+                need_reset_cache = True
+            self.train_config.fixed_cycle_seed = seed_db
+        if peaks_db is not None:
+            self.train_config.fixed_cycle_weight_peak_timesteps = (
+                list(peaks_db) if len(peaks_db) > 0 else None
+            )
+        if sigma_db is not None:
+            self.train_config.fixed_cycle_weight_sigma = sigma_db
+
+        self._last_applied_runtime_fc_key = fc_key
+        if need_reset_cache:
+            self._reset_fixed_cycle_sampling_cache()
+        if is_debug_enabled():
+            print_acc(
+                "\nruntime fixed_cycle from UI/DB: "
+                f"timesteps={self.train_config.fixed_cycle_timesteps}, "
+                f"seed={self.train_config.fixed_cycle_seed}, "
+                f"weight_peaks={self.train_config.fixed_cycle_weight_peak_timesteps}, "
+                f"weight_sigma={self.train_config.fixed_cycle_weight_sigma}"
+            )
+
     def clear_runtime_params(self):
         """Clear all runtime parameters from the RuntimeParams table for this job."""
         if not self.is_ui_trainer:
@@ -855,6 +993,7 @@ class DiffusionTrainer(SDTrainer):
         self._last_applied_runtime_sample_every = None
         self._last_applied_runtime_min_snr_gamma = None
         self._last_applied_runtime_debug = None
+        self._last_applied_runtime_fc_key = None
 
     async def _update_key(self, key, value):
         if not self.accelerator.is_main_process:
@@ -975,6 +1114,7 @@ class DiffusionTrainer(SDTrainer):
             self.apply_runtime_beta1()
             self.apply_runtime_beta2()
             self.apply_runtime_content_or_style()
+            self.apply_runtime_fixed_cycle_params()
             self.apply_runtime_timestep_type()
             self.apply_runtime_network_weights()
             self.apply_runtime_batch_size()

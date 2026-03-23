@@ -56,6 +56,10 @@ model RuntimeParams {
   runtime_content_or_style String?
   runtime_timestep_type    String?
   runtime_network_weights  String?
+  runtime_fixed_cycle_timesteps String?
+  runtime_fixed_cycle_seed Int?
+  runtime_fixed_cycle_weight_peak_timesteps String?
+  runtime_fixed_cycle_weight_sigma Float?
   runtime_batch_size       Int?
   runtime_gradient_accumulation Int?
   runtime_save_every       Int?

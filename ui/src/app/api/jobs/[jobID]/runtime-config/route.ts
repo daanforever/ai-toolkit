@@ -17,7 +17,7 @@ export async function PATCH(
     return NextResponse.json({ error: 'Job not found' }, { status: 404 });
   }
 
-  let body: { lr?: number; min_lr?: number; gaussian_mean?: number; gaussian_std?: number; gaussian_mean_2?: number; gaussian_std_2?: number; weight_decay?: number; beta1?: number | null; beta2?: number; content_or_style?: string; timestep_type?: string; network_weights?: number[]; batch_size?: number; gradient_accumulation?: number; save_every?: number; sample_every?: number; min_snr_gamma?: number; debug?: boolean };
+  let body: { lr?: number; min_lr?: number; gaussian_mean?: number; gaussian_std?: number; gaussian_mean_2?: number; gaussian_std_2?: number; fixed_cycle_timesteps?: number[]; fixed_cycle_seed?: number | null; fixed_cycle_weight_peak_timesteps?: number[] | null; fixed_cycle_weight_sigma?: number; weight_decay?: number; beta1?: number | null; beta2?: number; content_or_style?: string; timestep_type?: string; network_weights?: number[]; batch_size?: number; gradient_accumulation?: number; save_every?: number; sample_every?: number; min_snr_gamma?: number; debug?: boolean };
   try {
     body = await request.json();
   } catch {
@@ -30,7 +30,7 @@ export async function PATCH(
   const CONTENT_OR_STYLE_VALUES = ['balanced', 'content', 'style', 'gaussian', 'gaussian_bimodal', 'fixed_cycle'] as const;
   const TIMESTEP_TYPE_VALUES = ['sigmoid', 'linear', 'shift', 'weighted', 'gaussian', 'gaussian_bimodal'] as const;
 
-  const data: { runtime_lr?: number; runtime_min_lr?: number; runtime_gaussian_mean?: number; runtime_gaussian_std?: number; runtime_gaussian_mean_2?: number; runtime_gaussian_std_2?: number; runtime_weight_decay?: number; runtime_beta1?: number | null; runtime_beta2?: number; runtime_content_or_style?: string; runtime_timestep_type?: string; runtime_network_weights?: string; runtime_batch_size?: number; runtime_gradient_accumulation?: number; runtime_save_every?: number; runtime_sample_every?: number; runtime_min_snr_gamma?: number; runtime_debug?: boolean } = {};
+  const data: { runtime_lr?: number; runtime_min_lr?: number; runtime_gaussian_mean?: number; runtime_gaussian_std?: number; runtime_gaussian_mean_2?: number; runtime_gaussian_std_2?: number; runtime_fixed_cycle_timesteps?: string; runtime_fixed_cycle_seed?: number | null; runtime_fixed_cycle_weight_peak_timesteps?: string | null; runtime_fixed_cycle_weight_sigma?: number; runtime_weight_decay?: number; runtime_beta1?: number | null; runtime_beta2?: number; runtime_content_or_style?: string; runtime_timestep_type?: string; runtime_network_weights?: string; runtime_batch_size?: number; runtime_gradient_accumulation?: number; runtime_save_every?: number; runtime_sample_every?: number; runtime_min_snr_gamma?: number; runtime_debug?: boolean } = {};
 
   const lr = body.lr;
   if (lr !== undefined) {
@@ -96,6 +96,76 @@ export async function PATCH(
       );
     }
     data.runtime_gaussian_std_2 = gaussianStd2;
+  }
+
+  const fixedCycleTimesteps = body.fixed_cycle_timesteps;
+  if (fixedCycleTimesteps !== undefined) {
+    if (!Array.isArray(fixedCycleTimesteps) || fixedCycleTimesteps.length === 0) {
+      return NextResponse.json(
+        { error: 'fixed_cycle_timesteps must be a non-empty array of numbers' },
+        { status: 400 }
+      );
+    }
+    for (let i = 0; i < fixedCycleTimesteps.length; i++) {
+      const v = fixedCycleTimesteps[i];
+      if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 1000) {
+        return NextResponse.json(
+          { error: `fixed_cycle_timesteps[${i}] must be a finite number in [0, 1000]` },
+          { status: 400 }
+        );
+      }
+    }
+    data.runtime_fixed_cycle_timesteps = JSON.stringify(fixedCycleTimesteps);
+  }
+
+  const fixedCycleSeed = body.fixed_cycle_seed;
+  if (fixedCycleSeed !== undefined) {
+    if (fixedCycleSeed === null) {
+      data.runtime_fixed_cycle_seed = null;
+    } else {
+      if (typeof fixedCycleSeed !== 'number' || !Number.isFinite(fixedCycleSeed) || !Number.isInteger(fixedCycleSeed) || fixedCycleSeed < 0) {
+        return NextResponse.json(
+          { error: 'fixed_cycle_seed must be an integer in [0, +inf) or null' },
+          { status: 400 }
+        );
+      }
+      data.runtime_fixed_cycle_seed = fixedCycleSeed;
+    }
+  }
+
+  const fixedCycleWeightPeakTimesteps = body.fixed_cycle_weight_peak_timesteps;
+  if (fixedCycleWeightPeakTimesteps !== undefined) {
+    if (fixedCycleWeightPeakTimesteps === null) {
+      data.runtime_fixed_cycle_weight_peak_timesteps = null;
+    } else {
+      if (!Array.isArray(fixedCycleWeightPeakTimesteps)) {
+        return NextResponse.json(
+          { error: 'fixed_cycle_weight_peak_timesteps must be an array of numbers (or null)' },
+          { status: 400 }
+        );
+      }
+      for (let i = 0; i < fixedCycleWeightPeakTimesteps.length; i++) {
+        const v = fixedCycleWeightPeakTimesteps[i];
+        if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 1000) {
+          return NextResponse.json(
+            { error: `fixed_cycle_weight_peak_timesteps[${i}] must be a finite number in [0, 1000]` },
+            { status: 400 }
+          );
+        }
+      }
+      data.runtime_fixed_cycle_weight_peak_timesteps = JSON.stringify(fixedCycleWeightPeakTimesteps);
+    }
+  }
+
+  const fixedCycleWeightSigma = body.fixed_cycle_weight_sigma;
+  if (fixedCycleWeightSigma !== undefined) {
+    if (typeof fixedCycleWeightSigma !== 'number' || !Number.isFinite(fixedCycleWeightSigma) || fixedCycleWeightSigma <= 0) {
+      return NextResponse.json(
+        { error: 'fixed_cycle_weight_sigma must be a positive finite number' },
+        { status: 400 }
+      );
+    }
+    data.runtime_fixed_cycle_weight_sigma = fixedCycleWeightSigma;
   }
 
   const weightDecay = body.weight_decay;
@@ -244,7 +314,7 @@ export async function PATCH(
 
   if (Object.keys(data).length === 0) {
     return NextResponse.json(
-      { error: 'At least one of lr, min_lr, gaussian_mean, gaussian_std, gaussian_mean_2, gaussian_std_2, weight_decay, beta1, beta2, content_or_style, timestep_type, network_weights, batch_size, gradient_accumulation, save_every, sample_every, min_snr_gamma, debug must be provided' },
+      { error: 'At least one of lr, min_lr, gaussian_mean, gaussian_std, gaussian_mean_2, gaussian_std_2, fixed_cycle_timesteps, fixed_cycle_seed, fixed_cycle_weight_peak_timesteps, fixed_cycle_weight_sigma, weight_decay, beta1, beta2, content_or_style, timestep_type, network_weights, batch_size, gradient_accumulation, save_every, sample_every, min_snr_gamma, debug must be provided' },
       { status: 400 }
     );
   }

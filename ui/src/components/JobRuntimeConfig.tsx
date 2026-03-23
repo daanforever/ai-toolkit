@@ -28,6 +28,10 @@ const TIMESTEP_TYPE_OPTIONS = [
 const TRAIN_PATH = 'config.process[0].train';
 const OPTIMIZER_PARAMS_PATH = 'config.process[0].train.optimizer_params';
 
+const DEFAULT_FIXED_CYCLE_TIMESTEPS_STR =
+  '999, 875, 750, 625, 500, 375, 250, 125';
+const DEFAULT_FIXED_CYCLE_WEIGHT_PEAKS_STR = '500, 375';
+
 export interface JobRuntimeConfigProps {
   job: Job;
   onRefresh?: () => void;
@@ -98,6 +102,28 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     : 0.2;
   const showGaussianPeak2 =
     contentOrStyle === 'gaussian_bimodal' || timestepType === 'gaussian_bimodal';
+  const showFixedCycle = contentOrStyle === 'fixed_cycle';
+  const fixedCycleTimestepsRaw = trainAny?.fixed_cycle_timesteps;
+  const fixedCycleTimestepsStr =
+    Array.isArray(fixedCycleTimestepsRaw) && fixedCycleTimestepsRaw.length > 0
+      ? (fixedCycleTimestepsRaw as number[]).join(', ')
+      : DEFAULT_FIXED_CYCLE_TIMESTEPS_STR;
+  const fixedCyclePeaksRaw = trainAny?.fixed_cycle_weight_peak_timesteps;
+  const fixedCycleWeightPeaksStr =
+    fixedCyclePeaksRaw == null
+      ? DEFAULT_FIXED_CYCLE_WEIGHT_PEAKS_STR
+      : Array.isArray(fixedCyclePeaksRaw) && fixedCyclePeaksRaw.length > 0
+        ? (fixedCyclePeaksRaw as number[]).join(', ')
+        : '';
+  const fixedCycleSeedStr =
+    trainAny?.fixed_cycle_seed != null && trainAny.fixed_cycle_seed !== ''
+      ? String(trainAny.fixed_cycle_seed)
+      : '';
+  const fixedCycleWeightSigma =
+    trainAny?.fixed_cycle_weight_sigma != null &&
+    Number.isFinite(Number(trainAny.fixed_cycle_weight_sigma))
+      ? Number(trainAny.fixed_cycle_weight_sigma)
+      : 372.8;
   const batchSize = trainAny?.batch_size != null
     ? Number(trainAny.batch_size)
     : 1;
@@ -178,6 +204,53 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     }
     (process.logging as Record<string, boolean>).debug = debug;
 
+    if (contentOrStyle === 'fixed_cycle') {
+      const tsArr = fixedCycleTimestepsStr
+        .split(',')
+        .map((s) => parseFloat(s.trim()))
+        .filter((n) => !Number.isNaN(n));
+      if (tsArr.length === 0) {
+        setApplyStatus('error');
+        setErrorMessage(
+          'Fixed cycle timesteps must be a non-empty comma-separated list of numbers'
+        );
+        return;
+      }
+      const peaksArr = fixedCycleWeightPeaksStr.trim()
+        ? fixedCycleWeightPeaksStr
+            .split(',')
+            .map((s) => parseFloat(s.trim()))
+            .filter((n) => !Number.isNaN(n))
+        : [];
+      const peaksOut =
+        peaksArr.length > 0 ? peaksArr : null;
+      let seedOut: number | null = null;
+      if (fixedCycleSeedStr.trim() !== '') {
+        const s = parseInt(fixedCycleSeedStr.trim(), 10);
+        if (!Number.isInteger(s) || s < 0) {
+          setApplyStatus('error');
+          setErrorMessage(
+            'Fixed cycle seed must be a non-negative integer or empty'
+          );
+          return;
+        }
+        seedOut = s;
+      }
+      if (
+        !Number.isFinite(fixedCycleWeightSigma) ||
+        fixedCycleWeightSigma <= 0
+      ) {
+        setApplyStatus('error');
+        setErrorMessage('Fixed cycle weight sigma must be a positive number');
+        return;
+      }
+      const tr = process.train as Record<string, unknown>;
+      tr.fixed_cycle_timesteps = tsArr;
+      tr.fixed_cycle_weight_peak_timesteps = peaksOut;
+      tr.fixed_cycle_seed = seedOut;
+      tr.fixed_cycle_weight_sigma = fixedCycleWeightSigma;
+    }
+
     try {
       const postRes = await fetch('/api/jobs', {
         method: 'POST',
@@ -213,6 +286,10 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         sample_every?: number;
         min_snr_gamma?: number;
         debug?: boolean;
+        fixed_cycle_timesteps?: number[];
+        fixed_cycle_seed?: number | null;
+        fixed_cycle_weight_peak_timesteps?: number[] | null;
+        fixed_cycle_weight_sigma?: number;
       } = {
         weight_decay: weightDecay,
         beta1: beta1 === 0 ? null : beta1,
@@ -234,6 +311,15 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
       if (hasMinLr && minLr != null) patchBody.min_lr = minLr;
       if (process.datasets?.length) {
         patchBody.network_weights = process.datasets.map((d: { network_weight?: number }) => d.network_weight ?? 1);
+      }
+
+      if (contentOrStyle === 'fixed_cycle') {
+        const tr = process.train as Record<string, unknown>;
+        patchBody.fixed_cycle_timesteps = tr.fixed_cycle_timesteps as number[];
+        patchBody.fixed_cycle_weight_peak_timesteps = tr
+          .fixed_cycle_weight_peak_timesteps as number[] | null;
+        patchBody.fixed_cycle_seed = tr.fixed_cycle_seed as number | null;
+        patchBody.fixed_cycle_weight_sigma = tr.fixed_cycle_weight_sigma as number;
       }
 
       const patchRes = await fetch(`/api/jobs/${job.id}/runtime-config`, {
@@ -278,6 +364,10 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     debug,
     datasets,
     onRefresh,
+    fixedCycleTimestepsStr,
+    fixedCycleWeightPeaksStr,
+    fixedCycleSeedStr,
+    fixedCycleWeightSigma,
   ]);
 
   if (!initialConfig) {
@@ -545,6 +635,98 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
                 onChange={(e) => {
                   const v = parseFloat(e.target.value);
                   if (Number.isFinite(v)) setValue(v, `${TRAIN_PATH}.gaussian_std_2`);
+                  setApplyStatus('idle');
+                }}
+                className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+              />
+            </div>
+          </div>
+        ) : null}
+
+        {showFixedCycle ? (
+          <div className="space-y-4 rounded-lg border border-gray-700/60 bg-gray-800/30 p-4">
+            <p className="text-xs font-medium text-gray-300">Fixed cycle</p>
+            <div className="space-y-2">
+              <p className="text-xs text-gray-400">Fixed cycle timesteps</p>
+              <input
+                type="text"
+                placeholder={DEFAULT_FIXED_CYCLE_TIMESTEPS_STR}
+                value={fixedCycleTimestepsStr}
+                onChange={(e) => {
+                  const arr = e.target.value
+                    .split(',')
+                    .map((s) => parseFloat(s.trim()))
+                    .filter((n) => !Number.isNaN(n));
+                  setValue(
+                    arr.length > 0 ? arr : [],
+                    `${TRAIN_PATH}.fixed_cycle_timesteps`
+                  );
+                  setApplyStatus('idle');
+                }}
+                className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+              />
+            </div>
+            <div className="space-y-2">
+              <p className="text-xs text-gray-400">
+                Fixed cycle seed (optional)
+              </p>
+              <input
+                type="number"
+                min={0}
+                step={1}
+                placeholder="empty = no shuffle"
+                value={fixedCycleSeedStr}
+                onChange={(e) => {
+                  const v = e.target.value.trim();
+                  if (v === '') {
+                    setValue(null, `${TRAIN_PATH}.fixed_cycle_seed`);
+                  } else {
+                    const n = parseInt(v, 10);
+                    if (Number.isInteger(n) && n >= 0) {
+                      setValue(n, `${TRAIN_PATH}.fixed_cycle_seed`);
+                    }
+                  }
+                  setApplyStatus('idle');
+                }}
+                className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+              />
+            </div>
+            <div className="space-y-2">
+              <p className="text-xs text-gray-400">
+                Weight peak timesteps (optional, empty = off)
+              </p>
+              <input
+                type="text"
+                placeholder={DEFAULT_FIXED_CYCLE_WEIGHT_PEAKS_STR}
+                value={fixedCycleWeightPeaksStr}
+                onChange={(e) => {
+                  const arr = e.target.value
+                    .split(',')
+                    .map((s) => parseFloat(s.trim()))
+                    .filter((n) => !Number.isNaN(n));
+                  if (arr.length > 0) {
+                    setValue(arr, `${TRAIN_PATH}.fixed_cycle_weight_peak_timesteps`);
+                  } else {
+                    setValue(null, `${TRAIN_PATH}.fixed_cycle_weight_peak_timesteps`);
+                  }
+                  setApplyStatus('idle');
+                }}
+                className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+              />
+            </div>
+            <div className="space-y-2">
+              <p className="text-xs text-gray-400">Weight sigma</p>
+              <input
+                type="number"
+                min={1e-6}
+                step="any"
+                placeholder="e.g. 372.8"
+                value={fixedCycleWeightSigma}
+                onChange={(e) => {
+                  const v = parseFloat(e.target.value);
+                  if (Number.isFinite(v)) {
+                    setValue(v, `${TRAIN_PATH}.fixed_cycle_weight_sigma`);
+                  }
                   setApplyStatus('idle');
                 }}
                 className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
