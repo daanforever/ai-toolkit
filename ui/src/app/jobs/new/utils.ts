@@ -2,6 +2,19 @@ import { GroupedSelectOption, JobConfig, SelectOption } from '@/types';
 import { modelArchs, ModelArch } from './options';
 import { objectCopy } from '@/utils/basic';
 
+export const ZIMAGE_DIFFSYNTH_ARCH = 'zimage_diffsynth';
+export const ZIMAGE_DIFFSYNTH_TRAINER_TYPE = 'z_image_diffsynth_trainer';
+
+/** Maps stored process.type to job type dropdown value (LoRA variants collapse to diffusion_trainer). */
+export function jobTypeToSelectValue(type: string): string {
+  if (type === 'concept_slider') return 'concept_slider';
+  return 'diffusion_trainer';
+}
+
+export function resolveLoRAProcessType(modelArch: string): string {
+  return modelArch === ZIMAGE_DIFFSYNTH_ARCH ? ZIMAGE_DIFFSYNTH_TRAINER_TYPE : 'diffusion_trainer';
+}
+
 const expandDatasetDefaults = (
   defaults: { [key: string]: any },
   numDatasets: number,
@@ -34,6 +47,7 @@ export const handleModelArchChange = (
 
   // update the defaults when a model is selected
   const newArch = modelArchs.find(model => model.name === newArchName);
+  const processTypeBefore = jobConfig.config.process[0].type;
 
   // update vram setting
   if (!newArch?.additionalSections?.includes('model.low_vram')) {
@@ -142,5 +156,16 @@ export const handleModelArchChange = (
 
   for (const key in newDefaults) {
     setJobConfig(newDefaults[key][0], key);
+  }
+
+  // Z-Image DiffSynth uses extension trainer; keep LoRA dropdown as one "LoRA Trainer" entry.
+  if (processTypeBefore !== 'concept_slider') {
+    if (newArchName === ZIMAGE_DIFFSYNTH_ARCH) {
+      if (processTypeBefore === 'diffusion_trainer' || processTypeBefore === ZIMAGE_DIFFSYNTH_TRAINER_TYPE) {
+        setJobConfig(ZIMAGE_DIFFSYNTH_TRAINER_TYPE, 'config.process[0].type');
+      }
+    } else if (currentArchName === ZIMAGE_DIFFSYNTH_ARCH && processTypeBefore === ZIMAGE_DIFFSYNTH_TRAINER_TYPE) {
+      setJobConfig('diffusion_trainer', 'config.process[0].type');
+    }
   }
 };

@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { defaultJobConfig, defaultDatasetConfig, migrateJobConfig } from './jobConfig';
 import { jobTypeOptions } from './options';
+import { jobTypeToSelectValue, resolveLoRAProcessType } from './utils';
 import { JobConfig } from '@/types';
 import { objectCopy } from '@/utils/basic';
 import { useNestedState } from '@/utils/hooks';
@@ -185,12 +186,11 @@ export default function TrainingForm() {
           <>
             <div>
               <SelectInput
-                value={`${jobConfig?.config.process[0].type}`}
+                value={jobTypeToSelectValue(`${jobConfig?.config.process[0].type}`)}
                 onChange={value => {
-                  // undo current job type changes
-                  const currentOption = jobTypeOptions.find(
-                    option => option.value === jobConfig?.config.process[0].type,
-                  );
+                  const storedType = jobConfig?.config.process[0].type ?? 'diffusion_trainer';
+                  const currentSelectValue = jobTypeToSelectValue(storedType);
+                  const currentOption = jobTypeOptions.find(option => option.value === currentSelectValue);
                   if (currentOption && currentOption.onDeactivate) {
                     setJobConfig(currentOption.onDeactivate(objectCopy(jobConfig)));
                   }
@@ -205,7 +205,11 @@ export default function TrainingForm() {
                       }
                     });
                   }
-                  setJobConfig(value, 'config.process[0].type');
+                  const typeToStore =
+                    value === 'concept_slider'
+                      ? 'concept_slider'
+                      : resolveLoRAProcessType(jobConfig.config.process[0].model.arch);
+                  setJobConfig(typeToStore, 'config.process[0].type');
                 }}
                 options={jobTypeOptions}
               />
