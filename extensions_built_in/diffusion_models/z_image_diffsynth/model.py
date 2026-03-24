@@ -109,22 +109,43 @@ class ZImageDiffSynthModel(BaseModel):
 
     def _move_main_network(self, device):
         """Re-pin training LoRA to CUDA in fp32. Never move to CPU. Call after sampling only."""
-        target = device if isinstance(device, torch.device) else torch.device(device)
-        if target.type == "cpu":
-            return
-        net = getattr(self, "network", None)
-        if net is None or not hasattr(net, "force_to"):
-            return
-        net = unwrap_model(net)
-        try:
-            # LoRA trainable weights must stay fp32 for optimizer.step(); model may be bf16.
-            net.force_to(target, torch.float32)
+        with memory_debug(self.print_and_status_update, "Move main network"):
+            target = device if isinstance(device, torch.device) else torch.device(device)
+            if target.type == "cpu":
+                return
+            net = getattr(self, "network", None)
+            if net is None or not hasattr(net, "force_to"):
+                return
+            net = unwrap_model(net)
+            try:
+                # LoRA trainable weights must stay fp32 for optimizer.step(); model may be bf16.
+                net.force_to(target, torch.float32)
+                if is_debug_enabled():
+                    self.print_and_status_update(
+                        f"\n[zimage_diffsynth] main network force_to {device}"
+                    )
+            except Exception:
+                pass
+
+    def _move_sampling_transformer(self, device):
+        """Move only _sampling_transformer. _sampling_network is not moved (stays on CUDA)."""
+        with memory_debug(self.print_and_status_update, "Move sampling transformer"):
+            st = getattr(self, "_sampling_transformer", None)
+            if st is None:
+                return
+            target = device if isinstance(device, torch.device) else torch.device(device)
+            p = list(st.parameters())
+            need_move = bool(p and next(iter(p)).device != target)
+            if not need_move:
+                return
             if is_debug_enabled():
                 self.print_and_status_update(
-                    f"\n[zimage_diffsynth] main network force_to {device}"
+                    f"\n[zimage_diffsynth] moving sampling transformer to {device}"
                 )
-        except Exception:
-            pass
+            try:
+                st.to(device)
+            except Exception:
+                pass
 
     def _flush_cuda(self):
         """Release CUDA cache and run GC so VRAM is actually freed after model moves."""
@@ -167,25 +188,6 @@ class ZImageDiffSynthModel(BaseModel):
         self.print_and_status_update(
             f"\n[DEBUG zimage_diffsynth device state] {label}: " + ", ".join(parts)
         )
-
-    def _move_sampling(self, device):
-        """Move only _sampling_transformer. _sampling_network is not moved (stays on CUDA)."""
-        st = getattr(self, "_sampling_transformer", None)
-        if st is None:
-            return
-        target = device if isinstance(device, torch.device) else torch.device(device)
-        p = list(st.parameters())
-        need_move = bool(p and next(iter(p)).device != target)
-        if not need_move:
-            return
-        if is_debug_enabled():
-            self.print_and_status_update(
-                f"\n[zimage_diffsynth] moving sampling transformer to {device}"
-            )
-        try:
-            st.to(device)
-        except Exception:
-            pass
 
     def load_model(self):
         dtype = self.torch_dtype
@@ -288,7 +290,7 @@ class ZImageDiffSynthModel(BaseModel):
         self.noise_scheduler = ZImageDiffSynthModel.get_train_scheduler(use_diffsynth_loop=use_diffsynth)
         self.pipeline = None
         self._move_main_network("cpu")
-        self._move_sampling("cpu")
+        self._move_sampling_transformer("cpu")
         self.print_and_status_update("Model loaded")
 
     def get_model_to_train(self):
@@ -487,7 +489,7 @@ class ZImageDiffSynthModel(BaseModel):
                 )
             self.model.to("cpu", dtype=self.torch_dtype)
             self._flush_cuda()
-            self._move_sampling(self.device_torch)
+            self._move_sampling_transformer(self.device_torch)
             return _run()
         finally:
             if is_debug_enabled():
@@ -495,7 +497,7 @@ class ZImageDiffSynthModel(BaseModel):
                     "\n[zimage_diffsynth] standalone sampling: restoring main "
                     "transformer to GPU and sampling transformer to CPU"
                 )
-            self._move_sampling("cpu")
+            self._move_sampling_transformer("cpu")
             self.model.to(self.device_torch, dtype=self.torch_dtype)
             self._move_main_network(self.device_torch)
             self._flush_cuda()
@@ -542,16 +544,11 @@ class ZImageDiffSynthModel(BaseModel):
                         )
                     self._sampling_in_batch_generate = False
                     # Restore after batch: main back on GPU, sampling back on CPU (no memory spike).
-                    if is_debug_enabled():
-                        with memory_debug(
-                            self.print_and_status_update,
-                            "zimage_diffsynth after batch restore",
-                        ):
-                            self._move_sampling("cpu")
-                            self.model.to(self.device_torch, dtype=self.torch_dtype)
-                            self._move_main_network(self.device_torch)
-                    else:
-                        self._move_sampling("cpu")
+                    with memory_debug(
+                        self.print_and_status_update,
+                        "zimage_diffsynth after batch restore",
+                    ):
+                        self._move_sampling_transformer("cpu")
                         self.model.to(self.device_torch, dtype=self.torch_dtype)
                         self._move_main_network(self.device_torch)
                     
