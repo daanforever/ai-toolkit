@@ -376,14 +376,14 @@ class Adafactor(torch.optim.Optimizer):
         warmup_steps_old = group.get("warmup_steps_old", 0)
 
         if self.scheduled_lr_changed(lr_target, lr_target_old) or warmup_steps != warmup_steps_old:
-            if "warmup_target" in group:
-                lr_start = group["warmup_target"]
+            if "warmup_lr_previous" in group:
+                lr_start = group["warmup_lr_previous"]
             else:
                 lr_start = lr_target * group["eps"][1]
 
+            group["warmup_active"]    = True
             group["warmup_start"]     = lr_start
             group["warmup_target"]    = lr_target
-            group["warmup_active"]    = True
             group["warmup_progress"]  = 0
             group["warmup_delta"]     = (lr_target - lr_start) / warmup_steps
             group["warmup_steps_old"] = warmup_steps
@@ -394,19 +394,19 @@ class Adafactor(torch.optim.Optimizer):
                     f"Adafactor: base_lr changed ({lr_start:.2e} -> {lr_target:.2e}, {direction}), starting warmup"
                 )
 
-        if not group.get("warmup_active", False):
-            return
+        if group.get("warmup_active", False):
+            warmup_start    = group["warmup_start"]
+            warmup_progress = group["warmup_progress"]
+            warmup_delta    = group["warmup_delta"]
+            warmup_steps    = group["warmup_steps"]
 
-        warmup_start    = group["warmup_start"]
-        warmup_progress = group["warmup_progress"]
-        warmup_delta    = group["warmup_delta"]
-        warmup_steps    = group["warmup_steps"]
+            group["warmup_lr"] = warmup_start + warmup_progress * warmup_delta
+            group["warmup_progress"]  += 1
 
-        group["warmup_lr"] = warmup_start + warmup_progress * warmup_delta
-        group["warmup_progress"]  += 1
+            if group["warmup_progress"] >= warmup_steps:
+                self.stop_warmup(group)
 
-        if group["warmup_progress"] >= warmup_steps:
-            self.stop_warmup(group)
+        group["warmup_lr_previous"] = group.get("warmup_lr", group["lr"])
 
     def _get_lr(self, param_group, param_state):
         """
