@@ -1136,8 +1136,8 @@ class DiffusionTrainer(SDTrainer):
             self.maybe_stop()
             self.update_status("running", "Loading dataset")
 
-    def hook_before_train_loop(self):
-        super().hook_before_train_loop()
+    def internal_hook_before_train_loop(self):
+        """Clear runtime DB row, reset cached runtime, update job step/status; optional subclasses run before this."""
         if self.is_ui_trainer:
             self.clear_runtime_params()
             self._reset_last_applied_runtime()
@@ -1145,6 +1145,10 @@ class DiffusionTrainer(SDTrainer):
             self.update_step()
             self.update_status("running", "Training")
             self.timer.add_after_print_hook(self.handle_timing_print_hook)
+
+    def hook_before_train_loop(self):
+        super().hook_before_train_loop()
+        self.internal_hook_before_train_loop()
 
     def status_update_hook_func(self, string):
         self.update_status("running", string)

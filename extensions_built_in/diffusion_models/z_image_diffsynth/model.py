@@ -287,8 +287,8 @@ class ZImageDiffSynthModel(BaseModel):
 
         self.noise_scheduler = ZImageDiffSynthModel.get_train_scheduler(use_diffsynth_loop=use_diffsynth)
         self.pipeline = None
-        self._move_main_network("cuda")
-        self._move_sampling("cuda")
+        self._move_main_network("cpu")
+        self._move_sampling("cpu")
         self.print_and_status_update("Model loaded")
 
     def get_model_to_train(self):

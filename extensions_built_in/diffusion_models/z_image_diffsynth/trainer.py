@@ -74,6 +74,20 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
             # timestep grid than `TimestepSampler`/gaussian weights expect.
             tc.noise_scheduler = "flowmatch"
 
+    def hook_before_train_loop(self):
+        """
+        Run SDTrainer.setup (including optional text-encoder unload), then place main vs sampling
+        transformers before DiffusionTrainer clears runtime DB and before baseline sampling /
+        ``set_device_state`` at loop start.
+        """
+        super(DiffusionTrainer, self).hook_before_train_loop()
+        sd = getattr(self, "sd", None)
+        if sd is not None:
+            dev = self.device_torch
+            sd._move_main_network(dev)
+            sd._move_sampling(dev)
+        self.internal_hook_before_train_loop()
+
     def hook_after_sd_init_before_load(self):
         """
         Called from BaseSDTrainProcess immediately after self.sd is constructed,
