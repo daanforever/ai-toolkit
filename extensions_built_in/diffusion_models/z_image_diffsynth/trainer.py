@@ -85,7 +85,6 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
         if sd is not None:
             dev = self.device_torch
             sd._move_main_network(dev)
-            sd._move_sampling_transformer(dev)
         self.internal_hook_before_train_loop()
 
     def hook_after_sd_init_before_load(self):
