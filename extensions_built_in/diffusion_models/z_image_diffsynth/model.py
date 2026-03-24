@@ -108,7 +108,7 @@ class ZImageDiffSynthModel(BaseModel):
         return 16 * 2
 
     def _move_main_network(self, device):
-        """Keep training LoRA on CUDA only; never move self.network to CPU."""
+        """Re-pin training LoRA to CUDA in fp32. Never move to CPU. Call after sampling only."""
         target = device if isinstance(device, torch.device) else torch.device(device)
         if target.type == "cpu":
             return
@@ -287,8 +287,8 @@ class ZImageDiffSynthModel(BaseModel):
 
         self.noise_scheduler = ZImageDiffSynthModel.get_train_scheduler(use_diffsynth_loop=use_diffsynth)
         self.pipeline = None
-        self._move_main_network("cpu")
-        self._move_sampling("cpu")
+        self._move_main_network("cuda")
+        self._move_sampling("cuda")
         self.print_and_status_update("Model loaded")
 
     def get_model_to_train(self):
@@ -341,8 +341,6 @@ class ZImageDiffSynthModel(BaseModel):
                         "Please disable cache_latents/cache_latents_to_disk for this dataset or "
                         "regenerate latents using the current zimage_diffsynth model."
                     )
-
-        self._move_main_network(target_device)
 
         use_gradient_checkpointing = getattr(
             self, "gradient_checkpointing", False
