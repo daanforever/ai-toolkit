@@ -108,26 +108,22 @@ class ZImageDiffSynthModel(BaseModel):
         return 16 * 2
 
     def _move_main_network(self, device):
-        # if not hasattr(self, "network") or self.network is None:
-        #     if is_debug_enabled():
-        #         self.print_and_status_update(
-        #             f"\n[zimage_diffsynth] main network is None; skipping move to {device}"
-        #         )
-        #     return
-        # target = device if isinstance(device, torch.device) else torch.device(device)
-        # params = list(self.network.parameters())
-        # current = next(iter(params)).device if params else torch.device("cpu")
-        # if current == target:
-        #     return
-        # try:
-        #     self.network.to(device)
-        #     if is_debug_enabled():
-        #         self.print_and_status_update(
-        #             f"\n[zimage_diffsynth] moving main network to {device}"
-        #         )
-        # except Exception:
-        #     pass
-        pass
+        """Keep training LoRA on CUDA only; never move self.network to CPU."""
+        target = device if isinstance(device, torch.device) else torch.device(device)
+        if target.type == "cpu":
+            return
+        net = getattr(self, "network", None)
+        if net is None or not hasattr(net, "force_to"):
+            return
+        net = unwrap_model(net)
+        try:
+            net.force_to(target, self.torch_dtype)
+            if is_debug_enabled():
+                self.print_and_status_update(
+                    f"\n[zimage_diffsynth] main network force_to {device}"
+                )
+        except Exception:
+            pass
 
     def _flush_cuda(self):
         """Release CUDA cache and run GC so VRAM is actually freed after model moves."""
@@ -172,50 +168,23 @@ class ZImageDiffSynthModel(BaseModel):
         )
 
     def _move_sampling(self, device):
-        """Move sampling components (network + transformer) to device."""
-        target = device if isinstance(device, torch.device) else torch.device(device)
-        need_move = False
-        if hasattr(self, "_sampling_network") and self._sampling_network is not None:
-            p = list(self._sampling_network.parameters())
-            if p and next(iter(p)).device != target:
-                need_move = True
-        if hasattr(self, "_sampling_transformer") and self._sampling_transformer is not None:
-            p = list(self._sampling_transformer.parameters())
-            if p and next(iter(p)).device != target:
-                need_move = True
-        if not need_move and not (
-            getattr(self, "_sampling_network", None) is not None
-            or getattr(self, "_sampling_transformer", None) is not None
-        ):
+        """Move only _sampling_transformer. _sampling_network is not moved (stays on CUDA)."""
+        st = getattr(self, "_sampling_transformer", None)
+        if st is None:
             return
-        if is_debug_enabled() and need_move:
-            sampling_network_state = (
-                "set" if getattr(self, "_sampling_network", None) is not None else "none"
-            )
-            sampling_transformer_state = (
-                "set"
-                if getattr(self, "_sampling_transformer", None) is not None
-                else "none"
-            )
+        target = device if isinstance(device, torch.device) else torch.device(device)
+        p = list(st.parameters())
+        need_move = bool(p and next(iter(p)).device != target)
+        if not need_move:
+            return
+        if is_debug_enabled():
             self.print_and_status_update(
-                "\n[zimage_diffsynth] moving sampling components to "
-                f"{device} (sampling_network={sampling_network_state}, "
-                f"sampling_transformer={sampling_transformer_state})"
+                f"\n[zimage_diffsynth] moving sampling transformer to {device}"
             )
-        # Do not move _sampling_network to CPU: it shares weights with the main network
-        # (LoRA applied to the same base). When we later call network.to(cuda) for the main
-        # network, the sampling network effectively ends up on GPU again, so moving it to
-        # CPU is useless and adds extra copy overhead.
-        # if hasattr(self, "_sampling_network") and self._sampling_network is not None:
-        #     try:
-        #         self._sampling_network.to(device)
-        #     except Exception:
-        #         pass
-        if hasattr(self, "_sampling_transformer") and self._sampling_transformer is not None:
-            try:
-                self._sampling_transformer.to(device)
-            except Exception:
-                pass
+        try:
+            st.to(device)
+        except Exception:
+            pass
 
     def load_model(self):
         dtype = self.torch_dtype
