@@ -117,7 +117,8 @@ class ZImageDiffSynthModel(BaseModel):
             return
         net = unwrap_model(net)
         try:
-            net.force_to(target, self.torch_dtype)
+            # LoRA trainable weights must stay fp32 for optimizer.step(); model may be bf16.
+            net.force_to(target, torch.float32)
             if is_debug_enabled():
                 self.print_and_status_update(
                     f"\n[zimage_diffsynth] main network force_to {device}"
