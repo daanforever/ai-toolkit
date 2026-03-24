@@ -65,7 +65,7 @@ def test_get_lr_uses_saddle_point_boost_when_relative_step():
         "RMS": torch.tensor(1.0),
         "grad_rms": torch.tensor(0.1),
     }
-    opt.param_groups[0]["group_rms_max"] = torch.tensor(1.0)
+    opt.param_groups[0]["rms_max"] = torch.tensor(1.0)
     lr = opt._get_lr(opt.param_groups[0], state)
     base = 1.0 * max(opt.param_groups[0]["eps"][1], 1.0)
     ratio = max(opt.param_groups[0]["eps"][0], 0.0)
