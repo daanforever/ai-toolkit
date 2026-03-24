@@ -1,5 +1,5 @@
 import math
-from typing import List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
 import torch
 from toolkit.optimizers.optimizer_utils import copy_stochastic, stochastic_grad_accummulation
 from toolkit.print import print_acc
@@ -129,20 +129,6 @@ class Adafactor(torch.optim.Optimizer):
         warmup_init=False,
     )
     ```"""
-
-    # Param-group keys coerced to tensor float32 in load_state_dict (checkpoint compatibility).
-    _PARAM_GROUP_METRIC_KEYS = (
-        "rms_max",
-        "rms_ema",
-        "update_rms",
-        "update_rms_max",
-        "grad_rms_max",
-        "lr_mean",
-        "grad_rms",
-        "gns",
-        "step_efficiency",
-        "dynamic_gain",
-    )
 
     def __init__(
         self,
@@ -292,6 +278,10 @@ class Adafactor(torch.optim.Optimizer):
 
     def load_state_dict(self, state_dict):
         super().load_state_dict(state_dict)
+
+        # saddle_point_boost is not checkpointed; always start fresh after load.
+        self._saddle_point_boost = 1.0
+
         # Apply current run's min_lr, rms_max_decay_rate and lr so changed config is used after restart.
         for group in self.param_groups:
             group["lr"] = self._lr
@@ -301,29 +291,7 @@ class Adafactor(torch.optim.Optimizer):
             group["beta1"] = self._beta1
             group["beta2"] = self._beta2
             group["emergency_brake"] = self._emergency_brake
-            if "group_rms_max" in group and "rms_max" not in group:
-                group["rms_max"] = group.pop("group_rms_max")
-            for gk in self._PARAM_GROUP_METRIC_KEYS:
-                if gk in group and not isinstance(group[gk], torch.Tensor):
-                    group[gk] = torch.tensor(group[gk], dtype=torch.float32)
-            group.pop("group_rms_max", None)
-            # Restore instability_score for soft brake continuity across restarts
             group["instability_score"] = group.get("instability_score", 0.0)
-
-            # stop warmup if it is not active
-            if not group.get("warmup_active", False):
-                self.stop_warmup(group)
-
-        # saddle_point_boost is not checkpointed; always start fresh after load.
-        self._saddle_point_boost = 1.0
-
-        # Normalize state from old checkpoints: update_rms_max/update_rms must be tensors for step().
-        for group in self.param_groups:
-            for param in group["params"]:
-                state = self.state[param]
-                for key in ("update_rms_max", "update_rms", "rms_max", "param_rms_ema", "grad_rms", "grad_rms_max"):
-                    if key in state and not isinstance(state[key], torch.Tensor):
-                        state[key] = torch.tensor(state[key], device=param.device, dtype=torch.float32)
 
     def enable_parameter_swapping(self, parameter_swapping_factor=0.1):
         self.do_parameter_swapping = True
@@ -551,16 +519,25 @@ class Adafactor(torch.optim.Optimizer):
     def _rms(tensor):
         return tensor.norm(2) / (tensor.numel() ** 0.5)
 
-    def _get_group_scalars(self, group, state_key, default=0.0, reduction='mean'):
+    def _get_group_scalars(
+        self,
+        group,
+        state_key,
+        default=0.0,
+        reduction='mean',
+        params: Optional[Iterable[torch.nn.Parameter]] = None,
+    ):
         """
         Collect per-parameter scalars from state for a group, reduce in tensor space, return float.
         Used for unified metric aggregation (RMS, update_rms, update_rms_max) so get_* use the same
         path. Only params that have state_key in state are included (same as get_update_rms/get_update_rms_max).
+        If ``params`` is given, only those parameters are considered (same reduction pattern).
         """
         values = []
         weights = []
         device = None
-        for p in group["params"]:
+        param_iter = group["params"] if params is None else params
+        for p in param_iter:
             if p not in self.state or state_key not in self.state[p]:
                 continue
             val = self.state[p][state_key]
@@ -648,69 +625,90 @@ class Adafactor(torch.optim.Optimizer):
         metrics: List[Tuple[torch.nn.Parameter, torch.Tensor, float, Optional[torch.Tensor]]],
     ) -> None:
         """Aggregate per-param ``state`` (``RMS``, ``grad_rms``) and per-step rows into group scalars."""
-        sum_rms_weighted = 0.0
-        sum_ur_weighted = 0.0
-        sum_gr_weighted = 0.0
-        sum_lr_weighted = 0.0
-        sum_gns_weighted = 0.0
-        total_numel = 0
-        total_gns_numel = 0
-
-        for p, ur, lr, gns_t in metrics:
-            st = self.state.get(p)
-            if st is None:
-                continue
-            n = p.numel()
-            sum_rms_weighted += st["RMS"].item() * n
-            sum_ur_weighted += ur.item() * n
-            sum_gr_weighted += st["grad_rms"].item() * n
-            sum_lr_weighted += lr * n
-            total_numel += n
-            if gns_t is not None:
-                sum_gns_weighted += gns_t.item() * n
-                total_gns_numel += n
-
-        if total_numel == 0:
+        params_list = [p for p, _, _, _ in metrics if self.state.get(p) is not None]
+        if not params_list:
             return
 
+        ref_device = params_list[0].device
+        total_numel = sum(p.numel() for p in params_list)
+
+        avg_rms = self._get_group_scalars(
+            group, "RMS", default=0.0, reduction='mean', params=params_list
+        )
+        avg_gr = self._get_group_scalars(
+            group, "grad_rms", default=0.0, reduction='mean', params=params_list
+        )
+        if avg_rms is None:
+            avg_rms = 0.0
+        if avg_gr is None:
+            avg_gr = 0.0
+
+        # Weighted mean of ur (same tensor pattern as _get_group_scalars; one .item() at end).
+        ur_values = []
+        ur_weights = []
+        device = None
+        for p, ur, _, _ in metrics:
+            if self.state.get(p) is None:
+                continue
+            v_t = torch.as_tensor(ur, device=p.device, dtype=torch.float32).reshape(())
+            if device is None:
+                device = v_t.device
+            ur_values.append(v_t.to(device))
+            ur_weights.append(torch.tensor(p.numel(), device=device, dtype=torch.float32))
+        if not ur_values:
+            return
+        ur_stacked = torch.stack(ur_values)
+        w_stacked = torch.stack(ur_weights)
+        avg_ur = (torch.sum(ur_stacked * w_stacked) / (torch.sum(w_stacked) + 1e-12)).item()
+
+        sum_lr_weighted = sum(
+            lr * p.numel() for p, _, lr, _ in metrics if self.state.get(p) is not None
+        )
+
+        gns_values = []
+        gns_weights = []
+        device_g = None
+        for p, _, _, gns_t in metrics:
+            if gns_t is None or self.state.get(p) is None:
+                continue
+            v_t = torch.as_tensor(gns_t, device=p.device, dtype=torch.float32).reshape(())
+            if device_g is None:
+                device_g = v_t.device
+            gns_values.append(v_t.to(device_g))
+            gns_weights.append(torch.tensor(p.numel(), device=device_g, dtype=torch.float32))
+
         dr = float(group["rms_max_decay_rate"])
-        avg_rms = sum_rms_weighted / total_numel
         if "rms_ema" not in group:
-            group["rms_ema"] = torch.tensor(avg_rms, dtype=torch.float32)
+            group["rms_ema"] = torch.tensor(avg_rms, dtype=torch.float32, device=ref_device)
         else:
             prev = self._group_scalar_item(group, "rms_ema", 0.0)
             group["rms_ema"] = torch.tensor(
-                prev * dr + avg_rms * (1.0 - dr), dtype=torch.float32
+                prev * dr + avg_rms * (1.0 - dr), dtype=torch.float32, device=ref_device
             )
-        group["update_rms"] = torch.tensor(
-            sum_ur_weighted / total_numel, dtype=torch.float32
-        )
+        group["update_rms"] = torch.tensor(avg_ur, dtype=torch.float32, device=ref_device)
         group["lr_mean"] = torch.tensor(
-            sum_lr_weighted / total_numel, dtype=torch.float32
+            sum_lr_weighted / total_numel, dtype=torch.float32, device=ref_device
         )
-        group["grad_rms"] = torch.tensor(
-            sum_gr_weighted / total_numel, dtype=torch.float32
-        )
-        if total_gns_numel > 0:
-            group["gns"] = torch.tensor(
-                sum_gns_weighted / total_gns_numel, dtype=torch.float32
-            )
+        group["grad_rms"] = torch.tensor(avg_gr, dtype=torch.float32, device=ref_device)
+        if gns_values:
+            gv = torch.stack(gns_values)
+            gw = torch.stack(gns_weights)
+            avg_gns = (torch.sum(gv * gw) / (torch.sum(gw) + 1e-12)).item()
+            group["gns"] = torch.tensor(avg_gns, dtype=torch.float32, device=ref_device)
         else:
-            group["gns"] = torch.tensor(0.0, dtype=torch.float32)
+            group["gns"] = torch.tensor(0.0, dtype=torch.float32, device=ref_device)
+
         eps0 = group["eps"][0] if isinstance(group["eps"], (tuple, list)) else group["eps"]
-        u_rms = group["update_rms"].item()
-        u_max = (
-            group["update_rms_max"].item()
-            if isinstance(group["update_rms_max"], torch.Tensor)
-            else float(group["update_rms_max"])
-        )
-        g_mean = group["grad_rms"].item()
-        group["step_efficiency"] = torch.tensor(
-            u_rms / (u_max + float(eps0)), dtype=torch.float32
-        )
-        group["dynamic_gain"] = torch.tensor(
-            u_rms / (g_mean + float(eps0)), dtype=torch.float32
-        )
+        eps_t = torch.tensor(float(eps0), dtype=torch.float32, device=ref_device)
+        u_rms_t = group["update_rms"]
+        u_max = group["update_rms_max"]
+        if isinstance(u_max, torch.Tensor):
+            u_max = u_max.to(ref_device)
+        else:
+            u_max = torch.tensor(float(u_max), dtype=torch.float32, device=ref_device)
+        g_mean_t = group["grad_rms"]
+        group["step_efficiency"] = u_rms_t / (u_max + eps_t)
+        group["dynamic_gain"] = u_rms_t / (g_mean_t + eps_t)
 
     @staticmethod
     def _approx_sq_grad(exp_avg_sq_row, exp_avg_sq_col):
@@ -845,7 +843,6 @@ class Adafactor(torch.optim.Optimizer):
                     else:
                         state["exp_avg_sq"] = torch.zeros_like(grad)
 
-                    state["RMS"] = torch.tensor(0.0, device=grad.device)
                 else:
                     if use_first_moment:
                         if "exp_avg" not in state:
