@@ -37,22 +37,58 @@ def normalize_path(p: str) -> str:
     return os.path.abspath(os.path.expanduser(os.path.expandvars(p)))
 
 
+# Toolkit zimage_diffsynth saves: lora_unet__inner_dit_layers_0_attention_to_q.lora_down.weight
+# Diffusers expects module paths like layers.0.attention.to_q (see ZImageTransformer2DModel).
+_INNER_DIT_PREFIXES = ("lora_unet__inner_dit_", "lora_transformer__inner_dit_")
+_RE_WRAPPER_ATTN = re.compile(
+    r"^layers_(\d+)_attention_(to_q|to_k|to_v|to_out_0)\.(alpha|lora_down\.weight|lora_up\.weight)$"
+)
+_RE_WRAPPER_FF = re.compile(
+    r"^layers_(\d+)_feed_forward_(w1|w2|w3)\.(alpha|lora_down\.weight|lora_up\.weight)$"
+)
+
+
+def _rewrite_inner_dit_underscore_key(key: str) -> str | None:
+    """Map lora_unet__inner_dit_layers_*_* to diffusion_model.layers.{i}.... Returns None if not this format."""
+    nk = key
+    while nk.startswith("."):
+        nk = nk[1:]
+    rest = None
+    for pref in _INNER_DIT_PREFIXES:
+        if nk.startswith(pref):
+            rest = nk[len(pref) :]
+            break
+    if rest is None:
+        return None
+    m = _RE_WRAPPER_ATTN.match(rest)
+    if m:
+        idx, proj, tail = m.groups()
+        if proj == "to_out_0":
+            proj = "to_out.0"
+        return f"diffusion_model.layers.{idx}.attention.{proj}.{tail}"
+    m = _RE_WRAPPER_FF.match(rest)
+    if m:
+        idx, w, tail = m.groups()
+        return f"diffusion_model.layers.{idx}.feed_forward.{w}.{tail}"
+    return None
+
+
 def normalize_zimage_lora_keys_for_diffusers(state_dict: dict) -> dict:
     """
-    Map toolkit / DiffSynth checkpoint key layouts to Diffusers Z-Image LoRA conversion
-    (diffusion_model.*.lora_down.weight / .lora_up.weight / .alpha). All logic stays in this
-    script only — no changes to the training codebase.
+    Map toolkit / DiffSynth checkpoint key layouts to Diffusers Z-Image LoRA conversion.
     """
     out = {}
     for k, v in state_dict.items():
+        rewritten = _rewrite_inner_dit_underscore_key(k)
+        if rewritten is not None:
+            out[rewritten] = v
+            continue
         nk = k
         while nk.startswith("."):
             nk = nk[1:]
         if "inner.dit." in nk:
             nk = nk.replace("inner.dit.", "diffusion_model.", 1)
-        if nk.startswith("lora_transformer__inner_dit_"):
-            nk = "diffusion_model." + nk[len("lora_transformer__inner_dit_") :]
-        elif nk.startswith("lora_unet._inner_dit."):
+        if nk.startswith("lora_unet._inner_dit."):
             nk = "diffusion_model." + nk[len("lora_unet._inner_dit.") :]
         nk = re.sub(r"attention\.to\.([qkv])\.lora", r"attention.to_\1.lora", nk)
         nk = re.sub(r"attention\.to\.([qkv])(\.|$)", r"attention.to_\1\2", nk)
