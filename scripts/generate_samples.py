@@ -8,6 +8,7 @@ Default config: temp/config.yaml (next to this script).
 
 import argparse
 import gc
+import importlib.util
 import os
 import sys
 from datetime import datetime
@@ -44,7 +45,15 @@ _ensure_repo_in_path()
 script_dir = _script_dir()
 if script_dir not in sys.path:
     sys.path.insert(0, script_dir)
-import lora as lora_module
+
+# Load scripts/lora.py by path so we never import another top-level `lora` (e.g. from repo root or site-packages).
+_lora_path = os.path.join(script_dir, "lora.py")
+_lora_spec = importlib.util.spec_from_file_location("aitk_scripts_lora", _lora_path)
+if _lora_spec is None or _lora_spec.loader is None:
+    raise ImportError(f"Cannot load LoRA helper from {_lora_path}")
+lora_module = importlib.util.module_from_spec(_lora_spec)
+_lora_spec.loader.exec_module(lora_module)
+
 from toolkit.util.debug import is_debug_enabled, memory_debug, set_debug_config
 
 
