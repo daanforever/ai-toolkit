@@ -939,14 +939,14 @@ class Adafactor(torch.optim.Optimizer):
                     gns_tensor = None
                     update = update_hat.mul(lr)
 
+                update_rms = self._rms(update)
+
                 if group["weight_decay"] != 0:
-                    p_data_fp32.add_(
-                        p_data_fp32, alpha=(-group["weight_decay"] * lr))
+                    p_data_fp32.mul_(1.0 - group["weight_decay"] * update_rms)
 
                 p_data_fp32.add_(-update)
 
-                ur = self._rms(update)
-                self._group_running_max_update(group, "update_rms_max", ur)
+                self._group_running_max_update(group, "update_rms_max", update_rms)
 
                 if (p.dtype != torch.float32 or is_quantized) and self.stochastic_rounding:
                     # apply stochastic rounding
@@ -955,7 +955,7 @@ class Adafactor(torch.optim.Optimizer):
                 metrics.append(
                     (
                         p,
-                        ur.detach(),
+                        update_rms.detach(),
                         float(lr),
                         gns_tensor.detach() if gns_tensor is not None else None,
                     )
