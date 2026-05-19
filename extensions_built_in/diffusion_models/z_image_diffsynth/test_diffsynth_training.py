@@ -12,10 +12,34 @@ from types import SimpleNamespace
 import pytest
 
 from extensions_built_in.diffusion_models.z_image_diffsynth import diffsynth_training as dst
+from extensions_built_in.diffusion_models.z_image_diffsynth.model import (
+    _resolve_use_diffsynth_prompt_encoding,
+)
 from extensions_built_in.diffusion_models.z_image_diffsynth.trainer import (
     ZImageDiffSynthTrainer,
     _read_use_diffsynth_training_loop_from_config,
 )
+
+
+def test_use_diffsynth_prompt_encoding_inherits_training_loop():
+    assert _resolve_use_diffsynth_prompt_encoding({}) is True
+    assert _resolve_use_diffsynth_prompt_encoding({"use_diffsynth_training_loop": True}) is True
+    assert _resolve_use_diffsynth_prompt_encoding({"use_diffsynth_training_loop": False}) is False
+
+
+def test_use_diffsynth_prompt_encoding_explicit_override():
+    assert (
+        _resolve_use_diffsynth_prompt_encoding(
+            {"use_diffsynth_training_loop": False, "use_diffsynth_prompt_encoding": True}
+        )
+        is True
+    )
+    assert (
+        _resolve_use_diffsynth_prompt_encoding(
+            {"use_diffsynth_training_loop": True, "use_diffsynth_prompt_encoding": False}
+        )
+        is False
+    )
 
 
 def test_read_use_diffsynth_training_loop_matches_model_kwargs():

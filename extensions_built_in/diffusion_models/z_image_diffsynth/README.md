@@ -1,6 +1,14 @@
 # Z-Image DiffSynth adapter (`zimage_diffsynth`)
 
-## Single flag: `use_diffsynth_training_loop`
+## Flags: `use_diffsynth_training_loop` and `use_diffsynth_prompt_encoding`
+
+- **Training loop:** `model.model_kwargs["use_diffsynth_training_loop"]` (default `true` if omitted).
+- **Prompt encoding:** `model.model_kwargs["use_diffsynth_prompt_encoding"]` — if omitted, inherits `use_diffsynth_training_loop`.
+  - `true`: literal `<|im_start|>user…` chain (`encode_prompt_diffsynth_literal_t2i`, DiffSynth T2I).
+  - `false`: toolkit chat template (`encode_prompt`).
+  - Example: `use_diffsynth_training_loop: false` with `use_diffsynth_prompt_encoding: true` keeps toolkit loss / SNR / scheduler but DiffSynth literal prompts.
+
+## `use_diffsynth_training_loop`
 
 - **Source of truth:** `model.model_kwargs["use_diffsynth_training_loop"]` (default `true` if omitted).
 - **`ZImageDiffSynthTrainer`** copies the same boolean to `trainer.use_diffsynth_training_loop` at init (for tests and logging). **`TrainConfig` is not extended.**

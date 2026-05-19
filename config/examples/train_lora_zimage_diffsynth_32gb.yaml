@@ -61,7 +61,9 @@ config:
         quantize_te: true
         qtype_te: "qfloat8"
         low_vram: false
-        model_kwargs: {}
+        model_kwargs:
+          # use_diffsynth_training_loop: false
+          # use_diffsynth_prompt_encoding: true
       sample:
         sampler: "flowmatch"
         sample_every: 250

@@ -30,6 +30,18 @@ scheduler_config = {
 }
 
 
+def _resolve_use_diffsynth_prompt_encoding(model_kwargs):
+    """Resolve prompt encoder branch from model_kwargs.
+
+    If use_diffsynth_prompt_encoding is set explicitly, use it; otherwise inherit
+    use_diffsynth_training_loop (default True when both are omitted).
+    """
+    mk = model_kwargs or {}
+    if "use_diffsynth_prompt_encoding" in mk:
+        return mk["use_diffsynth_prompt_encoding"]
+    return mk.get("use_diffsynth_training_loop", True)
+
+
 class _DiTUnetWrapper(torch.nn.Module):
     """Wraps ZImageDiT so that .config.patch_size exists for BatchProcessor / timestep scheduling.
     Forwards all other attributes and calls to the inner DiT. Uses _inner_dit so that .device/.training
@@ -380,13 +392,12 @@ class ZImageDiffSynthModel(BaseModel):
                     pass
                 else:
                     raise
-        use_diffsynth_loop = True
         try:
             mk = getattr(self.model_config, "model_kwargs", {}) or {}
-            use_diffsynth_loop = mk.get("use_diffsynth_training_loop", True)
+            use_diffsynth_prompt_encoding = _resolve_use_diffsynth_prompt_encoding(mk)
         except Exception:
-            use_diffsynth_loop = True
-        if use_diffsynth_loop:
+            use_diffsynth_prompt_encoding = True
+        if use_diffsynth_prompt_encoding:
             return diffsynth_training_mod.encode_prompt_diffsynth_literal_t2i(
                 tok,
                 te,
