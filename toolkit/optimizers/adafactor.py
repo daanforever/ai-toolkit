@@ -194,10 +194,15 @@ class Adafactor(torch.optim.Optimizer):
         self._saddle_point_step = float(saddle_point_step)
         self._saddle_point_boost = 1.0
 
-        # Store LR limits, rms_max_decay_rate and lr so they can be reapplied after load_state_dict (restart with new config).
+        # Store config reapplied after load_state_dict (checkpoint param_groups may omit keys).
         self._lr = lr
         self._min_lr = min_lr
+        self._eps = eps
+        self._clip_threshold = clip_threshold
         self._rms_max_decay_rate = rms_max_decay_rate
+        self._weight_decay = weight_decay
+        self._scale_parameter = scale_parameter
+        self._relative_step = relative_step
         self._warmup_init = warmup_init
         self._warmup_steps = warmup_steps
         self._beta1 = beta1
@@ -283,12 +288,18 @@ class Adafactor(torch.optim.Optimizer):
         # saddle_point_boost is not checkpointed; always start fresh after load.
         self._saddle_point_boost = 1.0
 
-        # Apply current run's min_lr, rms_max_decay_rate and lr so changed config is used after restart.
+        # Reapply current run config (checkpoint param_groups may lack keys e.g. clip_threshold).
         for group in self.param_groups:
             group["lr"] = self._lr
             group["min_lr"] = self._min_lr
+            group["eps"] = self._eps
+            group["clip_threshold"] = self._clip_threshold
             group["rms_max_decay_rate"] = self._rms_max_decay_rate
+            group["weight_decay"] = self._weight_decay
+            group["scale_parameter"] = self._scale_parameter
+            group["relative_step"] = self._relative_step
             group["warmup_init"] = self._warmup_init
+            group["warmup_steps"] = self._warmup_steps
             group["beta1"] = self._beta1
             group["beta2"] = self._beta2
             group["factored"] = self._factored
