@@ -202,6 +202,7 @@ class Adafactor(torch.optim.Optimizer):
         self._warmup_steps = warmup_steps
         self._beta1 = beta1
         self._beta2 = beta2
+        self._factored = factored
         self._emergency_brake = emergency_brake
         self.is_stochastic_rounding_accumulation = False
 
@@ -290,8 +291,60 @@ class Adafactor(torch.optim.Optimizer):
             group["warmup_init"] = self._warmup_init
             group["beta1"] = self._beta1
             group["beta2"] = self._beta2
+            group["factored"] = self._factored
             group["emergency_brake"] = self._emergency_brake
             group["instability_score"] = group.get("instability_score", 0.0)
+
+        self._migrate_optimizer_state_buffers()
+
+    def _migrate_optimizer_state_buffers(self):
+        """Add or reset momentum buffers after load when optimizer_params changed."""
+        for group in self.param_groups:
+            for p in group["params"]:
+                state = self.state[p]
+                if not state:
+                    continue
+
+                factored, use_first_moment = self._get_options(group, p.shape)
+                ref = p.data if p.dtype == torch.float32 else p.data.float()
+                device = ref.device
+                dtype = ref.dtype
+
+                if use_first_moment:
+                    if (
+                        "exp_avg" not in state
+                        or state["exp_avg"].shape != ref.shape
+                    ):
+                        state["exp_avg"] = torch.zeros_like(ref)
+                else:
+                    state.pop("exp_avg", None)
+
+                if factored:
+                    row_shape = p.shape[:-1]
+                    col_shape = p.shape[:-2] + p.shape[-1:]
+                    if (
+                        "exp_avg_sq_row" not in state
+                        or state["exp_avg_sq_row"].shape != row_shape
+                    ):
+                        state["exp_avg_sq_row"] = torch.zeros(
+                            row_shape, device=device, dtype=dtype
+                        )
+                    if (
+                        "exp_avg_sq_col" not in state
+                        or state["exp_avg_sq_col"].shape != col_shape
+                    ):
+                        state["exp_avg_sq_col"] = torch.zeros(
+                            col_shape, device=device, dtype=dtype
+                        )
+                    state.pop("exp_avg_sq", None)
+                else:
+                    if (
+                        "exp_avg_sq" not in state
+                        or state["exp_avg_sq"].shape != ref.shape
+                    ):
+                        state["exp_avg_sq"] = torch.zeros_like(ref)
+                    state.pop("exp_avg_sq_row", None)
+                    state.pop("exp_avg_sq_col", None)
 
     def enable_parameter_swapping(self, parameter_swapping_factor=0.1):
         self.do_parameter_swapping = True
