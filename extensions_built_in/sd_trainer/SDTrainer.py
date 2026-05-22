@@ -1085,16 +1085,27 @@ class SDTrainer(BaseSDTrainProcess):
             loss = loss + prior_loss
 
         if not self.train_config.train_turbo:
+            pred_type = (
+                "v_prediction"
+                if getattr(self.sd, "is_flow_matching", False)
+                else getattr(self.sd, "prediction_type", "epsilon")
+            )
             if self.train_config.learnable_snr_gos:
                 # add snr_gamma
                 loss = apply_learnable_snr_gos(loss, timesteps, self.snr_gos)
             elif self.train_config.snr_gamma is not None and self.train_config.snr_gamma > 0.000001 and not ignore_snr:
                 # add snr_gamma
                 loss = apply_snr_weight(loss, timesteps, self.sd.noise_scheduler, self.train_config.snr_gamma,
-                                        fixed=True)
+                                        fixed=True, prediction_type=pred_type)
             elif self.train_config.min_snr_gamma is not None and self.train_config.min_snr_gamma > 0.000001 and not ignore_snr:
                 # add min_snr_gamma
-                loss = apply_snr_weight(loss, timesteps, self.sd.noise_scheduler, self.train_config.min_snr_gamma)
+                loss = apply_snr_weight(
+                    loss,
+                    timesteps,
+                    self.sd.noise_scheduler,
+                    self.train_config.min_snr_gamma,
+                    prediction_type=pred_type
+                )
 
         loss = loss.mean()
         

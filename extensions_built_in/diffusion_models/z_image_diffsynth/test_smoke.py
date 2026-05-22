@@ -441,7 +441,13 @@ def main():
         batch_size = 2
         loss = torch.ones(batch_size, device=device, dtype=torch.float32)
         timesteps = torch.tensor([1, 500], device=device, dtype=torch.long)
-        weighted = apply_snr_weight(loss, timesteps, noise_scheduler, min_snr_gamma)
+        weighted = apply_snr_weight(
+            loss,
+            timesteps,
+            noise_scheduler,
+            min_snr_gamma,
+            prediction_type="v_prediction",
+        )
         assert weighted.shape == loss.shape, "apply_snr_weight must preserve shape"
         _log("4d. OK (adapter supports min_snr_gamma after data loaders recreated)")
     except AttributeError as e:

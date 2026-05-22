@@ -396,6 +396,9 @@ class UltimateSliderTrainerProcess(BaseSDTrainProcess):
             noise_list = [noise]
             timesteps_list = [timesteps]
             conditional_embeds_list = [conditional_embeds]
+        pred_type = "v_prediction" if getattr(
+            self.sd, "is_flow_matching", False
+        ) else getattr(self.sd, "prediction_type", "epsilon")
 
         ## DO REFERENCE IMAGE TRAINING ##
 
@@ -428,7 +431,13 @@ class UltimateSliderTrainerProcess(BaseSDTrainProcess):
                 # todo add snr gamma here
                 if self.train_config.min_snr_gamma is not None and self.train_config.min_snr_gamma > 0.000001:
                     # add min_snr_gamma
-                    loss = apply_snr_weight(loss, timesteps, noise_scheduler, self.train_config.min_snr_gamma)
+                    loss = apply_snr_weight(
+                        loss,
+                        timesteps,
+                        noise_scheduler,
+                        self.train_config.min_snr_gamma,
+                        prediction_type=pred_type,
+                    )
 
                 loss = loss.mean()
                 loss = loss * self.slider_config.img_loss_weight
@@ -502,7 +511,7 @@ class UltimateSliderTrainerProcess(BaseSDTrainProcess):
                     timesteps_index_list = [current_timestep_index for _ in range(target_latents.shape[0])]
                     # add min_snr_gamma
                     loss = apply_snr_weight(loss, timesteps_index_list, noise_scheduler,
-                                            self.train_config.min_snr_gamma)
+                                            self.train_config.min_snr_gamma, prediction_type=pred_type)
 
                 loss = loss.mean() * prompt_pair_chunk.weight * self.slider_config.cfg_loss_weight
 

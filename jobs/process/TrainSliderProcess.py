@@ -627,12 +627,16 @@ class TrainSliderProcess(BaseSDTrainProcess):
                     loss += mask_target_loss
 
                 loss = loss.mean([1, 2, 3])
+                pred_type = "v_prediction" if getattr(
+                    self.sd, "is_flow_matching", False
+                ) else getattr(self.sd, "prediction_type", "epsilon")
 
                 if self.train_config.learnable_snr_gos:
                     if from_batch:
                         # match batch size
                         loss = apply_snr_weight(loss, timesteps, self.sd.noise_scheduler,
-                                                self.train_config.min_snr_gamma)
+                                                self.train_config.min_snr_gamma,
+                                                prediction_type=pred_type)
                     else:
                         # match batch size
                         timesteps_index_list = [current_timestep_index for _ in range(target_latents.shape[0])]
@@ -642,13 +646,15 @@ class TrainSliderProcess(BaseSDTrainProcess):
                     if from_batch:
                         # match batch size
                         loss = apply_snr_weight(loss, timesteps, self.sd.noise_scheduler,
-                                                self.train_config.min_snr_gamma)
+                                                self.train_config.min_snr_gamma,
+                                                prediction_type=pred_type)
                     else:
                         # match batch size
                         timesteps_index_list = [current_timestep_index for _ in range(target_latents.shape[0])]
                         # add min_snr_gamma
                         loss = apply_snr_weight(loss, timesteps_index_list, noise_scheduler,
-                                                self.train_config.min_snr_gamma)
+                                                self.train_config.min_snr_gamma,
+                                                prediction_type=pred_type)
 
 
                 loss = loss.mean() * prompt_pair_chunk.weight

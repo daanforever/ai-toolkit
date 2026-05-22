@@ -884,15 +884,33 @@ class BaseSDTrainProcess(BaseTrainProcess):
             print_acc("load_weights not implemented for non-network models")
 
     def apply_snr(self, seperated_loss, timesteps):
+        pred_type = (
+            "v_prediction"
+            if getattr(self.sd, "is_flow_matching", False)
+            else getattr(self.sd, "prediction_type", "epsilon")
+        )
         if self.train_config.learnable_snr_gos:
             # add snr_gamma
             seperated_loss = apply_learnable_snr_gos(seperated_loss, timesteps, self.snr_gos)
         elif self.train_config.snr_gamma is not None and self.train_config.snr_gamma > 0.000001:
             # add snr_gamma
-            seperated_loss = apply_snr_weight(seperated_loss, timesteps, self.sd.noise_scheduler, self.train_config.snr_gamma, fixed=True)
+            seperated_loss = apply_snr_weight(
+                seperated_loss,
+                timesteps,
+                self.sd.noise_scheduler,
+                self.train_config.snr_gamma,
+                fixed=True,
+                prediction_type=pred_type
+            )
         elif self.train_config.min_snr_gamma is not None and self.train_config.min_snr_gamma > 0.000001:
             # add min_snr_gamma
-            seperated_loss = apply_snr_weight(seperated_loss, timesteps, self.sd.noise_scheduler, self.train_config.min_snr_gamma)
+            seperated_loss = apply_snr_weight(
+                seperated_loss,
+                timesteps,
+                self.sd.noise_scheduler,
+                self.train_config.min_snr_gamma,
+                prediction_type=pred_type
+            )
 
         return seperated_loss
 

@@ -125,7 +125,16 @@ class ConceptReplacer(BaseSDTrainProcess):
 
             if self.train_config.min_snr_gamma is not None and self.train_config.min_snr_gamma > 0.000001:
                 # add min_snr_gamma
-                loss = apply_snr_weight(loss, timesteps, self.sd.noise_scheduler, self.train_config.min_snr_gamma)
+                pred_type = "v_prediction" if getattr(self.sd, "is_flow_matching", False) else getattr(
+                    self.sd, "prediction_type", "epsilon"
+                )
+                loss = apply_snr_weight(
+                    loss,
+                    timesteps,
+                    self.sd.noise_scheduler,
+                    self.train_config.min_snr_gamma,
+                    prediction_type=pred_type,
+                )
 
             loss = loss.mean()
 

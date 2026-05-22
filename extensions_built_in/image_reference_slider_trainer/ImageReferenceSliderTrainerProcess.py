@@ -181,6 +181,9 @@ class ImageReferenceSliderTrainerProcess(BaseSDTrainProcess):
         noise_list = [noise]
         timesteps_list = [timesteps]
         conditional_embeds_list = [conditional_embeds]
+        pred_type = "v_prediction" if getattr(
+            self.sd, "is_flow_matching", False
+        ) else getattr(self.sd, "prediction_type", "epsilon")
 
         losses = []
         # allow to chunk it out to save vram
@@ -210,7 +213,13 @@ class ImageReferenceSliderTrainerProcess(BaseSDTrainProcess):
 
                 if self.train_config.min_snr_gamma is not None and self.train_config.min_snr_gamma > 0.000001:
                     # add min_snr_gamma
-                    loss = apply_snr_weight(loss, timesteps, noise_scheduler, self.train_config.min_snr_gamma)
+                    loss = apply_snr_weight(
+                        loss,
+                        timesteps,
+                        noise_scheduler,
+                        self.train_config.min_snr_gamma,
+                        prediction_type=pred_type,
+                    )
 
                 loss = loss.mean() * loss_jitter_multiplier
 

@@ -741,6 +741,7 @@ def apply_snr_weight(
         noise_scheduler: Union['DDPMScheduler'],
         gamma,
         fixed=False,
+        prediction_type="epsilon",
 ):
     # will get it from noise scheduler if exist or will calculate it if not
     all_snr = get_all_snr(noise_scheduler, loss.device)
@@ -766,11 +767,18 @@ def apply_snr_weight(
     lerp = (timestep_indices - idx_low.float()).to(all_snr.dtype)
     snr = all_snr[idx_low] * (1.0 - lerp) + all_snr[idx_high] * lerp
 
-    gamma_over_snr = torch.div(torch.ones_like(snr) * gamma, snr)
-    if fixed:
-        snr_weight = gamma_over_snr.float().to(loss.device)  # directly using gamma over snr
+    gamma_tensor = torch.ones_like(snr) * gamma
+    if prediction_type == "v_prediction":
+        if fixed:
+            snr_weight = torch.div(gamma_tensor, snr + 1.0).float().to(loss.device)
+        else:
+            snr_weight = torch.div(torch.minimum(gamma_tensor, snr), snr + 1.0).float().to(loss.device)
     else:
-        snr_weight = torch.minimum(gamma_over_snr, torch.ones_like(gamma_over_snr)).float().to(loss.device)
+        gamma_over_snr = torch.div(gamma_tensor, snr)
+        if fixed:
+            snr_weight = gamma_over_snr.float().to(loss.device)  # directly using gamma over snr
+        else:
+            snr_weight = torch.minimum(gamma_over_snr, torch.ones_like(gamma_over_snr)).float().to(loss.device)
     snr_adjusted_loss = loss * snr_weight
 
     return snr_adjusted_loss
