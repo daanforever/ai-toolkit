@@ -396,7 +396,7 @@ class UltimateSliderTrainerProcess(BaseSDTrainProcess):
             noise_list = [noise]
             timesteps_list = [timesteps]
             conditional_embeds_list = [conditional_embeds]
-        pred_type = "v_prediction" if getattr(
+        pred_type = "flow_match" if getattr(
             self.sd, "is_flow_matching", False
         ) else getattr(self.sd, "prediction_type", "epsilon")
 

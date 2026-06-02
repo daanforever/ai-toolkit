@@ -885,7 +885,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
     def apply_snr(self, seperated_loss, timesteps):
         pred_type = (
-            "v_prediction"
+            "flow_match"
             if getattr(self.sd, "is_flow_matching", False)
             else getattr(self.sd, "prediction_type", "epsilon")
         )

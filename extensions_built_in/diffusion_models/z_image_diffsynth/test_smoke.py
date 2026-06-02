@@ -71,6 +71,13 @@ def _log(msg):
     print(msg, flush=True)
 
 
+def _expected_flow_match_min_snr_weight(timestep_value: float, gamma: float) -> float:
+    """Min-SNR flow-match weight: min(gamma, SNR) / (1 + sqrt(SNR))^2 for x_t = (1-t)x_0 + t*noise."""
+    t = max(min(timestep_value / 1000.0, 1.0), 1e-8)
+    snr = ((1.0 - t) ** 2) / (t ** 2 + 1e-8)
+    return min(gamma, snr) / ((1.0 + snr ** 0.5) ** 2)
+
+
 class _TeeStderr:
     """Writes to both real stderr and a buffer. Use to capture loader/torch stderr during load_model()."""
 
@@ -438,18 +445,33 @@ def main():
         assert all_snr is not None and all_snr.dim() == 1, "get_all_snr must return 1d tensor"
         assert all_snr.shape[0] == 1000, "get_all_snr must return 1000 timesteps"
         # apply_snr_weight as in SDTrainer.calculate_loss
-        batch_size = 2
-        loss = torch.ones(batch_size, device=device, dtype=torch.float32)
-        timesteps = torch.tensor([1, 500], device=device, dtype=torch.long)
+        check_timesteps = [10, 500, 990]
+        loss = torch.ones(len(check_timesteps), device=device, dtype=torch.float32)
+        timesteps = torch.tensor(check_timesteps, device=device, dtype=torch.float32)
         weighted = apply_snr_weight(
             loss,
             timesteps,
             noise_scheduler,
             min_snr_gamma,
-            prediction_type="v_prediction",
+            prediction_type="flow_match",
         )
         assert weighted.shape == loss.shape, "apply_snr_weight must preserve shape"
-        _log("4d. OK (adapter supports min_snr_gamma after data loaders recreated)")
+        for i, ts in enumerate(check_timesteps):
+            expected = _expected_flow_match_min_snr_weight(float(ts), min_snr_gamma)
+            actual = weighted[i].item()
+            rtol, atol = 1e-4, 1e-6
+            if abs(expected) > 0:
+                assert abs(actual - expected) <= atol + rtol * abs(expected), (
+                    f"timestep {ts}: expected {expected}, got {actual}"
+                )
+            else:
+                assert abs(actual) <= atol, (
+                    f"timestep {ts}: expected ~0, got {actual}"
+                )
+        _log(
+            "4d. OK (min_snr_gamma weights match expected for timesteps "
+            f"{check_timesteps}: {weighted.tolist()})"
+        )
     except AttributeError as e:
         if "alphas_cumprod" in str(e):
             _log(

@@ -768,7 +768,13 @@ def apply_snr_weight(
     snr = all_snr[idx_low] * (1.0 - lerp) + all_snr[idx_high] * lerp
 
     gamma_tensor = torch.ones_like(snr) * gamma
-    if prediction_type == "v_prediction":
+    if prediction_type in ("flow_match", "rectified_flow"):
+        denom = (1.0 + torch.sqrt(snr)) ** 2
+        if fixed:
+            snr_weight = torch.div(gamma_tensor, denom).float().to(loss.device)
+        else:
+            snr_weight = torch.div(torch.minimum(gamma_tensor, snr), denom).float().to(loss.device)
+    elif prediction_type == "v_prediction":
         if fixed:
             snr_weight = torch.div(gamma_tensor, snr + 1.0).float().to(loss.device)
         else:
