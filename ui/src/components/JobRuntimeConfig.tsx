@@ -502,6 +502,8 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
               ))}
             </select>
           </div>
+        </div>
+        <div className="flex items-end gap-4 flex-wrap">
           <div className="space-y-2 flex-1 min-w-[140px]">
             <p className="text-xs text-gray-400">Beta1</p>
             <input
