@@ -4,7 +4,7 @@ import { Job } from '@prisma/client';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { migrateJobConfig } from '@/app/jobs/new/jobConfig';
 import { useNestedState } from '@/utils/hooks';
-import { JobConfig } from '@/types';
+import { JobConfig, WeightDecayMode } from '@/types';
 import { defaultJobConfig } from '@/app/jobs/new/jobConfig';
 
 const CONTENT_OR_STYLE_OPTIONS = [
@@ -23,6 +23,11 @@ const TIMESTEP_TYPE_OPTIONS = [
   { value: 'weighted', label: 'Weighted' },
   { value: 'gaussian', label: 'Gaussian' },
   { value: 'gaussian_bimodal', label: 'Gaussian Bimodal' },
+];
+const WEIGHT_DECAY_MODE_OPTIONS: Array<{ value: WeightDecayMode; label: string }> = [
+  { value: 'absolute', label: 'Absolute (lr * wd)' },
+  { value: 'update_rms', label: 'Update RMS (wd * update_rms)' },
+  { value: 'param_rms', label: 'Param RMS (wd * param_rms)' },
 ];
 
 const TRAIN_PATH = 'config.process[0].train';
@@ -76,6 +81,9 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
   const timestepType = train?.timestep_type ?? defaultJobConfig.config.process[0].train.timestep_type;
   const contentOrStyle = train?.content_or_style ?? defaultJobConfig.config.process[0].train.content_or_style;
   const weightDecay = optimizerParams?.weight_decay ?? defaultJobConfig.config.process[0].train.optimizer_params.weight_decay;
+  const weightDecayMode =
+    optimizerParams?.weight_decay_mode ??
+    defaultJobConfig.config.process[0].train.optimizer_params.weight_decay_mode;
   const beta1 = optimizerParams?.beta1 != null
     ? Number(optimizerParams.beta1)
     : null;
@@ -176,11 +184,12 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
       return;
     }
     if (!process.train.optimizer_params) {
-      process.train.optimizer_params = { weight_decay: 1e-4 };
+      process.train.optimizer_params = { weight_decay: 1e-4, weight_decay_mode: 'absolute' };
     }
     process.train.timestep_type = timestepType;
     process.train.content_or_style = contentOrStyle;
     process.train.optimizer_params.weight_decay = weightDecay;
+    process.train.optimizer_params.weight_decay_mode = weightDecayMode;
     (process.train.optimizer_params as Record<string, number | null>).beta1 = beta1;
     (process.train.optimizer_params as Record<string, number>).beta2 = beta2;
     (process.train as Record<string, number>).lr = lr;
@@ -285,6 +294,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         lr?: number;
         min_lr?: number;
         weight_decay?: number;
+        weight_decay_mode?: WeightDecayMode;
         beta1?: number | null;
         beta2?: number;
         content_or_style?: string;
@@ -306,6 +316,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         fixed_cycle_weight_sigma?: number;
       } = {
         weight_decay: weightDecay,
+        weight_decay_mode: weightDecayMode,
         beta1: beta1 === 0 ? null : beta1,
         beta2: beta2,
         content_or_style: contentOrStyle,
@@ -361,6 +372,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     timestepType,
     contentOrStyle,
     weightDecay,
+    weightDecayMode,
     beta1,
     beta2,
     lr,
@@ -474,6 +486,21 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
               }}
               className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
             />
+          </div>
+          <div className="space-y-2 flex-1 min-w-[180px]">
+            <p className="text-xs text-gray-400">Weight decay mode</p>
+            <select
+              value={weightDecayMode}
+              onChange={(e) => {
+                setValue(e.target.value as WeightDecayMode, `${OPTIMIZER_PARAMS_PATH}.weight_decay_mode`);
+                setApplyStatus('idle');
+              }}
+              className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none"
+            >
+              {WEIGHT_DECAY_MODE_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
           </div>
           <div className="space-y-2 flex-1 min-w-[140px]">
             <p className="text-xs text-gray-400">Beta1</p>

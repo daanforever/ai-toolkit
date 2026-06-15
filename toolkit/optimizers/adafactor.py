@@ -10,6 +10,7 @@ from toolkit.lora_utils.stagnation_detector import StagnationDetector
 
 
 class Adafactor(torch.optim.Optimizer):
+    _WEIGHT_DECAY_MODES = ("update_rms", "param_rms", "absolute")
     """
     Adafactor implementation with stochastic rounding accumulation and stochastic rounding on apply.
     Modified from transformers Adafactor implementation to support stochastic rounding accumulation and apply.
@@ -53,6 +54,9 @@ class Adafactor(torch.optim.Optimizer):
             Suggested values: 0.9 (default), 0.95 or 0.99 for smoother updates.
         weight_decay (`float`, *optional*, defaults to 0.0):
             Weight decay (L2 penalty)
+        weight_decay_mode (`str`, *optional*, defaults to `"absolute"`):
+            Weight decay mode: `"update_rms"` uses update RMS, `"param_rms"` uses parameter RMS,
+            `"absolute"` uses decoupled factor `(1 - lr * weight_decay)`.
         scale_parameter (`bool`, *optional*, defaults to `False`):
             If True, learning rate is scaled by root mean square.
             Scaling is stronger when update magnitude is large (to protect small parameters).
@@ -141,6 +145,7 @@ class Adafactor(torch.optim.Optimizer):
         beta2=0.99,
         rms_max_decay_rate=0.97,
         weight_decay=0.0,
+        weight_decay_mode: str = "absolute",
         scale_parameter=False,
         relative_step=False,
         warmup_init=False,
@@ -156,6 +161,7 @@ class Adafactor(torch.optim.Optimizer):
         saddle_point_threshold: float = 0.001,
         saddle_point_step: float = 0.01,
     ):
+        weight_decay_mode = self._validate_weight_decay_mode(weight_decay_mode)
         defaults = {
             "lr": lr,
             "eps": eps,
@@ -164,6 +170,7 @@ class Adafactor(torch.optim.Optimizer):
             "beta2": beta2,
             "rms_max_decay_rate": rms_max_decay_rate,
             "weight_decay": weight_decay,
+            "weight_decay_mode": weight_decay_mode,
             "scale_parameter": scale_parameter,
             "relative_step": relative_step,
             "warmup_init": warmup_init,
@@ -183,6 +190,7 @@ class Adafactor(torch.optim.Optimizer):
             group["warmup_active"] = False
             group["factored"] = factored
             group["emergency_brake"] = emergency_brake
+            group["weight_decay_mode"] = weight_decay_mode
 
         # Create stagnation detector for RMS(parameter) based heuristic.
         self._saddle_point_detector = StagnationDetector(
@@ -201,6 +209,7 @@ class Adafactor(torch.optim.Optimizer):
         self._clip_threshold = clip_threshold
         self._rms_max_decay_rate = rms_max_decay_rate
         self._weight_decay = weight_decay
+        self._weight_decay_mode = weight_decay_mode
         self._scale_parameter = scale_parameter
         self._relative_step = relative_step
         self._warmup_init = warmup_init
@@ -258,6 +267,15 @@ class Adafactor(torch.optim.Optimizer):
         if is_debug_enabled():
             print_acc(f"Adafactor: applied runtime weight_decay={value}")
 
+    def set_weight_decay_mode(self, value: str) -> None:
+        """Update weight_decay_mode at runtime (e.g. from UI)."""
+        mode = self._validate_weight_decay_mode(value)
+        self._weight_decay_mode = mode
+        for group in self.param_groups:
+            group["weight_decay_mode"] = mode
+        if is_debug_enabled():
+            print_acc(f"Adafactor: applied runtime weight_decay_mode={mode}")
+
     def set_emergency_brake(self, value: float | None) -> None:
         """Update emergency_brake at runtime (e.g. from UI). None disables."""
         self._emergency_brake = value
@@ -296,6 +314,7 @@ class Adafactor(torch.optim.Optimizer):
             group["clip_threshold"] = self._clip_threshold
             group["rms_max_decay_rate"] = self._rms_max_decay_rate
             group["weight_decay"] = self._weight_decay
+            group["weight_decay_mode"] = self._weight_decay_mode
             group["scale_parameter"] = self._scale_parameter
             group["relative_step"] = self._relative_step
             group["warmup_init"] = self._warmup_init
@@ -307,6 +326,15 @@ class Adafactor(torch.optim.Optimizer):
             group["instability_score"] = group.get("instability_score", 0.0)
 
         self._migrate_optimizer_state_buffers()
+
+    @classmethod
+    def _validate_weight_decay_mode(cls, value: str) -> str:
+        if value not in cls._WEIGHT_DECAY_MODES:
+            raise ValueError(
+                f"Invalid weight_decay_mode '{value}'. "
+                f"Expected one of: {', '.join(cls._WEIGHT_DECAY_MODES)}"
+            )
+        return value
 
     def _migrate_optimizer_state_buffers(self):
         """Add or reset momentum buffers after load when optimizer_params changed."""
@@ -1006,7 +1034,15 @@ class Adafactor(torch.optim.Optimizer):
                 update_rms = self._rms(update)
 
                 if group["weight_decay"] != 0:
-                    p_data_fp32.mul_(1.0 - group["weight_decay"] * update_rms)
+                    weight_decay_mode = self._validate_weight_decay_mode(
+                        group.get("weight_decay_mode", "absolute")
+                    )
+                    if weight_decay_mode == "update_rms":
+                        p_data_fp32.mul_(1.0 - group["weight_decay"] * update_rms)
+                    elif weight_decay_mode == "param_rms":
+                        p_data_fp32.mul_(1.0 - group["weight_decay"] * rms_t)
+                    else:
+                        p_data_fp32.mul_(1.0 - lr * group["weight_decay"])
 
                 p_data_fp32.add_(-update)
 

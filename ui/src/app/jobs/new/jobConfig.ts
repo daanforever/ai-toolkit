@@ -74,6 +74,7 @@ export const defaultJobConfig: JobConfig = {
           content_or_style: 'balanced',
           optimizer_params: {
             weight_decay: 1e-4,
+            weight_decay_mode: 'absolute',
           },
           unload_text_encoder: false,
           cache_text_embeddings: false,

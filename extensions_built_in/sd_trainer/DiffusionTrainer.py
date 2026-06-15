@@ -46,6 +46,7 @@ class DiffusionTrainer(SDTrainer):
             self._last_applied_runtime_gaussian_mean_2 = None
             self._last_applied_runtime_gaussian_std_2 = None
             self._last_applied_runtime_weight_decay = None
+            self._last_applied_runtime_weight_decay_mode = None
             self._last_applied_runtime_beta1 = None
             self._last_applied_runtime_beta2 = None
             self._last_applied_runtime_content_or_style = None
@@ -391,6 +392,25 @@ class DiffusionTrainer(SDTrainer):
 
         return _read()
 
+    def get_runtime_weight_decay_mode(self):
+        """Read runtime_weight_decay_mode from DB (only when is_ui_trainer). Returns str or None."""
+        if not self.is_ui_trainer:
+            return None
+
+        def _read():
+            with self._db_connect() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT runtime_weight_decay_mode FROM RuntimeParams WHERE jobId = ?",
+                    (self.job_id,),
+                )
+                row = cursor.fetchone()
+                if row is None or row[0] is None:
+                    return None
+                return str(row[0])
+
+        return _read()
+
     def get_runtime_beta1(self):
         """Read runtime_beta1 from DB (only when is_ui_trainer). Returns float or None."""
         if not self.is_ui_trainer:
@@ -669,6 +689,29 @@ class DiffusionTrainer(SDTrainer):
                     f"\nruntime_weight_decay from DB not applied: optimizer has no set_weight_decay (type: {type(optimizer).__name__})"
                 )
         self._last_applied_runtime_weight_decay = value
+
+    def apply_runtime_weight_decay_mode(self):
+        """If runtime_weight_decay_mode is set in DB, apply it to the optimizer (e.g. Adafactor)."""
+        if not self.is_ui_trainer:
+            return
+        value = self.get_runtime_weight_decay_mode()
+        if value is None:
+            return
+        if value == self._last_applied_runtime_weight_decay_mode:
+            return
+        optimizer = unwrap_model(self.optimizer)
+        while getattr(optimizer, "optimizer", None) is not None:
+            optimizer = optimizer.optimizer
+        if hasattr(optimizer, "set_weight_decay_mode"):
+            if is_debug_enabled():
+                print_acc(f"\nruntime_weight_decay_mode from UI/DB: {value}")
+            optimizer.set_weight_decay_mode(value)
+        else:
+            if is_debug_enabled():
+                print_acc(
+                    f"\nruntime_weight_decay_mode from DB not applied: optimizer has no set_weight_decay_mode (type: {type(optimizer).__name__})"
+                )
+        self._last_applied_runtime_weight_decay_mode = value
 
     def apply_runtime_beta1(self):
         """If runtime_beta1 is set in DB, apply it to the optimizer (e.g. Adafactor). None disables momentum."""
@@ -982,6 +1025,7 @@ class DiffusionTrainer(SDTrainer):
         self._last_applied_runtime_gaussian_mean_2 = None
         self._last_applied_runtime_gaussian_std_2 = None
         self._last_applied_runtime_weight_decay = None
+        self._last_applied_runtime_weight_decay_mode = None
         self._last_applied_runtime_beta1 = None
         self._last_applied_runtime_beta2 = None
         self._last_applied_runtime_content_or_style = None
@@ -1111,6 +1155,7 @@ class DiffusionTrainer(SDTrainer):
             self.apply_runtime_gaussian_params()
             self.apply_runtime_gaussian_peak2_params()
             self.apply_runtime_weight_decay()
+            self.apply_runtime_weight_decay_mode()
             self.apply_runtime_beta1()
             self.apply_runtime_beta2()
             self.apply_runtime_content_or_style()

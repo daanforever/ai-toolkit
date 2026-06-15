@@ -114,6 +114,8 @@ export interface EMAConfig {
   ema_decay: number;
 }
 
+export type WeightDecayMode = 'update_rms' | 'param_rms' | 'absolute';
+
 export interface TrainConfig {
   batch_size: number;
   bypass_guidance_embedding?: boolean;
@@ -137,6 +139,7 @@ export interface TrainConfig {
   cache_text_embeddings: boolean;
   optimizer_params: {
     weight_decay: number;
+    weight_decay_mode: WeightDecayMode;
   };
   skip_first_sample: boolean;
   force_first_sample: boolean;

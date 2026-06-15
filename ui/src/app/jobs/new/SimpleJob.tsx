@@ -33,6 +33,11 @@ type Props = {
 };
 
 const isDev = process.env.NODE_ENV === 'development';
+const weightDecayModeOptions = [
+  { value: 'absolute', label: 'Absolute (lr * wd)' },
+  { value: 'update_rms', label: 'Update RMS (wd * update_rms)' },
+  { value: 'param_rms', label: 'Param RMS (wd * param_rms)' },
+];
 
 export default function SimpleJob({
   jobConfig,
@@ -515,6 +520,15 @@ export default function SimpleJob({
                   placeholder="eg. 0.0001"
                   min={0}
                   required
+                />
+                <SelectInput
+                  label="Weight Decay Mode"
+                  className="pt-2"
+                  value={jobConfig.config.process[0].train.optimizer_params.weight_decay_mode ?? 'absolute'}
+                  onChange={value =>
+                    setJobConfig(value, 'config.process[0].train.optimizer_params.weight_decay_mode')
+                  }
+                  options={weightDecayModeOptions}
                 />
               </div>
               <div>
