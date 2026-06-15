@@ -71,13 +71,6 @@ def _log(msg):
     print(msg, flush=True)
 
 
-def _expected_flow_match_min_snr_weight(timestep_value: float, gamma: float) -> float:
-    """Min-SNR flow-match weight: min(gamma, SNR) / (1 + sqrt(SNR))^2 for x_t = (1-t)x_0 + t*noise."""
-    t = max(min(timestep_value / 1000.0, 1.0), 1e-8)
-    snr = ((1.0 - t) ** 2) / (t ** 2 + 1e-8)
-    return min(gamma, snr) / ((1.0 + snr ** 0.5) ** 2)
-
-
 class _TeeStderr:
     """Writes to both real stderr and a buffer. Use to capture loader/torch stderr during load_model()."""
 
@@ -431,57 +424,51 @@ def main():
         traceback.print_exc()
         sys.exit(1)
 
-    # 4d. SNR weighting (min_snr_gamma) after runtime params update / "data loaders recreated".
-    # The adapter must support get_all_snr and apply_snr_weight without alphas_cumprod.
-    _log("4d. noise_scheduler supports SNR weighting (get_all_snr, apply_snr_weight, min_snr_gamma) ...")
+    # 4d. SNR API regression for the default DiffSynth adapter (use_diffsynth_training_loop=True).
+    # DiffSynthZImageSchedulerAdapter inherits compute_snr, so get_all_snr / apply_snr_weight must
+    # work without DDPM alphas_cumprod. Default DiffSynth training disables min_snr_gamma in the
+    # trainer (see step 7a); this step does NOT validate the active toolkit-loop SNR path.
+    _log(
+        "4d. noise_scheduler SNR API guard (get_all_snr, apply_snr_weight; "
+        "default DiffSynth loop does not apply min_snr_gamma) ..."
+    )
     try:
-        from toolkit.train_tools import get_all_snr, apply_snr_weight
+        from extensions_built_in.diffusion_models.z_image_diffsynth.snr_weighting_checks import (
+            assert_all_snr_table,
+            assert_apply_snr_flow_match_weights,
+            assert_scheduler_uses_compute_snr_path,
+            non_integer_schedule_timesteps,
+        )
 
         noise_scheduler = sd.noise_scheduler
         assert noise_scheduler is not None, "sd.noise_scheduler must be set"
-        # Simulate runtime update: min_snr_gamma from UI/DB (e.g. 5.0) with data loaders recreated
+        assert_scheduler_uses_compute_snr_path(noise_scheduler)
+        assert_all_snr_table(noise_scheduler, device)
+
         min_snr_gamma = 5.0
-        all_snr = get_all_snr(noise_scheduler, device)
-        assert all_snr is not None and all_snr.dim() == 1, "get_all_snr must return 1d tensor"
-        assert all_snr.shape[0] == 1000, "get_all_snr must return 1000 timesteps"
-        # apply_snr_weight as in SDTrainer.calculate_loss
         check_timesteps = [10, 500, 990]
-        loss = torch.ones(len(check_timesteps), device=device, dtype=torch.float32)
-        timesteps = torch.tensor(check_timesteps, device=device, dtype=torch.float32)
-        weighted = apply_snr_weight(
-            loss,
-            timesteps,
+        assert_apply_snr_flow_match_weights(
             noise_scheduler,
+            check_timesteps,
             min_snr_gamma,
-            prediction_type="flow_match",
+            device,
         )
-        assert weighted.shape == loss.shape, "apply_snr_weight must preserve shape"
-        for i, ts in enumerate(check_timesteps):
-            expected = _expected_flow_match_min_snr_weight(float(ts), min_snr_gamma)
-            actual = weighted[i].item()
-            rtol, atol = 1e-4, 1e-6
-            if abs(expected) > 0:
-                assert abs(actual - expected) <= atol + rtol * abs(expected), (
-                    f"timestep {ts}: expected {expected}, got {actual}"
-                )
-            else:
-                assert abs(actual) <= atol, (
-                    f"timestep {ts}: expected ~0, got {actual}"
-                )
-        _log(
-            "4d. OK (min_snr_gamma weights match expected for timesteps "
-            f"{check_timesteps}: {weighted.tolist()})"
-        )
-    except AttributeError as e:
-        if "alphas_cumprod" in str(e):
-            _log(
-                f"4d. FAILED: scheduler missing compute_snr/alphas_cumprod support: {e}"
+
+        float_timesteps = non_integer_schedule_timesteps(noise_scheduler)
+        if float_timesteps:
+            assert_apply_snr_flow_match_weights(
+                noise_scheduler,
+                float_timesteps,
+                min_snr_gamma,
+                device,
             )
-            traceback.print_exc()
-            sys.exit(1)
-        raise
+            _log(f"   float schedule timesteps checked: {float_timesteps}")
+        else:
+            _log("   no non-integer DiffSynth timesteps to check interpolation")
+
+        _log("4d. OK (SNR API + min_snr_gamma weight checks passed)")
     except Exception:
-        _log("   FAILED in step 4d (SNR weighting / data loaders recreated):")
+        _log("   FAILED in step 4d (scheduler SNR support):")
         traceback.print_exc()
         sys.exit(1)
 

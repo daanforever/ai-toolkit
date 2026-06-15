@@ -30,5 +30,7 @@ When aligning a job with [DiffSynth-Studio/examples](DiffSynth-Studio/examples/z
 ## Tests
 
 - `test_diffsynth_training.py` — loss scale, timestep single-application, config reader.
+- `test_snr_weighting.py` — SNR / `min_snr_gamma` for toolkit loop (`use_diffsynth_training_loop: false`).
+- `test_smoke.py` step 4d — SNR API guard for default DiffSynth adapter (`compute_snr`; SNR disabled in default training).
 - `test_smoke.py` step 7a — trainer flags and `linear_timesteps`.
 - `testing/test_gaussian_full.py` — regression with `use_diffsynth_training_loop: false` (toolkit gaussian path).
