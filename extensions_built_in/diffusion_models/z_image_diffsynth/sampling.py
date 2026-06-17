@@ -235,6 +235,11 @@ def get_generation_pipeline(sd_model):
                 tr = sd_model._sampling_transformer
                 tr = getattr(tr, "_inner_dit", getattr(tr, "dit", tr))
                 pipe.transformer = unwrap_model(tr)
+                use_dynamic_shifting = _resolve_use_dynamic_shifting_from_sd_model(sd_model)
+                if use_dynamic_shifting:
+                    pipe.scheduler = CustomFlowMatchEulerDiscreteScheduler(
+                        **build_scheduler_config(use_dynamic_shifting=True)
+                    )
                 return pipe
             except Exception:
                 pass

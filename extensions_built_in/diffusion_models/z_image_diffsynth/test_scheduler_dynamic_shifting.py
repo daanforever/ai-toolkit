@@ -5,6 +5,8 @@ Run from repo root:
   venv\\Scripts\\python.exe -m pytest extensions_built_in/diffusion_models/z_image_diffsynth/test_scheduler_dynamic_shifting.py -q
 """
 
+import warnings
+
 import torch
 import pytest
 
@@ -83,6 +85,28 @@ def test_static_shift_timesteps_same_across_resolutions():
     t_small = _shift_timesteps_for_latents(sched, 64, 64)
     t_large = _shift_timesteps_for_latents(sched, 128, 128)
     assert torch.allclose(t_small, t_large)
+
+
+def test_dynamic_shift_timesteps_no_divide_by_zero_warning():
+    sched = ZImageDiffSynthModel.get_train_scheduler(
+        use_diffsynth_loop=False,
+        use_dynamic_shifting=True,
+    )
+    latents = torch.zeros(1, 16, 64, 64)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", RuntimeWarning)
+        sched.set_train_timesteps(
+            1000,
+            device="cpu",
+            timestep_type="shift",
+            latents=latents,
+            patch_size=2,
+        )
+    divide_warnings = [
+        w for w in caught
+        if issubclass(w.category, RuntimeWarning) and "divide by zero" in str(w.message)
+    ]
+    assert divide_warnings == []
 
 
 def test_sampling_dynamic_vs_static_scheduler():

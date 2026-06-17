@@ -162,6 +162,14 @@ class CustomFlowMatchEulerDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
     def scale_model_input(self, sample: torch.Tensor, timestep: Union[float, torch.Tensor]) -> torch.Tensor:
         return sample
 
+    def time_shift(self, mu: float, sigma: float, t):
+        # Linspace schedules include sigma=0; avoid 1/t singularity in parent time_shift.
+        if isinstance(t, np.ndarray):
+            t = np.clip(np.asarray(t, dtype=np.float64), 1e-8, None)
+        elif isinstance(t, torch.Tensor):
+            t = t.clamp(min=1e-8)
+        return super().time_shift(mu, sigma, t)
+
     def set_train_timesteps(
         self,
         num_timesteps,
