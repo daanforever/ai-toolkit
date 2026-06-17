@@ -1,8 +1,9 @@
 # Z-Image DiffSynth adapter (`zimage_diffsynth`)
 
-## Flags: `use_diffsynth_training_loop` and `use_diffsynth_prompt_encoding`
+## Flags: `use_diffsynth_training_loop`, `use_diffsynth_prompt_encoding`, and `use_dynamic_shifting`
 
 - **Training loop:** `model.model_kwargs["use_diffsynth_training_loop"]` (default `true` if omitted).
+- **Dynamic time shifting:** `model.model_kwargs["use_dynamic_shifting"]` (default `false` if omitted). When `true`, uses Flux-style resolution-dependent `mu` + exponential `time_shift` (as in diffusers `ZImagePipeline`). Requires **`use_diffsynth_training_loop: false`** and **`train.timestep_type: shift`** (or `flux_shift`). Ignored when DiffSynth training loop is enabled.
 - **Prompt encoding:** `model.model_kwargs["use_diffsynth_prompt_encoding"]` — if omitted, inherits `use_diffsynth_training_loop`.
   - `true`: literal `<|im_start|>user…` chain (`encode_prompt_diffsynth_literal_t2i`, DiffSynth T2I).
   - `false`: toolkit chat template (`encode_prompt`).
@@ -18,6 +19,24 @@
   - **`linear_timesteps` is forced to `true`** on the trainer so `get_weights_for_timesteps` uses DiffSynth `linear_timesteps_weights` (same family as `FlowMatchScheduler.training_weight`). If you need full manual control of toolkit timestep weighting, set **`use_diffsynth_training_loop: false`**.
 - **`false` (toolkit loop):** generic `prompt_encoding.encode_prompt` (chat template), standard `SDTrainer` MSE path with your YAML `timestep_type` / `content_or_style` / SNR settings; trainer sets `noise_scheduler: flowmatch` string for the batch processor.
 
+### Example: dynamic time shifting (toolkit loop)
+
+```yaml
+process:
+  - type: z_image_diffsynth_trainer
+    train:
+      noise_scheduler: flowmatch
+      prediction_type: flowmatch
+      timestep_type: shift
+    model:
+      arch: zimage_diffsynth
+      model_kwargs:
+        use_diffsynth_training_loop: false
+        use_dynamic_shifting: true
+```
+
+Default `use_dynamic_shifting: false` keeps current behaviour: DiffSynth static `shift=3` in DiffSynth loop, static shift in toolkit loop.
+
 ## Checklist vs DiffSynth `Z-Image.sh`
 
 When aligning a job with [DiffSynth-Studio/examples](DiffSynth-Studio/examples/z_image/model_training/lora/Z-Image.sh), compare at least:
@@ -29,6 +48,7 @@ When aligning a job with [DiffSynth-Studio/examples](DiffSynth-Studio/examples/z
 
 ## Tests
 
+- `test_scheduler_dynamic_shifting.py` — `use_dynamic_shifting` scheduler config and per-resolution timesteps.
 - `test_diffsynth_training.py` — loss scale, timestep single-application, config reader.
 - `test_snr_weighting.py` — SNR / `min_snr_gamma` for toolkit loop (`use_diffsynth_training_loop: false`).
 - `test_smoke.py` step 4d — SNR API guard for default DiffSynth adapter (`compute_snr`; SNR disabled in default training).

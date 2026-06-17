@@ -2,6 +2,7 @@
 # When sampling_name_or_path points to a diffusers-format checkpoint, we use ZImagePipeline
 # (same as z_image) so the same checkpoint gives the same quality.
 
+import math
 import os
 import sys
 from typing import List, Optional
@@ -11,27 +12,41 @@ from PIL import Image
 
 from toolkit.samplers.custom_flowmatch_sampler import (
     CustomFlowMatchEulerDiscreteScheduler,
+    calculate_shift,
 )
 from toolkit.util.debug import memory_debug, is_debug_enabled
 
 from . import forward as fwd_mod
-
-scheduler_config = {
-    "num_train_timesteps": 1000,
-    "use_dynamic_shifting": False,
-    "shift": 3.0,
-}
+from .scheduler_config import STATIC_SHIFT, DYNAMIC_SHIFT_DEFAULTS, build_scheduler_config
 
 
-def _get_diffsynth_scheduler(num_inference_steps: int, denoising_strength: float = 1.0):
-    """Z-Image timestep schedule (DiffSynth set_timesteps_z_image style)."""
+def _get_diffsynth_scheduler(
+    num_inference_steps: int,
+    denoising_strength: float = 1.0,
+    use_dynamic_shifting: bool = False,
+    latent_h: Optional[int] = None,
+    latent_w: Optional[int] = None,
+):
+    """Z-Image timestep schedule (DiffSynth static or Flux-style dynamic shift)."""
     sigma_min = 0.0
     sigma_max = 1.0
-    shift = 3.0
     num_train_timesteps = 1000
     sigma_start = sigma_min + (sigma_max - sigma_min) * denoising_strength
     sigmas = torch.linspace(sigma_start, sigma_min, num_inference_steps + 1)[:-1]
-    sigmas = shift * sigmas / (1 + (shift - 1) * sigmas)
+    if use_dynamic_shifting and latent_h is not None and latent_w is not None:
+        image_seq_len = (latent_h // 2) * (latent_w // 2)
+        mu = calculate_shift(
+            image_seq_len,
+            DYNAMIC_SHIFT_DEFAULTS["base_image_seq_len"],
+            DYNAMIC_SHIFT_DEFAULTS["max_image_seq_len"],
+            DYNAMIC_SHIFT_DEFAULTS["base_shift"],
+            DYNAMIC_SHIFT_DEFAULTS["max_shift"],
+        )
+        t = sigmas.clamp(min=1e-8)
+        exp_mu = math.exp(mu)
+        sigmas = exp_mu / (exp_mu + (1 / t - 1) ** 1)
+    else:
+        sigmas = STATIC_SHIFT * sigmas / (1 + (STATIC_SHIFT - 1) * sigmas)
     timesteps = sigmas * num_train_timesteps
     return sigmas, timesteps
 
@@ -53,13 +68,14 @@ def _step_scheduler(sigmas, timesteps, model_output, timestep, sample, device):
 class ZImageDiffSynthPipelineWrapper:
     """Wrapper that mimics pipeline(prompt_embeds=..., ...).images for toolkit compatibility."""
 
-    def __init__(self, dit, vae, tokenizer, text_encoder, device, dtype):
+    def __init__(self, dit, vae, tokenizer, text_encoder, device, dtype, use_dynamic_shifting=False):
         self.dit = dit
         self.vae = vae
         self.tokenizer = tokenizer
         self.text_encoder = text_encoder
         self.device = device
         self.dtype = dtype
+        self.use_dynamic_shifting = use_dynamic_shifting
 
     @torch.no_grad()
     def __call__(
@@ -119,7 +135,12 @@ class ZImageDiffSynthPipelineWrapper:
         else:
             latents = latents.to(device=device, dtype=dtype)
 
-        sigmas, timesteps = _get_diffsynth_scheduler(num_inference_steps)
+        sigmas, timesteps = _get_diffsynth_scheduler(
+            num_inference_steps,
+            use_dynamic_shifting=self.use_dynamic_shifting,
+            latent_h=h,
+            latent_w=w,
+        )
         timesteps = timesteps.to(device)
 
         # When debug logging is enabled, wrap the full sampling loop in a
@@ -178,6 +199,14 @@ class _ImagesOutput:
         self.images = images
 
 
+def _resolve_use_dynamic_shifting_from_sd_model(sd_model) -> bool:
+    try:
+        mk = getattr(getattr(sd_model, "model_config", None), "model_kwargs", None) or {}
+        return bool(mk.get("use_dynamic_shifting", False))
+    except Exception:
+        return False
+
+
 def get_generation_pipeline(sd_model):
     """Build pipeline for sd_model (ZImageDiffSynthModel). Uses sampling transformer if set.
     When sampling_name_or_path points to a diffusers checkpoint (e.g. Z-Image-Turbo), load the
@@ -210,7 +239,10 @@ def get_generation_pipeline(sd_model):
             except Exception:
                 pass
         # Fallback: build from model components (may cause grain if VAE/scheduler differ from Turbo)
-        scheduler = CustomFlowMatchEulerDiscreteScheduler(**scheduler_config)
+        use_dynamic_shifting = _resolve_use_dynamic_shifting_from_sd_model(sd_model)
+        scheduler = CustomFlowMatchEulerDiscreteScheduler(
+            **build_scheduler_config(use_dynamic_shifting=use_dynamic_shifting)
+        )
         vae = getattr(sd_model.vae, "vae_decoder", sd_model.vae)
         te = sd_model.text_encoder[0] if isinstance(sd_model.text_encoder, list) else sd_model.text_encoder
         tok = sd_model.tokenizer[0] if isinstance(sd_model.tokenizer, list) else sd_model.tokenizer
@@ -252,4 +284,5 @@ def get_generation_pipeline(sd_model):
         text_encoder=unwrap_model(text_encoder),
         device=sd_model.device_torch,
         dtype=sd_model.torch_dtype,
+        use_dynamic_shifting=_resolve_use_dynamic_shifting_from_sd_model(sd_model),
     )

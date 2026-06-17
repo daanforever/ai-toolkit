@@ -105,6 +105,35 @@ def test_aggregate_masked_spatial_mean_then_timestep_weight():
     assert torch.allclose(out, ref, rtol=1e-6, atol=1e-6)
 
 
+def test_aggregate_train_turbo_slices_mask_channels_and_interpolates():
+    """train_turbo: mask[:, 3:] then nearest resize to pred spatial size (SDTrainer parity)."""
+    pred = torch.zeros(1, 1, 4, 4)
+    target = torch.ones(1, 1, 4, 4)
+    m = torch.zeros(1, 6, 8, 8)
+    m[:, 0, 0, 0] = 999.0  # ignored: only channels from index 3 are used
+    m[:, 3, 4, 4] = 1.0
+    w = torch.tensor([2.0])
+    timesteps = torch.tensor([0.0])
+    out = dst.aggregate_flow_matching_mse_diffsynth(
+        pred,
+        target,
+        timesteps,
+        w,
+        m,
+        pred,
+        train_turbo=True,
+        log_writer=None,
+        step_num=0,
+        is_main_process=False,
+        log_every=None,
+    )
+    mm = m[:, 3:, :, :]
+    mm = F.interpolate(mm, size=(pred.shape[2], pred.shape[3]), mode="nearest")
+    ref = w * F.mse_loss(pred, target, reduction="none").mul(mm).mean(dim=(1, 2, 3))
+    assert torch.allclose(out, ref, rtol=1e-6, atol=1e-6)
+    assert float(out.item()) < 1.0
+
+
 def test_zimage_trainer_aggregate_applies_timestep_weight_once():
     class TSched:
         def get_weights_for_timesteps(self, timesteps, v2=False, timestep_type="linear"):

@@ -10,6 +10,7 @@ from toolkit.config_modules import GenerateImageConfig, ModelConfig
 from toolkit.models.base_model import BaseModel
 from toolkit.prompt_utils import PromptEmbeds
 from toolkit.samplers.custom_flowmatch_sampler import CustomFlowMatchEulerDiscreteScheduler
+from .scheduler_config import build_scheduler_config
 from .scheduler_adapter import DiffSynthZImageSchedulerAdapter
 from toolkit.accelerator import unwrap_model
 from toolkit.paths import normalize_path
@@ -23,11 +24,13 @@ from . import sampling as sampling_mod
 from . import lora as lora_mod
 from .vae_wrapper import DiffSynthVAEWrapper
 
-scheduler_config = {
-    "num_train_timesteps": 1000,
-    "use_dynamic_shifting": False,
-    "shift": 3.0,
-}
+scheduler_config = build_scheduler_config(use_dynamic_shifting=False)
+
+
+def _resolve_use_dynamic_shifting(model_kwargs):
+    """Resolve dynamic time shifting from model_kwargs (default False)."""
+    mk = model_kwargs or {}
+    return bool(mk.get("use_dynamic_shifting", False))
 
 
 def _resolve_use_diffsynth_prompt_encoding(model_kwargs):
@@ -110,11 +113,15 @@ class ZImageDiffSynthModel(BaseModel):
         self.gradient_checkpointing = True
 
     @staticmethod
-    def get_train_scheduler(use_diffsynth_loop=True):
+    def get_train_scheduler(use_diffsynth_loop=True, use_dynamic_shifting=False):
         """use_diffsynth_loop=True: same timesteps/add_noise/weight as DiffSynth Z-Image.sh."""
+        if use_dynamic_shifting:
+            return CustomFlowMatchEulerDiscreteScheduler(
+                **build_scheduler_config(use_dynamic_shifting=True)
+            )
         if use_diffsynth_loop:
             return DiffSynthZImageSchedulerAdapter()
-        return CustomFlowMatchEulerDiscreteScheduler(**scheduler_config)
+        return CustomFlowMatchEulerDiscreteScheduler(**build_scheduler_config(False))
 
     def get_bucket_divisibility(self):
         return 16 * 2
@@ -292,14 +299,20 @@ class ZImageDiffSynthModel(BaseModel):
         # Flag lives in model_kwargs for this model; default is True so that
         # existing configs (without the flag) keep DiffSynth-compatible behaviour.
         use_diffsynth = True
+        use_dynamic_shifting = False
         try:
             model_kwargs = getattr(self.model_config, "model_kwargs", {}) or {}
             use_diffsynth = model_kwargs.get("use_diffsynth_training_loop", True)
+            use_dynamic_shifting = _resolve_use_dynamic_shifting(model_kwargs)
         except Exception:
-            # On any unexpected shape, keep default True.
+            # On any unexpected shape, keep defaults.
             use_diffsynth = True
+            use_dynamic_shifting = False
 
-        self.noise_scheduler = ZImageDiffSynthModel.get_train_scheduler(use_diffsynth_loop=use_diffsynth)
+        self.noise_scheduler = ZImageDiffSynthModel.get_train_scheduler(
+            use_diffsynth_loop=use_diffsynth,
+            use_dynamic_shifting=use_dynamic_shifting,
+        )
         self.pipeline = None
         self._move_main_network("cpu")
         self._move_sampling_transformer("cpu")

@@ -18,6 +18,17 @@ def _read_use_diffsynth_training_loop_from_config(config) -> bool:
     return bool(use_diffsynth_training_loop)
 
 
+def _read_use_dynamic_shifting_from_config(config) -> bool:
+    if isinstance(config, dict):
+        try:
+            model_cfg = config.get("model", {}) or {}
+            model_kwargs = model_cfg.get("model_kwargs", {}) or {}
+            return bool(model_kwargs.get("use_dynamic_shifting", False))
+        except Exception:
+            return False
+    return False
+
+
 class ZImageDiffSynthTrainer(DiffusionTrainer):
     """
     Trainer for Z-Image DiffSynth (arch zimage_diffsynth).
@@ -37,7 +48,24 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
 
         cfg = getattr(self, "config", None)
         use_diffsynth_training_loop = _read_use_diffsynth_training_loop_from_config(cfg)
+        use_dynamic_shifting = _read_use_dynamic_shifting_from_config(cfg)
         self.use_diffsynth_training_loop = use_diffsynth_training_loop
+        self.use_dynamic_shifting = use_dynamic_shifting
+
+        if use_dynamic_shifting and use_diffsynth_training_loop:
+            self.print(
+                "ZImage DiffSynth: use_dynamic_shifting is ignored when "
+                "use_diffsynth_training_loop is true; set use_diffsynth_training_loop: false "
+                "and train.timestep_type: shift for Flux-style dynamic time shifting."
+            )
+        elif use_dynamic_shifting:
+            tt = getattr(tc, "timestep_type", None)
+            if tt not in ("shift", "flux_shift"):
+                self.print(
+                    "ZImage DiffSynth: use_dynamic_shifting requires train.timestep_type "
+                    "'shift' or 'flux_shift' (toolkit loop); dynamic mu is only applied in "
+                    "that scheduler path."
+                )
 
         # Always train Z-Image in flow-matching mode with 1000 train timesteps.
         # We let ZImageDiffSynthModel.get_train_scheduler() provide the actual
