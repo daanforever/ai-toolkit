@@ -214,6 +214,9 @@ class DiffusionTrainer(SDTrainer):
         while getattr(optimizer, "optimizer", None) is not None:
             optimizer = optimizer.optimizer
         if hasattr(optimizer, "set_lr"):
+            if getattr(optimizer, "_lr", None) == value:
+                self._last_applied_runtime_lr = value
+                return
             if is_debug_enabled():
                 print_acc(f"\nruntime_lr from UI/DB: {value}")
             optimizer.set_lr(value)
@@ -255,6 +258,9 @@ class DiffusionTrainer(SDTrainer):
         while getattr(optimizer, "optimizer", None) is not None:
             optimizer = optimizer.optimizer
         if hasattr(optimizer, "set_min_lr"):
+            if getattr(optimizer, "_min_lr", None) == value:
+                self._last_applied_runtime_min_lr = value
+                return
             if is_debug_enabled():
                 print_acc(f"\nruntime_min_lr from UI/DB: {value}")
             optimizer.set_min_lr(value)
@@ -294,6 +300,12 @@ class DiffusionTrainer(SDTrainer):
         if mean is None and std is None:
             return
         if mean == self._last_applied_runtime_gaussian_mean and std == self._last_applied_runtime_gaussian_std:
+            return
+        mean_unchanged = mean is None or mean == self.train_config.gaussian_mean
+        std_unchanged = std is None or std == self.train_config.gaussian_std
+        if mean_unchanged and std_unchanged:
+            self._last_applied_runtime_gaussian_mean = mean
+            self._last_applied_runtime_gaussian_std = std
             return
         if mean is not None:
             self.train_config.gaussian_mean = mean
@@ -342,6 +354,12 @@ class DiffusionTrainer(SDTrainer):
             mean2 == self._last_applied_runtime_gaussian_mean_2
             and std2 == self._last_applied_runtime_gaussian_std_2
         ):
+            return
+        mean2_unchanged = mean2 is None or mean2 == self.train_config.gaussian_mean_2
+        std2_unchanged = std2 is None or std2 == self.train_config.gaussian_std_2
+        if mean2_unchanged and std2_unchanged:
+            self._last_applied_runtime_gaussian_mean_2 = mean2
+            self._last_applied_runtime_gaussian_std_2 = std2
             return
         if mean2 is not None:
             self.train_config.gaussian_mean_2 = mean2
@@ -458,7 +476,10 @@ class DiffusionTrainer(SDTrainer):
             return
         if batch_size == self._last_applied_runtime_batch_size:
             return
-        
+        if batch_size == self.train_config.batch_size:
+            self._last_applied_runtime_batch_size = batch_size
+            return
+
         old_batch_size = self.train_config.batch_size
         self.train_config.batch_size = batch_size
         self._last_applied_runtime_batch_size = batch_size
@@ -514,6 +535,9 @@ class DiffusionTrainer(SDTrainer):
         if value is None:
             return
         if value == self._last_applied_runtime_gradient_accumulation:
+            return
+        if value == self.train_config.gradient_accumulation:
+            self._last_applied_runtime_gradient_accumulation = value
             return
         self.train_config.gradient_accumulation = value
         self._last_applied_runtime_gradient_accumulation = value
@@ -605,6 +629,9 @@ class DiffusionTrainer(SDTrainer):
         value = self.get_runtime_debug()
         if value is None or value == self._last_applied_runtime_debug:
             return
+        if value == self.logging_config.debug:
+            self._last_applied_runtime_debug = value
+            return
         self.logging_config.debug = value
         self._last_applied_runtime_debug = value
         if is_debug_enabled():
@@ -618,6 +645,9 @@ class DiffusionTrainer(SDTrainer):
         if save_every is None:
             return
         if save_every == self._last_applied_runtime_save_every:
+            return
+        if save_every == self.save_config.save_every:
+            self._last_applied_runtime_save_every = save_every
             return
 
         old_save_every = self.save_config.save_every
@@ -638,6 +668,9 @@ class DiffusionTrainer(SDTrainer):
             return
         if sample_every == self._last_applied_runtime_sample_every:
             return
+        if sample_every == self.sample_config.sample_every:
+            self._last_applied_runtime_sample_every = sample_every
+            return
         
         old_sample_every = self.sample_config.sample_every
         self.sample_config.sample_every = sample_every
@@ -656,6 +689,9 @@ class DiffusionTrainer(SDTrainer):
         if value is None:
             return
         if value == self._last_applied_runtime_min_snr_gamma:
+            return
+        if value == self.train_config.min_snr_gamma:
+            self._last_applied_runtime_min_snr_gamma = value
             return
         
         old_min_snr_gamma = self.train_config.min_snr_gamma
@@ -680,6 +716,10 @@ class DiffusionTrainer(SDTrainer):
         while getattr(optimizer, "optimizer", None) is not None:
             optimizer = optimizer.optimizer
         if hasattr(optimizer, "set_weight_decay"):
+            pg0 = optimizer.param_groups[0] if optimizer.param_groups else {}
+            if pg0.get("weight_decay") == value:
+                self._last_applied_runtime_weight_decay = value
+                return
             if is_debug_enabled():
                 print_acc(f"\nruntime_weight_decay from UI/DB: {value}")
             optimizer.set_weight_decay(value)
@@ -703,6 +743,9 @@ class DiffusionTrainer(SDTrainer):
         while getattr(optimizer, "optimizer", None) is not None:
             optimizer = optimizer.optimizer
         if hasattr(optimizer, "set_weight_decay_mode"):
+            if getattr(optimizer, "_weight_decay_mode", None) == value:
+                self._last_applied_runtime_weight_decay_mode = value
+                return
             if is_debug_enabled():
                 print_acc(f"\nruntime_weight_decay_mode from UI/DB: {value}")
             optimizer.set_weight_decay_mode(value)
@@ -724,6 +767,9 @@ class DiffusionTrainer(SDTrainer):
         while getattr(optimizer, "optimizer", None) is not None:
             optimizer = optimizer.optimizer
         if hasattr(optimizer, "set_beta1"):
+            if getattr(optimizer, "_beta1", None) == value:
+                self._last_applied_runtime_beta1 = value
+                return
             if is_debug_enabled():
                 print_acc(f"\nruntime_beta1 from UI/DB: {value}")
             optimizer.set_beta1(value)
@@ -747,6 +793,9 @@ class DiffusionTrainer(SDTrainer):
         while getattr(optimizer, "optimizer", None) is not None:
             optimizer = optimizer.optimizer
         if hasattr(optimizer, "set_beta2"):
+            if getattr(optimizer, "_beta2", None) == value:
+                self._last_applied_runtime_beta2 = value
+                return
             if is_debug_enabled():
                 print_acc(f"\nruntime_beta2 from UI/DB: {value}")
             optimizer.set_beta2(value)
@@ -785,8 +834,10 @@ class DiffusionTrainer(SDTrainer):
             return
         if value == self._last_applied_runtime_content_or_style:
             return
+        if (value == self.train_config.content_or_style):
+            self._last_applied_runtime_content_or_style = value
+            return
         self.train_config.content_or_style = value
-        self.train_config.content_or_style_reg = value
         self._last_applied_runtime_content_or_style = value
         if is_debug_enabled():
             print_acc(f"\nruntime content_or_style from UI/DB: {value}")
@@ -818,6 +869,9 @@ class DiffusionTrainer(SDTrainer):
         if value is None:
             return
         if value == self._last_applied_runtime_timestep_type:
+            return
+        if value == self.train_config.timestep_type:
+            self._last_applied_runtime_timestep_type = value
             return
         self.train_config.timestep_type = value
         self._last_applied_runtime_timestep_type = value
@@ -863,6 +917,12 @@ class DiffusionTrainer(SDTrainer):
         if self.data_loader is None:
             return
         datasets = get_dataloader_datasets(self.data_loader)
+        if len(datasets) >= len(weights) and all(
+            ds.dataset_config.network_weight == weights[i]
+            for i, ds in enumerate(datasets[: len(weights)])
+        ):
+            self._last_applied_runtime_network_weights = weights_tuple
+            return
         for i, ds in enumerate(datasets):
             if i < len(weights):
                 ds.dataset_config.network_weight = weights[i]
@@ -966,6 +1026,28 @@ class DiffusionTrainer(SDTrainer):
             sigma_db,
         )
         if fc_key == self._last_applied_runtime_fc_key:
+            return
+
+        config_matches = True
+        if ts_db is not None:
+            config_matches = config_matches and tuple(
+                self.train_config.fixed_cycle_timesteps or []
+            ) == tuple(ts_db)
+        if seed_db is not None:
+            config_matches = config_matches and self.train_config.fixed_cycle_seed == seed_db
+        if peaks_db is not None:
+            expected_peaks = list(peaks_db) if len(peaks_db) > 0 else None
+            config_matches = (
+                config_matches
+                and self.train_config.fixed_cycle_weight_peak_timesteps == expected_peaks
+            )
+        if sigma_db is not None:
+            config_matches = (
+                config_matches
+                and self.train_config.fixed_cycle_weight_sigma == sigma_db
+            )
+        if config_matches:
+            self._last_applied_runtime_fc_key = fc_key
             return
 
         need_reset_cache = False
