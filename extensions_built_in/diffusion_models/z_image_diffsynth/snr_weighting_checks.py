@@ -42,16 +42,12 @@ def lookup_snr(
     timestep_values: Union[Sequence[float], torch.Tensor],
     device,
 ) -> torch.Tensor:
-    """Mirror apply_snr_weight SNR index + linear interpolation (train_tools.py)."""
-    offset = 0
-    if scheduler.timesteps[0] == 1000:
-        offset = 1
+    """Mirror apply_snr_weight flow_match SNR: t = timestep / ntt, SNR = (1-t)^2 / t^2."""
+    del all_snr
     timestep_tensor = torch.as_tensor(timestep_values, device=device, dtype=torch.float32)
-    timestep_indices = (timestep_tensor - offset).clamp(min=0, max=all_snr.shape[0] - 1)
-    idx_low = torch.floor(timestep_indices).long()
-    idx_high = torch.ceil(timestep_indices).long()
-    lerp = (timestep_indices - idx_low.float()).to(all_snr.dtype)
-    return all_snr[idx_low] * (1.0 - lerp) + all_snr[idx_high] * lerp
+    ntt = float(scheduler.config.num_train_timesteps)
+    t = (timestep_tensor / ntt).clamp(min=1e-8, max=1.0)
+    return ((1.0 - t) ** 2) / (t ** 2 + 1e-8)
 
 
 def expected_flow_match_min_snr_weight(snr: Union[float, torch.Tensor], gamma: float) -> torch.Tensor:

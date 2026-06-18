@@ -743,29 +743,25 @@ def apply_snr_weight(
         fixed=False,
         prediction_type="epsilon",
 ):
-    # will get it from noise scheduler if exist or will calculate it if not
-    all_snr = get_all_snr(noise_scheduler, loss.device)
-    # step_indices = []
-    # for t in timesteps:
-    #     for i, st in enumerate(noise_scheduler.timesteps):
-    #         if st == t:
-    #             step_indices.append(i)
-    #             break
-    # this breaks on some schedulers
-    # step_indices = [(noise_scheduler.timesteps == t).nonzero().item() for t in timesteps]
-
-    offset = 0
-    if noise_scheduler.timesteps[0] == 1000:
-        offset = 1
     timestep_values = torch.as_tensor(timesteps, device=loss.device, dtype=torch.float32)
-    timestep_indices = (timestep_values - offset).clamp(min=0, max=all_snr.shape[0] - 1)
 
-    # Support non-integer timesteps (e.g. flowmatch shift/sigmoid schedules) by
-    # linearly interpolating SNR between neighboring canonical timestep entries.
-    idx_low = torch.floor(timestep_indices).long()
-    idx_high = torch.ceil(timestep_indices).long()
-    lerp = (timestep_indices - idx_low.float()).to(all_snr.dtype)
-    snr = all_snr[idx_low] * (1.0 - lerp) + all_snr[idx_high] * lerp
+    if prediction_type in ("flow_match", "rectified_flow"):
+        # SNR from noise level t = timestep / ntt (matches CustomFlowMatch add_noise).
+        ntt = float(noise_scheduler.config.num_train_timesteps)
+        t = (timestep_values / ntt).clamp(min=1e-8, max=1.0)
+        snr = ((1.0 - t) ** 2) / (t ** 2 + 1e-8)
+    else:
+        all_snr = get_all_snr(noise_scheduler, loss.device)
+        offset = 0
+        if noise_scheduler.timesteps[0] == 1000:
+            offset = 1
+        timestep_indices = (timestep_values - offset).clamp(min=0, max=all_snr.shape[0] - 1)
+
+        # Support non-integer timesteps by linearly interpolating SNR between table entries.
+        idx_low = torch.floor(timestep_indices).long()
+        idx_high = torch.ceil(timestep_indices).long()
+        lerp = (timestep_indices - idx_low.float()).to(all_snr.dtype)
+        snr = all_snr[idx_low] * (1.0 - lerp) + all_snr[idx_high] * lerp
 
     gamma_tensor = torch.ones_like(snr) * gamma
     if prediction_type in ("flow_match", "rectified_flow"):

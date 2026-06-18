@@ -11,6 +11,7 @@ Run from repo root with venv:
 """
 
 import pytest
+import torch
 
 from extensions_built_in.diffusion_models.z_image_diffsynth.model import ZImageDiffSynthModel
 from extensions_built_in.diffusion_models.z_image_diffsynth.scheduler_adapter import (
@@ -20,8 +21,11 @@ from extensions_built_in.diffusion_models.z_image_diffsynth.snr_weighting_checks
     assert_all_snr_table,
     assert_apply_snr_flow_match_weights,
     assert_scheduler_uses_compute_snr_path,
+    expected_flow_match_min_snr_weight,
+    lookup_snr,
     non_integer_schedule_timesteps,
 )
+from toolkit.train_tools import apply_snr_weight, get_all_snr
 from toolkit.samplers.custom_flowmatch_sampler import CustomFlowMatchEulerDiscreteScheduler
 
 
@@ -72,6 +76,40 @@ def test_apply_snr_weight_boundary_timesteps(toolkit_scheduler):
         gamma=5.0,
         device="cpu",
     )
+
+
+def test_min_snr_caps_low_noise_not_high_noise(toolkit_scheduler):
+    """min_snr_gamma must cap high-SNR (low timestep value), not high-noise values."""
+    gamma = 5.0
+    device = "cpu"
+    low_noise_ts = 50.0
+    high_noise_ts = 950.0
+    all_snr = get_all_snr(toolkit_scheduler, device)
+    snr_low = lookup_snr(all_snr, toolkit_scheduler, [low_noise_ts], device)[0]
+    snr_high = lookup_snr(all_snr, toolkit_scheduler, [high_noise_ts], device)[0]
+    assert snr_low.item() > gamma, "low-noise timestep should have SNR above gamma"
+    assert snr_high.item() < gamma, "high-noise timestep should have SNR below gamma"
+
+    loss = torch.ones(2, device=device)
+    timesteps = torch.tensor([low_noise_ts, high_noise_ts], device=device)
+    weighted = apply_snr_weight(
+        loss,
+        timesteps,
+        toolkit_scheduler,
+        gamma,
+        prediction_type="flow_match",
+    )
+    expected_low = expected_flow_match_min_snr_weight(snr_low, gamma).item()
+    expected_high = expected_flow_match_min_snr_weight(snr_high, gamma).item()
+    capped_low = gamma / (1.0 + snr_low.item() ** 0.5) ** 2
+    uncapped_high = snr_high.item() / (1.0 + snr_high.item() ** 0.5) ** 2
+
+    assert abs(weighted[0].item() - expected_low) < 1e-5
+    assert abs(weighted[1].item() - expected_high) < 1e-5
+    assert abs(weighted[0].item() - capped_low) < 1e-5, "ts=50 must use capped min-SNR weight"
+    assert abs(weighted[1].item() - uncapped_high) < 1e-5, "ts=950 must use uncapped SNR weight"
+    uncapped_low = snr_low.item() / (1.0 + snr_low.item() ** 0.5) ** 2
+    assert weighted[0].item() < uncapped_low, "ts=50 capped weight must be below uncapped high-SNR weight"
 
 
 if __name__ == "__main__":
