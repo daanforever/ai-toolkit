@@ -13,6 +13,7 @@ from PIL import Image
 from toolkit.samplers.custom_flowmatch_sampler import (
     CustomFlowMatchEulerDiscreteScheduler,
     calculate_shift,
+    flowmatch_image_seq_len,
 )
 from toolkit.util.debug import memory_debug, is_debug_enabled
 
@@ -34,7 +35,7 @@ def _get_diffsynth_scheduler(
     sigma_start = sigma_min + (sigma_max - sigma_min) * denoising_strength
     sigmas = torch.linspace(sigma_start, sigma_min, num_inference_steps + 1)[:-1]
     if use_dynamic_shifting and latent_h is not None and latent_w is not None:
-        image_seq_len = (latent_h // 2) * (latent_w // 2)
+        image_seq_len = flowmatch_image_seq_len(latent_h, latent_w)
         mu = calculate_shift(
             image_seq_len,
             DYNAMIC_SHIFT_DEFAULTS["base_image_seq_len"],

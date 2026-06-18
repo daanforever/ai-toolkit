@@ -224,6 +224,42 @@ def test_allowed_slot_index_range_min_denoising_zero_clamps_hi():
     assert allowed_slot_index_range(1000, 1, 999) == (1, 999)
 
 
+def test_balanced_flowmatch_range_keeps_upper_bound_inclusive():
+    torch.manual_seed(0)
+    ntt = 1000
+    schedule = torch.linspace(1000, 1, ntt, dtype=torch.float32)
+    noise_scheduler = _DummyNoiseScheduler(schedule)
+    train_config = _DummyTrainConfig()
+    train_config.noise_scheduler = "flowmatch"
+    sampler = TimestepSampler(train_config, noise_scheduler)
+
+    sampled_indices = sampler._sample_balanced(
+        batch_size=256,
+        min_noise_steps=1,
+        max_noise_steps=2,
+        device=torch.device("cpu"),
+    )
+    assert int(sampled_indices.min().item()) == 0
+    assert int(sampled_indices.max().item()) == 1
+
+
+def test_balanced_flowmatch_equal_min_max_maps_to_first_slot():
+    ntt = 1000
+    schedule = torch.linspace(1000, 1, ntt, dtype=torch.float32)
+    noise_scheduler = _DummyNoiseScheduler(schedule)
+    train_config = _DummyTrainConfig()
+    train_config.noise_scheduler = "flowmatch"
+    sampler = TimestepSampler(train_config, noise_scheduler)
+
+    sampled_indices = sampler._sample_balanced(
+        batch_size=16,
+        min_noise_steps=1,
+        max_noise_steps=1,
+        device=torch.device("cpu"),
+    )
+    assert torch.all(sampled_indices == 0)
+
+
 def test_gaussian_bimodal_min_denoising_steps_zero_no_oob():
     """min_denoising_steps=0 used to extend arange to index ntt; must not crash or OOB."""
     torch.manual_seed(0)

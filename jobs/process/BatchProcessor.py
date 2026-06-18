@@ -262,7 +262,7 @@ class GeneralBatchProcessor:
                     timestep_type = 'shift'
                 
                 patch_size = 1
-                if self.p.sd.is_flux or 'flex' in self.p.sd.arch:
+                if self.p.sd.is_flux or 'flex' in self.p.sd.arch or self.p.sd.arch == 'zimage_diffsynth':
                     # flux is a patch size of 1, but latents are divided by 2, so we need to double it
                     patch_size = 2
                 elif hasattr(self.p.sd.unet.config, 'patch_size'):

@@ -20,6 +20,11 @@ def calculate_shift(
     return mu
 
 
+def flowmatch_image_seq_len(latent_h: int, latent_w: int) -> int:
+    """Patch token count for dynamic mu (matches diffusers ZImagePipeline)."""
+    return (int(latent_h) // 2) * (int(latent_w) // 2)
+
+
 class CustomFlowMatchEulerDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -199,21 +204,25 @@ class CustomFlowMatchEulerDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
             return timesteps
         elif timestep_type in ['flux_shift', 'lumina2_shift', 'shift']:
             # matches inference dynamic shifting
-            timesteps = np.linspace(
-                self._sigma_to_t(self.sigma_max), self._sigma_to_t(
-                    self.sigma_min), num_timesteps
-            )
-
-            sigmas = timesteps / self.config.num_train_timesteps
+            if self.config.use_dynamic_shifting:
+                # Same sigma grid as ZImagePipeline / z_image_diffsynth sampling (1 → 0).
+                sigmas = np.linspace(1.0, 0.0, num_timesteps + 1, dtype=np.float64)[:-1]
+                sigmas = np.clip(sigmas, 1e-8, None)
+                self.sigma_min = 0.0
+            else:
+                timesteps = np.linspace(
+                    self._sigma_to_t(self.sigma_max), self._sigma_to_t(
+                        self.sigma_min), num_timesteps
+                )
+                sigmas = timesteps / self.config.num_train_timesteps
 
             if self.config.use_dynamic_shifting:
                 if latents is None:
                     raise ValueError('latents is None')
 
-                # for flux we double up the patch size before sending her to simulate the latent reduction
                 h = latents.shape[2]
                 w = latents.shape[3]
-                image_seq_len = h * w // (patch_size**2)
+                image_seq_len = flowmatch_image_seq_len(h, w)
 
                 mu = calculate_shift(
                     image_seq_len,

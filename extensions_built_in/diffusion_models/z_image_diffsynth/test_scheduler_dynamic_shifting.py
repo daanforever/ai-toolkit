@@ -20,7 +20,12 @@ from extensions_built_in.diffusion_models.z_image_diffsynth.scheduler_adapter im
 from extensions_built_in.diffusion_models.z_image_diffsynth.sampling import (
     _get_diffsynth_scheduler,
 )
-from toolkit.samplers.custom_flowmatch_sampler import CustomFlowMatchEulerDiscreteScheduler
+from toolkit.samplers.custom_flowmatch_sampler import (
+    CustomFlowMatchEulerDiscreteScheduler,
+    calculate_shift,
+    flowmatch_image_seq_len,
+)
+from toolkit.timestep_sampler import allowed_slot_index_range
 
 
 def test_build_scheduler_config_static():
@@ -75,6 +80,30 @@ def test_dynamic_shift_timesteps_vary_by_resolution():
     t_small = _shift_timesteps_for_latents(sched, 64, 64)
     t_large = _shift_timesteps_for_latents(sched, 128, 128)
     assert not torch.allclose(t_small, t_large)
+    mu_small = calculate_shift(flowmatch_image_seq_len(64, 64), 256, 4096, 0.5, 1.15)
+    mu_large = calculate_shift(flowmatch_image_seq_len(128, 128), 256, 4096, 0.5, 1.15)
+    assert mu_small < mu_large
+    assert t_small.mean() < t_large.mean()
+
+
+def test_train_shift_schedule_matches_sampling():
+    sched = ZImageDiffSynthModel.get_train_scheduler(
+        use_diffsynth_loop=False,
+        use_dynamic_shifting=True,
+    )
+    t_train = _shift_timesteps_for_latents(sched, 64, 64)
+    _, t_sample = _get_diffsynth_scheduler(
+        1000,
+        use_dynamic_shifting=True,
+        latent_h=64,
+        latent_w=64,
+    )
+    assert torch.allclose(t_train, t_sample, atol=1e-3)
+
+
+def test_allowed_slot_range_flowmatch_first_n_denoising_steps():
+    assert allowed_slot_index_range(1000, 1, 500, descending=True) == (0, 499)
+    assert allowed_slot_index_range(1000, 0, 999, descending=True) == (0, 998)
 
 
 def test_static_shift_timesteps_same_across_resolutions():

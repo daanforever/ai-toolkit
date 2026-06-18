@@ -15,10 +15,22 @@ from extensions_built_in.sd_trainer.gaussian_timestep_weights import (
 )
 
 
+def schedule_uses_descending_noise_slots(noise_scheduler, train_config=None) -> bool:
+    """FlowMatch / shift schedules: slot 0 is max noise, slot ntt-1 is min noise."""
+    if train_config is not None and getattr(train_config, "noise_scheduler", None) == "flowmatch":
+        return True
+    timesteps = getattr(noise_scheduler, "timesteps", None)
+    if timesteps is not None and timesteps.numel() >= 2:
+        return float(timesteps[0].item()) > float(timesteps[-1].item())
+    return False
+
+
 def allowed_slot_index_range(
     num_train_timesteps: int,
     min_noise_steps: int,
     max_noise_steps: int,
+    *,
+    descending: bool = False,
 ) -> tuple[int, int]:
     """
     Inclusive scheduler slot bounds [lo, hi] for indices into `noise_scheduler.timesteps`.
@@ -27,13 +39,26 @@ def allowed_slot_index_range(
     formulas as historical code, but `hi` is clamped to `num_train_timesteps - 1` so
     `min_denoising_steps == 0` never produces an out-of-range index (previously
     `ntt - 0 == ntt`, invalid for 0-based timesteps of length `ntt`).
+
+    When `descending=True` (FlowMatch: slot 0 = noisiest), denoising step 1..N map to
+    slots 0..N-1 instead of the DDPM-inverted range.
     """
     ntt = int(num_train_timesteps)
     last = ntt - 1
     if last < 0:
         return 0, 0
-    lo = ntt - int(max_noise_steps)
-    hi = ntt - int(min_noise_steps)
+    min_ns = int(min_noise_steps)
+    max_ns = int(max_noise_steps)
+    if descending:
+        lo = 0 if min_ns <= 0 else max(0, min_ns - 1)
+        hi = last if max_ns <= 0 else min(last, max_ns - 1)
+        lo = max(0, min(lo, last))
+        hi = max(0, min(hi, last))
+        if lo > hi:
+            lo = hi
+        return lo, hi
+    lo = ntt - max_ns
+    hi = ntt - min_ns
     lo = max(0, min(lo, last))
     hi = max(0, min(hi, last))
     if lo > hi:
@@ -58,6 +83,9 @@ class TimestepSampler:
         self.train_config = train_config
         self.noise_scheduler = noise_scheduler
         self._fixed_cycle_resolved_timesteps: Optional[List[float]] = None
+
+    def _descending_noise_slots(self) -> bool:
+        return schedule_uses_descending_noise_slots(self.noise_scheduler, self.train_config)
 
     def sample(
         self,
@@ -166,7 +194,9 @@ class TimestepSampler:
                 * ntt
             )
 
-        lo, hi = allowed_slot_index_range(ntt, min_noise_steps, max_noise_steps)
+        lo, hi = allowed_slot_index_range(
+            ntt, min_noise_steps, max_noise_steps, descending=self._descending_noise_slots()
+        )
         timestep_indices = value_map(
             timestep_indices,
             0,
@@ -188,7 +218,7 @@ class TimestepSampler:
     ) -> torch.Tensor:
         ntt = int(num_train_timesteps)
         allowed_start, allowed_end = allowed_slot_index_range(
-            ntt, min_noise_steps, max_noise_steps
+            ntt, min_noise_steps, max_noise_steps, descending=self._descending_noise_slots()
         )
         all_indices = torch.arange(
             allowed_start, allowed_end + 1, device=latents.device, dtype=torch.long
@@ -218,7 +248,7 @@ class TimestepSampler:
     ) -> torch.Tensor:
         ntt = int(num_train_timesteps)
         allowed_start, allowed_end = allowed_slot_index_range(
-            ntt, min_noise_steps, max_noise_steps
+            ntt, min_noise_steps, max_noise_steps, descending=self._descending_noise_slots()
         )
         all_indices = torch.arange(
             allowed_start, allowed_end + 1, device=latents.device, dtype=torch.long
@@ -278,6 +308,23 @@ class TimestepSampler:
         max_noise_steps: int,
         device: torch.device,
     ) -> torch.Tensor:
+        if self.train_config.noise_scheduler == 'flowmatch':
+            flow_min_idx = 0 if min_noise_steps <= 0 else min_noise_steps - 1
+            flow_max_idx = 0 if max_noise_steps <= 0 else max_noise_steps - 1
+            if flow_min_idx > flow_max_idx:
+                flow_min_idx = flow_max_idx
+            if min_noise_steps == max_noise_steps:
+                return torch.full(
+                    (batch_size,), flow_min_idx, device=device, dtype=torch.long
+                )
+            timestep_indices = torch.randint(
+                flow_min_idx,
+                flow_max_idx + 1,
+                (batch_size,),
+                device=device,
+            )
+            return timestep_indices.long()
+
         if min_noise_steps == max_noise_steps:
             timestep_indices = torch.ones(
                 (batch_size,), device=device, dtype=torch.long
@@ -285,9 +332,6 @@ class TimestepSampler:
         else:
             min_idx = min_noise_steps + 1
             max_idx = max_noise_steps - 1
-            if self.train_config.noise_scheduler == 'flowmatch':
-                min_idx = min_noise_steps
-                max_idx = max_noise_steps
             timestep_indices = torch.randint(
                 min_idx,
                 max_idx,
