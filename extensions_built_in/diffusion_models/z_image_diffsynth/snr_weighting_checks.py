@@ -98,7 +98,7 @@ def assert_apply_snr_flow_match_weights(
         timestep_tensor,
         scheduler,
         gamma,
-        prediction_type="flow_match",
+        prediction_type="flowmatch",
     )
     assert weighted.shape == loss.shape, "apply_snr_weight must preserve loss shape"
 

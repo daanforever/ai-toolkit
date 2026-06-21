@@ -4,7 +4,7 @@ SNR / min_snr_gamma tests for Z-Image DiffSynth toolkit training loop.
 When model.model_kwargs.use_diffsynth_training_loop is False, the model uses
 CustomFlowMatchEulerDiscreteScheduler and ZImageDiffSynthTrainer leaves
 min_snr_gamma / snr_gamma from train config enabled. SDTrainer.calculate_loss
-then calls apply_snr_weight with prediction_type="flow_match".
+then calls apply_snr_weight with prediction_type="flowmatch".
 
 Run from repo root with venv:
   venv\\Scripts\\python.exe -m pytest extensions_built_in/diffusion_models/z_image_diffsynth/test_snr_weighting.py -q
@@ -97,7 +97,7 @@ def test_min_snr_caps_low_noise_not_high_noise(toolkit_scheduler):
         timesteps,
         toolkit_scheduler,
         gamma,
-        prediction_type="flow_match",
+        prediction_type="flowmatch",
     )
     expected_low = expected_flow_match_min_snr_weight(snr_low, gamma).item()
     expected_high = expected_flow_match_min_snr_weight(snr_high, gamma).item()

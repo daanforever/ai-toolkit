@@ -23,6 +23,7 @@ Analyze export (repo root, venv):
 
 from __future__ import annotations
 
+from collections import defaultdict
 import json
 import os
 import sys
@@ -484,3 +485,177 @@ def test_gaussian_bimodal_timesteps_match_index_distribution(tmp_path, monkeypat
     chi2 = _chi2_three_bins(captured, bin_probs)
     # df=2, conservative gate (fails if distribution is uniform or single-peaked wrong).
     assert chi2 < 25.0, f"chi-square vs binned theory too large: {chi2:.2f}"
+
+
+def test_min_snr_gamma_high_timestep_and_accumulation_mixing(tmp_path, monkeypatch):
+    """
+    Real training path check (z_image_diffsynth_trainer + LoRA):
+    1) On the SAME microbatch, gamma=1 vs gamma=5 must match for t>500.
+    2) Logged step loss can still move because gradient accumulation mixes t<=500 and t>500.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+
+    model_path, sampling_path = _resolve_model_paths()
+    if not model_path or not os.path.isdir(model_path):
+        pytest.skip(
+            "Z-Image model path missing or invalid "
+            "(set ZIMAGE_DIFFSYNTH_MODEL_PATH or DEFAULT_ZIMAGE_MODEL_PATH)"
+        )
+
+    dataset_dir = REPO_ROOT / "temp" / "test_train"
+    if not dataset_dir.is_dir():
+        pytest.skip(f"Dataset folder missing: {dataset_dir}")
+    if not list(dataset_dir.glob("*.png")):
+        pytest.skip(f"No images in {dataset_dir}")
+
+    work_root = Path(tmp_path)
+    config = _gaussian_full_job_config(work_root, dataset_dir, model_path, sampling_path)
+    proc = config["config"]["process"][0]
+    train_cfg = proc["train"]
+    # Keep this test short but force accumulation mixing (8 microbatches per optimizer step).
+    train_cfg["steps"] = 2
+    train_cfg["gradient_accumulation"] = 8
+    train_cfg["batch_size"] = 1
+    train_cfg["min_snr_gamma"] = 5
+    train_cfg["disable_sampling"] = True
+    train_cfg["skip_first_sample"] = True
+    proc["save"]["save_every"] = 10_000
+
+    import importlib
+
+    sdtrainer_module = importlib.import_module("extensions_built_in.sd_trainer.SDTrainer")
+    base_process_module = importlib.import_module("jobs.process.BaseSDTrainProcess")
+
+    high_t_direct_diffs: list[float] = []
+    low_t_direct_diffs: list[float] = []
+    micro_records: list[tuple[int, float, float]] = []
+    step_loss_from_hook: dict[int, float] = {}
+
+    orig_apply_snr = sdtrainer_module.apply_snr_weight
+    orig_process_batch = base_process_module.BaseSDTrainProcess.process_general_training_batch
+    orig_train_single = sdtrainer_module.SDTrainer.train_single_accumulation
+    orig_hook_train_loop = sdtrainer_module.SDTrainer.hook_train_loop
+
+    def _wrapped_apply_snr_weight(
+        loss,
+        timesteps,
+        noise_scheduler,
+        gamma,
+        fixed=False,
+        prediction_type="epsilon",
+    ):
+        out = orig_apply_snr(
+            loss,
+            timesteps,
+            noise_scheduler,
+            gamma,
+            fixed=fixed,
+            prediction_type=prediction_type,
+        )
+        if prediction_type in ("flow_match", "flowmatch", "rectified_flow"):
+            with torch.no_grad():
+                base_loss = loss.detach().clone()
+                ts = torch.as_tensor(timesteps).detach().clone()
+                hypo_1 = orig_apply_snr(
+                    base_loss,
+                    ts,
+                    noise_scheduler,
+                    1.0,
+                    fixed=fixed,
+                    prediction_type=prediction_type,
+                )
+                hypo_5 = orig_apply_snr(
+                    base_loss,
+                    ts,
+                    noise_scheduler,
+                    5.0,
+                    fixed=fixed,
+                    prediction_type=prediction_type,
+                )
+                diff = float((hypo_1 - hypo_5).abs().max().item())
+                t_mean = float(ts.float().mean().item())
+                if t_mean > 500.0:
+                    high_t_direct_diffs.append(diff)
+                else:
+                    low_t_direct_diffs.append(diff)
+        return out
+
+    def _wrapped_process_batch(self, batch):
+        out = orig_process_batch(self, batch)
+        try:
+            _, _, timesteps, _, _ = out
+            self._test_last_timesteps = timesteps.detach().clone()
+        except Exception:
+            self._test_last_timesteps = None
+        return out
+
+    def _wrapped_train_single(self, batch, microbatch_scale: float = 1.0):
+        loss = orig_train_single(self, batch, microbatch_scale=microbatch_scale)
+        ts = getattr(self, "_test_last_timesteps", None)
+        t_mean = float("nan") if ts is None else float(ts.float().mean().item())
+        micro_records.append((int(self.step_num), t_mean, float(loss.detach().item())))
+        return loss
+
+    def _wrapped_hook_train_loop(self, batch):
+        out = orig_hook_train_loop(self, batch)
+        step_loss_from_hook[int(self.step_num)] = float(out["loss"])
+        return out
+
+    monkeypatch.setattr(sdtrainer_module, "apply_snr_weight", _wrapped_apply_snr_weight)
+    monkeypatch.setattr(
+        base_process_module.BaseSDTrainProcess,
+        "process_general_training_batch",
+        _wrapped_process_batch,
+    )
+    monkeypatch.setattr(
+        sdtrainer_module.SDTrainer,
+        "train_single_accumulation",
+        _wrapped_train_single,
+    )
+    monkeypatch.setattr(
+        sdtrainer_module.SDTrainer,
+        "hook_train_loop",
+        _wrapped_hook_train_loop,
+    )
+
+    torch.manual_seed(42)
+    run_job(config)
+
+    assert high_t_direct_diffs, "expected captured flowmatch samples with t>500"
+    assert low_t_direct_diffs, "expected captured flowmatch samples with t<=500"
+    assert max(high_t_direct_diffs) < 1e-7, (
+        "for the same microbatch, gamma=1 and gamma=5 must match at t>500"
+    )
+    assert max(low_t_direct_diffs) > 1e-6, (
+        "for at least one t<=500 sample, gamma=1 and gamma=5 should differ"
+    )
+
+    by_step: dict[int, list[tuple[float, float]]] = defaultdict(list)
+    for step_num, t_mean, loss_value in micro_records:
+        by_step[step_num].append((t_mean, loss_value))
+
+    mixed_steps = 0
+    mixed_steps_with_shifted_loss = 0
+    for step_num, rows in by_step.items():
+        highs = [loss for t, loss in rows if t > 500.0]
+        lows = [loss for t, loss in rows if t <= 500.0]
+        if not highs or not lows:
+            continue
+        mixed_steps += 1
+        mean_all = sum(loss for _, loss in rows) / len(rows)
+        mean_high = sum(highs) / len(highs)
+        if abs(mean_all - mean_high) > 1e-7:
+            mixed_steps_with_shifted_loss += 1
+        if step_num in step_loss_from_hook:
+            assert abs(step_loss_from_hook[step_num] - mean_all) < 1e-6, (
+                "hook_train_loop loss must equal mean over microbatches for this step"
+            )
+
+    assert mixed_steps > 0, (
+        "expected at least one step with mixed t<=500 and t>500 microbatches "
+        "(gradient accumulation)"
+    )
+    assert mixed_steps_with_shifted_loss > 0, (
+        "in mixed steps, step-level loss must differ from high-t-only microbatch loss"
+    )

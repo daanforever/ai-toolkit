@@ -181,7 +181,7 @@ class ImageReferenceSliderTrainerProcess(BaseSDTrainProcess):
         noise_list = [noise]
         timesteps_list = [timesteps]
         conditional_embeds_list = [conditional_embeds]
-        pred_type = "flow_match" if getattr(
+        pred_type = "flowmatch" if getattr(
             self.sd, "is_flow_matching", False
         ) else getattr(self.sd, "prediction_type", "epsilon")
 

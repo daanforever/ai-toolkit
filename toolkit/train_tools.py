@@ -745,7 +745,7 @@ def apply_snr_weight(
 ):
     timestep_values = torch.as_tensor(timesteps, device=loss.device, dtype=torch.float32)
 
-    if prediction_type in ("flow_match", "rectified_flow"):
+    if prediction_type in ("flowmatch", "rectified_flow"):
         # SNR from noise level t = timestep / ntt (matches CustomFlowMatch add_noise).
         ntt = float(noise_scheduler.config.num_train_timesteps)
         t = (timestep_values / ntt).clamp(min=1e-8, max=1.0)
@@ -764,7 +764,7 @@ def apply_snr_weight(
         snr = all_snr[idx_low] * (1.0 - lerp) + all_snr[idx_high] * lerp
 
     gamma_tensor = torch.ones_like(snr) * gamma
-    if prediction_type in ("flow_match", "rectified_flow"):
+    if prediction_type in ("flowmatch", "rectified_flow"):
         denom = (1.0 + torch.sqrt(snr)) ** 2
         if fixed:
             snr_weight = torch.div(gamma_tensor, denom).float().to(loss.device)

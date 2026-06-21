@@ -627,7 +627,7 @@ class TrainSliderProcess(BaseSDTrainProcess):
                     loss += mask_target_loss
 
                 loss = loss.mean([1, 2, 3])
-                pred_type = "flow_match" if getattr(
+                pred_type = "flowmatch" if getattr(
                     self.sd, "is_flow_matching", False
                 ) else getattr(self.sd, "prediction_type", "epsilon")
 
