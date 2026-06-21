@@ -1117,24 +1117,18 @@ class Adafactor(torch.optim.Optimizer):
         """
         return self._scalars_per_group_to_avg(self.get_rms())
 
-    def get_rms_max(self):
+    def get_max_rms(self):
         """
-        Get running max of parameter RMS for each parameter group (``rms_max`` on the param group).
-
-        Returns:
-            List[float]: One value per group; 0.0 for groups with no ``rms_max`` yet.
-        """
-        out = []
-        for group in self.param_groups:
-            out.append(self._group_scalar_item(group, "rms_max", 0.0))
-        return out
-
-    def get_avg_rms_max(self):
-        """
-        Average of per-group rms_max across groups (unified tensor reduction).
+        Absolute max of per-group ``rms_max`` across all parameter groups.
         Use with get_avg_rms() to monitor parameter scale vs recent max.
         """
-        return self._scalars_per_group_to_avg(self.get_rms_max())
+        per_group = [
+            self._group_scalar_item(group, "rms_max", 0.0)
+            for group in self.param_groups
+        ]
+        if len(per_group) == 0:
+            return 0.0
+        return torch.tensor(per_group, dtype=torch.float64).max().item()
 
     def get_avg_update_rms(self):
         """

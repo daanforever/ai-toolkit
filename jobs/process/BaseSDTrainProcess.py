@@ -2000,8 +2000,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         update_rms_max = optimizer.get_avg_update_rms_max()
                     if hasattr(optimizer, 'get_avg_rms'):
                         param_rms = optimizer.get_avg_rms()
-                    if hasattr(optimizer, 'get_avg_rms_max'):
-                        param_rms_max = optimizer.get_avg_rms_max()
+                    if hasattr(optimizer, 'get_max_rms'):
+                        param_rms_max = optimizer.get_max_rms()
                     if hasattr(optimizer, 'get_avg_grad_rms'):
                         grad_rms = optimizer.get_avg_grad_rms()
                     if hasattr(optimizer, 'get_avg_grad_rms_max'):
