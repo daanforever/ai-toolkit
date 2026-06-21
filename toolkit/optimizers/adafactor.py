@@ -1,7 +1,7 @@
 import math
 from typing import Iterable, List, Optional, Tuple
 import torch
-from toolkit.optimizers.optimizer_utils import copy_stochastic, stochastic_grad_accummulation
+from toolkit.optimizers.optimizer_utils import copy_stochastic, stochastic_grad_accummulation, update_parameter
 from toolkit.print import print_acc
 from toolkit.util.debug import is_debug_enabled
 from optimum.quanto import QBytesTensor
@@ -219,6 +219,7 @@ class Adafactor(torch.optim.Optimizer):
         self._factored = factored
         self._emergency_brake = emergency_brake
         self.is_stochastic_rounding_accumulation = False
+        self.stochastic_rounding = stochastic_rounding
 
         # setup stochastic grad accum hooks
         if stochastic_accumulation:
@@ -1003,6 +1004,7 @@ class Adafactor(torch.optim.Optimizer):
                     )
 
                 lr = self._get_lr(group, state)
+                scaled_update = update_hat.mul(lr)
 
                 if use_first_moment:
                     exp_avg = state["exp_avg"]
@@ -1010,26 +1012,26 @@ class Adafactor(torch.optim.Optimizer):
                     # Use beta1 if available, otherwise use default 0.9 when emergency_brake is enabled
                     beta1_for_ema = group["beta1"] if group["beta1"] is not None else 0.9
 
-                    # Update EMA of direction without LR (always when use_first_moment=True)
-                    exp_avg.mul_(beta1_for_ema).add_(update_hat, alpha=(1 - beta1_for_ema))
+                    # Momentum on clipped+lr-scaled direction (transformers / pre-16acf685)
+                    exp_avg.mul_(beta1_for_ema).add_(scaled_update, alpha=(1 - beta1_for_ema))
 
                     # GNS calculation (only when beta1 is not None)
                     if group["beta1"] is not None:
                         signal_sq = exp_avg.pow(2).mean()
-                        current_update_sq = update_hat.pow(2).mean()
+                        current_update_sq = scaled_update.pow(2).mean()
                         gns_tensor = (current_update_sq - signal_sq) / (signal_sq + 1e-12)
                     else:
                         gns_tensor = None
 
                     # Final update: use exp_avg only if beta1 is not None (momentum mode)
                     if group["beta1"] is not None:
-                        update = exp_avg.mul(lr)
+                        update = exp_avg
                     else:
-                        update = update_hat.mul(lr)
+                        update = scaled_update
 
                 else:
                     gns_tensor = None
-                    update = update_hat.mul(lr)
+                    update = scaled_update
 
                 update_rms = self._rms(update)
 
@@ -1048,9 +1050,11 @@ class Adafactor(torch.optim.Optimizer):
 
                 self._group_running_max_update(group, "update_rms_max", update_rms)
 
-                if (p.dtype != torch.float32 or is_quantized) and self.stochastic_rounding:
-                    # apply stochastic rounding
-                    copy_stochastic(p, p_data_fp32)
+                if p.dtype != torch.float32 or is_quantized:
+                    if self.stochastic_rounding:
+                        copy_stochastic(p, p_data_fp32)
+                    else:
+                        update_parameter(p, p_data_fp32)
 
                 metrics.append(
                     (
