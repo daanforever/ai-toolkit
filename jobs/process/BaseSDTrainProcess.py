@@ -1968,6 +1968,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 update_rms = 0.0  # Average weight update RMS (for monitoring optimizer step magnitude)
                 update_rms_max = 0.0  # Max RMS across param groups (for graphs)
                 param_rms = 0.0  # Average parameter RMS across groups (Adafactor)
+                param_rms_max = 0.0  # Running max of parameter RMS (for graphs)
                 grad_rms = 0.0  # Average gradient RMS across groups (Adafactor)
                 grad_rms_max = 0.0  # Running max of gradient RMS (for graphs)
                 gns = 0.0  # Gradient Noise Scale (Adafactor with momentum)
@@ -1999,6 +2000,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         update_rms_max = optimizer.get_avg_update_rms_max()
                     if hasattr(optimizer, 'get_avg_rms'):
                         param_rms = optimizer.get_avg_rms()
+                    if hasattr(optimizer, 'get_avg_rms_max'):
+                        param_rms_max = optimizer.get_avg_rms_max()
                     if hasattr(optimizer, 'get_avg_grad_rms'):
                         grad_rms = optimizer.get_avg_grad_rms()
                     if hasattr(optimizer, 'get_avg_grad_rms_max'):
@@ -2106,6 +2109,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                             self.writer.add_scalar(f"train/update_rms", update_rms, self.step_num)
                                             self.writer.add_scalar(f"train/update_rms_max", update_rms_max, self.step_num)
                                             self.writer.add_scalar(f"train/param_rms", param_rms, self.step_num)
+                                            self.writer.add_scalar(f"train/param_rms_max", param_rms_max, self.step_num)
                                             self.writer.add_scalar(f"train/grad_rms", grad_rms, self.step_num)
                                             self.writer.add_scalar(f"train/grad_rms_max", grad_rms_max, self.step_num)
                                             self.writer.add_scalar(f"train/gns", gns, self.step_num)
@@ -2141,6 +2145,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
                             self.logger.log({
                                 'train/param_rms': param_rms,
+                            })
+
+                            self.logger.log({
+                                'train/param_rms_max': param_rms_max,
                             })
 
                             self.logger.log({
@@ -2210,6 +2218,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
                             self.logger.log({
                                 'train/param_rms': param_rms,
+                            })
+
+                            self.logger.log({
+                                'train/param_rms_max': param_rms_max,
                             })
 
                             self.logger.log({
