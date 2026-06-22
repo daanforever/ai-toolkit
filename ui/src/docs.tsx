@@ -347,7 +347,7 @@ const docs: { [key: string]: ConfigDoc } = {
     title: 'Fixed Cycle Weight Peak Timesteps',
     description: (
       <>
-        Used when <code>content_or_style</code> is <code>fixed_cycle</code>. Enables timestep-weighted loss (like <code>timestep_type: weighted</code>): loss is multiplied by weights with peaks at these timestep values. Default: <code>[500, 375]</code> so maximum weight is around 500 and 375. Set to <code>null</code> or empty to disable weighting. Set in config file as an array of numbers.
+        Used when <code>content_or_style</code> is <code>fixed_cycle</code>. Enables timestep-weighted loss (like <code>timestep_weighting: weighted</code>): loss is multiplied by weights with peaks at these timestep values. Default: <code>[500, 375]</code> so maximum weight is around 500 and 375. Set to <code>null</code> or empty to disable weighting. Set in config file as an array of numbers.
       </>
     ),
   },

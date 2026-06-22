@@ -20,11 +20,11 @@ const TIMESTEP_TYPE_OPTIONS = [
   { value: 'sigmoid', label: 'Sigmoid' },
   { value: 'linear', label: 'Linear' },
   { value: 'shift', label: 'Shift' },
-  { value: 'weighted', label: 'Weighted' },
 ];
 
 const TIMESTEP_WEIGHTING_OPTIONS = [
   { value: 'none', label: 'None' },
+  { value: 'weighted', label: 'Weighted' },
   { value: 'gaussian', label: 'Gaussian' },
   { value: 'gaussian_bimodal', label: 'Gaussian Bimodal' },
 ];

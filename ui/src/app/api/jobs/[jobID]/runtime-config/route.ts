@@ -28,7 +28,7 @@ export async function PATCH(
   }
 
   const CONTENT_OR_STYLE_VALUES = ['balanced', 'content', 'style', 'gaussian', 'gaussian_bimodal', 'fixed_cycle'] as const;
-  const TIMESTEP_TYPE_VALUES = ['sigmoid', 'linear', 'shift', 'weighted'] as const;
+  const TIMESTEP_TYPE_VALUES = ['sigmoid', 'linear', 'shift'] as const;
   const WEIGHT_DECAY_MODE_VALUES = ['update_rms', 'param_rms', 'absolute'] as const;
 
   const data: { runtime_lr?: number; runtime_min_lr?: number; runtime_gaussian_mean?: number; runtime_gaussian_std?: number; runtime_gaussian_mean_2?: number; runtime_gaussian_std_2?: number; runtime_fixed_cycle_timesteps?: string; runtime_fixed_cycle_seed?: number | null; runtime_fixed_cycle_weight_peak_timesteps?: string | null; runtime_fixed_cycle_weight_sigma?: number; runtime_weight_decay?: number; runtime_weight_decay_mode?: string; runtime_beta1?: number | null; runtime_beta2?: number; runtime_content_or_style?: string; runtime_timestep_type?: string; runtime_network_weights?: string; runtime_batch_size?: number; runtime_gradient_accumulation?: number; runtime_save_every?: number; runtime_sample_every?: number; runtime_min_snr_gamma?: number; runtime_debug?: boolean } = {};
@@ -231,7 +231,7 @@ export async function PATCH(
   if (timestepType !== undefined) {
     if (typeof timestepType !== 'string' || !TIMESTEP_TYPE_VALUES.includes(timestepType)) {
       return NextResponse.json(
-        { error: 'timestep_type must be one of: sigmoid, linear, shift, weighted' },
+        { error: 'timestep_type must be one of: sigmoid, linear, shift' },
         { status: 400 }
       );
     }

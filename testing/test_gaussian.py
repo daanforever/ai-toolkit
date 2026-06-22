@@ -492,3 +492,34 @@ def test_shift_schedule_independent_of_timestep_weighting_field():
     t_linear = linear_sched.set_train_timesteps(1000, device="cpu", timestep_type="linear")
     assert not torch.allclose(t_shift, t_linear)
 
+
+def test_weighted_timestep_type_invalid_for_scheduler():
+    from extensions_built_in.diffusion_models.z_image_diffsynth.scheduler_config import (
+        build_scheduler_config,
+    )
+    from toolkit.samplers.custom_flowmatch_sampler import CustomFlowMatchEulerDiscreteScheduler
+
+    sched = CustomFlowMatchEulerDiscreteScheduler(**build_scheduler_config(False))
+    with pytest.raises(ValueError, match="Invalid timestep type"):
+        sched.set_train_timesteps(100, device="cpu", timestep_type="weighted")
+
+
+def test_shift_schedule_with_weighted_scheme_uses_default_weighing():
+    from extensions_built_in.diffusion_models.z_image_diffsynth.scheduler_config import (
+        build_scheduler_config,
+    )
+    from toolkit.samplers.custom_flowmatch_sampler import CustomFlowMatchEulerDiscreteScheduler
+    from toolkit.timestep_weighing.default_weighing_scheme import default_weighing_scheme
+
+    latents = torch.zeros(1, 16, 64, 64)
+    sched = CustomFlowMatchEulerDiscreteScheduler(**build_scheduler_config(False))
+    sched.set_train_timesteps(1000, device="cpu", timestep_type="shift", latents=latents)
+    sample_ts = sched.timesteps[:3]
+    weights = sched.get_weights_for_timesteps(sample_ts, timestep_type="weighted")
+    expected = torch.tensor(
+        [default_weighing_scheme[i] for i in range(3)],
+        device=sample_ts.device,
+        dtype=sample_ts.dtype,
+    )
+    assert torch.allclose(weights, expected)
+

@@ -542,7 +542,6 @@ export default function SimpleJob({
                       { value: 'sigmoid', label: 'Sigmoid' },
                       { value: 'linear', label: 'Linear' },
                       { value: 'shift', label: 'Shift' },
-                      { value: 'weighted', label: 'Weighted' },
                     ]}
                   />
                 )}
@@ -553,6 +552,7 @@ export default function SimpleJob({
                   onChange={value => setJobConfig(value, 'config.process[0].train.timestep_weighting')}
                   options={[
                     { value: 'none', label: 'None' },
+                    { value: 'weighted', label: 'Weighted' },
                     { value: 'gaussian', label: 'Gaussian' },
                     { value: 'gaussian_bimodal', label: 'Gaussian Bimodal' },
                   ]}

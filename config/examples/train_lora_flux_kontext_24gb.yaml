@@ -54,7 +54,8 @@ config:
         noise_scheduler: "flowmatch" # for training only
         optimizer: "adamw8bit"
         lr: 1e-4
-        timestep_type: "weighted" # sigmoid, linear, or weighted.
+        timestep_type: "sigmoid" # sigmoid, linear, shift, etc.
+        timestep_weighting: "weighted"
         # uncomment this to skip the pre training sample
 #        skip_first_sample: true
         # uncomment to completely disable sampling

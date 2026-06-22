@@ -34,7 +34,8 @@ config:
         train_text_encoder: false
         gradient_checkpointing: true
         noise_scheduler: "flowmatch"
-        timestep_type: "weighted"
+        timestep_type: "sigmoid"
+        timestep_weighting: "weighted"
         content_or_style: "balanced"
         loss_type: "mse"
         dtype: bf16

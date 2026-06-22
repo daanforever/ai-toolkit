@@ -161,10 +161,13 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
             )
         from . import diffsynth_training as dst
 
+        weighting_scheme = (
+            "weighted" if self.train_config.timestep_weighting == "weighted" else "linear"
+        )
         w = self.sd.noise_scheduler.get_weights_for_timesteps(
             timesteps,
             v2=self.train_config.linear_timesteps2,
-            timestep_type=self.train_config.timestep_type,
+            timestep_type=weighting_scheme,
         )
         return dst.aggregate_flow_matching_mse_diffsynth(
             pred,

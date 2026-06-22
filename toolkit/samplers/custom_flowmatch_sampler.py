@@ -126,17 +126,14 @@ class CustomFlowMatchEulerDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
 
         # Get the weights for the timesteps
         if timestep_type == "weighted":
-            weights = torch.tensor(
+            return torch.tensor(
                 [default_weighing_scheme[i] for i in step_indices],
                 device=timesteps.device,
-                dtype=timesteps.dtype
+                dtype=timesteps.dtype,
             )
         if v2:
-            weights = self.linear_timesteps_weights2[step_indices].flatten()
-        else:
-            weights = self.linear_timesteps_weights[step_indices].flatten()
-
-        return weights
+            return self.linear_timesteps_weights2[step_indices].flatten()
+        return self.linear_timesteps_weights[step_indices].flatten()
 
     def get_sigmas(self, timesteps: torch.Tensor, n_dim, dtype, device) -> torch.Tensor:
         sigmas = self.sigmas.to(device=device, dtype=dtype)
@@ -184,7 +181,7 @@ class CustomFlowMatchEulerDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
         patch_size=1
     ):
         self.timestep_type = timestep_type
-        if timestep_type in ('linear', 'weighted'):
+        if timestep_type == 'linear':
             timesteps = torch.linspace(1000, 1, num_timesteps, device=device)
             self.timesteps = timesteps
             return timesteps

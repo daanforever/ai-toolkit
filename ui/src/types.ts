@@ -126,7 +126,7 @@ export interface TrainConfig {
   gradient_checkpointing: boolean;
   noise_scheduler: string;
   timestep_type: string;
-  timestep_weighting?: 'none' | 'gaussian' | 'gaussian_bimodal';
+  timestep_weighting?: 'none' | 'weighted' | 'gaussian' | 'gaussian_bimodal';
   content_or_style: string;
   gaussian_mean?: number;
   gaussian_std?: number;

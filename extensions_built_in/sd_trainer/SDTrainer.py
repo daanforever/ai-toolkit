@@ -544,19 +544,22 @@ class SDTrainer(BaseSDTrainProcess):
         if self.sd.is_flow_matching:
             if self.train_config.linear_timesteps or self.train_config.linear_timesteps2:
                 do_weighted_timesteps = True
-            if self.train_config.timestep_type == "weighted":
-                # use the noise scheduler to get the weights for the timesteps
+            if self.train_config.timestep_weighting == "weighted":
                 do_weighted_timesteps = True
 
         timestep_weight_for_logging = None
 
         # handle linear timesteps and only adjust the weight of the timesteps
         if do_weighted_timesteps:
-            # calculate the weights for the timesteps
+            # Explicit timestep_weighting=weighted uses default_weighing_scheme;
+            # linear_timesteps* uses scheduler linear_timesteps_weights tables.
+            weighting_scheme = (
+                "weighted" if self.train_config.timestep_weighting == "weighted" else "linear"
+            )
             timestep_weight = self.sd.noise_scheduler.get_weights_for_timesteps(
                 timesteps,
                 v2=self.train_config.linear_timesteps2,
-                timestep_type=self.train_config.timestep_type
+                timestep_type=weighting_scheme,
             ).to(loss.device, dtype=loss.dtype)
             if len(loss.shape) == 4:
                 timestep_weight = timestep_weight.view(-1, 1, 1, 1).detach()
