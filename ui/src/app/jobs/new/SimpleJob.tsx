@@ -543,11 +543,20 @@ export default function SimpleJob({
                       { value: 'linear', label: 'Linear' },
                       { value: 'shift', label: 'Shift' },
                       { value: 'weighted', label: 'Weighted' },
-                      { value: 'gaussian', label: 'Gaussian' },
-                      { value: 'gaussian_bimodal', label: 'Gaussian Bimodal' },
                     ]}
                   />
                 )}
+                <SelectInput
+                  label="Timestep Weighting"
+                  className="pt-2"
+                  value={jobConfig.config.process[0].train.timestep_weighting ?? 'none'}
+                  onChange={value => setJobConfig(value, 'config.process[0].train.timestep_weighting')}
+                  options={[
+                    { value: 'none', label: 'None' },
+                    { value: 'gaussian', label: 'Gaussian' },
+                    { value: 'gaussian_bimodal', label: 'Gaussian Bimodal' },
+                  ]}
+                />
                 <SelectInput
                   label="Timestep Bias"
                   className="pt-2"

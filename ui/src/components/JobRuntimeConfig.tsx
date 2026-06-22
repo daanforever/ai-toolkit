@@ -21,6 +21,10 @@ const TIMESTEP_TYPE_OPTIONS = [
   { value: 'linear', label: 'Linear' },
   { value: 'shift', label: 'Shift' },
   { value: 'weighted', label: 'Weighted' },
+];
+
+const TIMESTEP_WEIGHTING_OPTIONS = [
+  { value: 'none', label: 'None' },
   { value: 'gaussian', label: 'Gaussian' },
   { value: 'gaussian_bimodal', label: 'Gaussian Bimodal' },
 ];
@@ -79,6 +83,8 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
   const hasMinLr = optimizerParams && 'min_lr' in optimizerParams;
 
   const timestepType = train?.timestep_type ?? defaultJobConfig.config.process[0].train.timestep_type;
+  const timestepWeighting =
+    train?.timestep_weighting ?? defaultJobConfig.config.process[0].train.timestep_weighting ?? 'none';
   const contentOrStyle = train?.content_or_style ?? defaultJobConfig.config.process[0].train.content_or_style;
   const weightDecay = optimizerParams?.weight_decay ?? defaultJobConfig.config.process[0].train.optimizer_params.weight_decay;
   const weightDecayMode =
@@ -109,7 +115,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     ? Number(trainAny.gaussian_std_2)
     : 0.2;
   const showGaussianPeak2 =
-    contentOrStyle === 'gaussian_bimodal' || timestepType === 'gaussian_bimodal';
+    contentOrStyle === 'gaussian_bimodal' || timestepWeighting === 'gaussian_bimodal';
   const showFixedCycle = contentOrStyle === 'fixed_cycle';
   const [fixedCycleTimestepsInput, setFixedCycleTimestepsInput] = useState(() => {
     const p = parseJobConfig(job.job_config);
@@ -187,6 +193,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
       process.train.optimizer_params = { weight_decay: 1e-4, weight_decay_mode: 'absolute' };
     }
     process.train.timestep_type = timestepType;
+    process.train.timestep_weighting = timestepWeighting;
     process.train.content_or_style = contentOrStyle;
     process.train.optimizer_params.weight_decay = weightDecay;
     process.train.optimizer_params.weight_decay_mode = weightDecayMode;
@@ -370,6 +377,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     job.gpu_ids,
     train,
     timestepType,
+    timestepWeighting,
     contentOrStyle,
     weightDecay,
     weightDecayMode,
@@ -543,7 +551,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
 
         <div className="flex items-end gap-4 flex-wrap">
           <div className="space-y-2">
-            <p className="text-xs text-gray-400">Timestep Type / Timestep Bias</p>
+            <p className="text-xs text-gray-400">Timestep Type / Weighting / Bias</p>
             <div className="flex items-center gap-2 flex-wrap">
               <select
                 value={timestepType}
@@ -554,6 +562,18 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
                 className="rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none min-w-[120px]"
               >
                 {TIMESTEP_TYPE_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+              <select
+                value={timestepWeighting}
+                onChange={(e) => {
+                  setValue(e.target.value, `${TRAIN_PATH}.timestep_weighting`);
+                  setApplyStatus('idle');
+                }}
+                className="rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none min-w-[120px]"
+              >
+                {TIMESTEP_WEIGHTING_OPTIONS.map((opt) => (
                   <option key={opt.value} value={opt.value}>{opt.label}</option>
                 ))}
               </select>

@@ -564,7 +564,7 @@ class SDTrainer(BaseSDTrainProcess):
                 timestep_weight = timestep_weight.view(-1, 1, 1, 1, 1).detach()
             loss = loss * timestep_weight
             timestep_weight_for_logging = timestep_weight
-        elif self.train_config.timestep_type == "gaussian":
+        elif self.train_config.timestep_weighting == "gaussian":
             ntt = self.sd.noise_scheduler.config.num_train_timesteps
             schedule = self.sd.noise_scheduler.timesteps
             # Gaussian weights are indexed by slot id (0..ntt-1), not by raw
@@ -600,7 +600,7 @@ class SDTrainer(BaseSDTrainProcess):
                 timestep_weight = timestep_weight.view(-1, 1, 1, 1, 1).detach()
             loss = loss * timestep_weight
             timestep_weight_for_logging = timestep_weight
-        elif self.train_config.timestep_type == "gaussian_bimodal":
+        elif self.train_config.timestep_weighting == "gaussian_bimodal":
             ntt = self.sd.noise_scheduler.config.num_train_timesteps
             schedule = self.sd.noise_scheduler.timesteps
             cache_id = getattr(self, "_gaussian_schedule_cache_id", None)

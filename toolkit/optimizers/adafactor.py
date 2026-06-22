@@ -46,7 +46,8 @@ class Adafactor(torch.optim.Optimizer):
             When scale_parameter=True and relative_step=True, also used for the group-level running max
             of parameter RMS (``rms_max`` on each param group), which normalizes each parameter's scale
             to (0, 1] for LR (useful for mixed-scale groups e.g. LoRA). Group-level metrics
-            (``rms_ema``, ``update_rms``, ``lr_mean``, ``gns``, ``step_efficiency``, ``dynamic_gain``, etc.)
+            (``rms_ema``, ``update_rms``, ``lr_mean``, ``gns``, ``step_efficiency``, ``dynamic_gain``,
+            ``effective_lr``, ``precond_gain``, ``momentum_gain``, etc.)
             live on ``param_groups`` rather than in per-parameter ``state``.
         beta1 (`float`, *optional*):
             Coefficient used for computing running averages of gradient
@@ -803,6 +804,14 @@ class Adafactor(torch.optim.Optimizer):
         group["step_efficiency"] = u_rms_t / (u_max + eps_t)
         group["dynamic_gain"] = u_rms_t / (g_mean_t + eps_t)
 
+        for key in ("effective_lr", "precond_gain", "momentum_gain"):
+            val = self._get_group_scalars(
+                group, key, default=0.0, reduction='mean', params=params_list
+            )
+            group[key] = torch.tensor(
+                val if val is not None else 0.0, dtype=torch.float32, device=ref_device
+            )
+
     @staticmethod
     def _approx_sq_grad(exp_avg_sq_row, exp_avg_sq_col):
         # copy from fairseq's adafactor implementation:
@@ -1035,6 +1044,22 @@ class Adafactor(torch.optim.Optimizer):
 
                 update_rms = self._rms(update)
 
+                gr_val = gr.detach().item()
+                if gr_val >= eps:
+                    hat_rms = self._rms(update_hat).detach().item()
+                    scaled_rms = hat_rms * lr
+                    ur_val = update_rms.detach().item()
+                    state["precond_gain"] = hat_rms / (gr_val + eps)
+                    state["effective_lr"] = ur_val / (gr_val + eps)
+                    if group["beta1"] is not None:
+                        state["momentum_gain"] = ur_val / (scaled_rms + eps)
+                    else:
+                        state["momentum_gain"] = 1.0
+                else:
+                    state.pop("effective_lr", None)
+                    state.pop("precond_gain", None)
+                    state.pop("momentum_gain", None)
+
                 if group["weight_decay"] != 0:
                     weight_decay_mode = self._validate_weight_decay_mode(
                         group.get("weight_decay_mode", "absolute")
@@ -1165,6 +1190,45 @@ class Adafactor(torch.optim.Optimizer):
         Average dynamic gain across all parameter groups (unified tensor reduction).
         """
         return self._scalars_per_group_to_avg(self.get_dynamic_gain())
+
+    def get_effective_lr(self):
+        """
+        Weighted mean of per-param ``update_rms / grad_rms`` per group (``effective_lr`` on param group).
+        """
+        out = []
+        for group in self.param_groups:
+            out.append(self._group_scalar_item(group, "effective_lr", 0.0))
+        return out
+
+    def get_avg_effective_lr(self):
+        """Average effective_lr across all parameter groups."""
+        return self._scalars_per_group_to_avg(self.get_effective_lr())
+
+    def get_precond_gain(self):
+        """
+        Weighted mean of per-param ``update_hat_rms / grad_rms`` per group (preconditioner + clip).
+        """
+        out = []
+        for group in self.param_groups:
+            out.append(self._group_scalar_item(group, "precond_gain", 0.0))
+        return out
+
+    def get_avg_precond_gain(self):
+        """Average precond_gain across all parameter groups."""
+        return self._scalars_per_group_to_avg(self.get_precond_gain())
+
+    def get_momentum_gain(self):
+        """
+        Weighted mean of per-param ``update_rms / scaled_update_rms`` per group (beta1 momentum).
+        """
+        out = []
+        for group in self.param_groups:
+            out.append(self._group_scalar_item(group, "momentum_gain", 0.0))
+        return out
+
+    def get_avg_momentum_gain(self):
+        """Average momentum_gain across all parameter groups."""
+        return self._scalars_per_group_to_avg(self.get_momentum_gain())
 
     def get_grad_rms(self):
         """

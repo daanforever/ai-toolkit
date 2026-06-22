@@ -79,7 +79,7 @@ class TimestepDistributionLogger:
         print_acc(f"{self._collected_timesteps[:10]}")
 
         weights_list: Optional[List[float]] = None
-        if self.train_config.timestep_type == "gaussian":
+        if self.train_config.timestep_weighting == "gaussian":
             ntt = self.train_config.num_train_timesteps
             schedule_aligned = scheduler_timesteps_align_with_index_grid(
                 scheduler_timesteps, ntt
@@ -105,7 +105,7 @@ class TimestepDistributionLogger:
             weights_list = weights_tensor.tolist()
             pairs_10 = list(zip(self._collected_timesteps[:10], weights_list[:10]))
             print_acc(f"\nFirst 10 (timestep, loss_weight): {pairs_10}")
-        elif self.train_config.timestep_type == "gaussian_bimodal":
+        elif self.train_config.timestep_weighting == "gaussian_bimodal":
             ntt = self.train_config.num_train_timesteps
             schedule_aligned = scheduler_timesteps_align_with_index_grid(
                 scheduler_timesteps, ntt
@@ -152,6 +152,7 @@ class TimestepDistributionLogger:
         if scheduler_type is not None:
             print_acc(f"  noise_scheduler_obj: {scheduler_type}")
         print_acc(f"  timestep_type: {self.train_config.timestep_type}")
+        print_acc(f"  timestep_weighting: {self.train_config.timestep_weighting}")
         print_acc(f"  num_train_timesteps: {self.train_config.num_train_timesteps}")
         print_acc(f"  min_denoising_steps: {min_noise_steps}")
         print_acc(f"  max_denoising_steps: {max_noise_steps}")

@@ -317,7 +317,7 @@ const docs: { [key: string]: ConfigDoc } = {
         <br />
         • <code>gaussian_std</code> (default 0.2): Spread in normalized [0, 1] space. Smaller = narrower focus, larger = wider coverage.
         <br />
-        <b>Gaussian Bimodal</b>: Set <code>content_or_style</code> and/or <code>timestep_type</code> to <code>gaussian_bimodal</code>. Mixture of two truncated normals with equal weight (50/50). Use <code>gaussian_mean</code>, <code>gaussian_std</code> for the first peak and <code>gaussian_mean_2</code>, <code>gaussian_std_2</code> (defaults 750, 0.2) for the second.
+        <b>Gaussian Bimodal</b>: Set <code>content_or_style</code> for sampling and/or <code>timestep_weighting</code> for loss weights to <code>gaussian_bimodal</code>. Mixture of two truncated normals with equal weight (50/50). Use <code>gaussian_mean</code>, <code>gaussian_std</code> for the first peak and <code>gaussian_mean_2</code>, <code>gaussian_std_2</code> (defaults 750, 0.2) for the second.
         <br />
         • <code>timestep_bias_exponent</code> (default 3.0): Controls the cubic bias exponent for content/style timestep distribution. Higher values create stronger bias toward edges (early timesteps for content, late timesteps for style). Lower values create more uniform distribution.
         <br /><br />

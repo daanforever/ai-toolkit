@@ -217,7 +217,8 @@ def _gaussian_full_job_config(
             "gradient_checkpointing": True,
             "noise_scheduler": "flowmatch",
             "optimizer": "adafactor",
-            "timestep_type": "gaussian_bimodal",
+            "timestep_type": "linear",
+            "timestep_weighting": "gaussian_bimodal",
             "content_or_style": "gaussian_bimodal",
             "gaussian_mean": 300,
             "gaussian_std": 0.2,
@@ -434,7 +435,7 @@ def test_gaussian_bimodal_timesteps_match_index_distribution(tmp_path, monkeypat
             captured.extend(timestep_indices.detach().cpu().tolist())
         ns = getattr(timestep_sampler, "noise_scheduler", None)
         w_tensor = None
-        if self.train_config.timestep_type == "gaussian_bimodal" and ns is not None:
+        if self.train_config.timestep_weighting == "gaussian_bimodal" and ns is not None:
             w_tensor = _loss_weights_bimodal_like_sdtrainer(
                 timesteps, self.train_config, ns
             )

@@ -71,6 +71,7 @@ export const defaultJobConfig: JobConfig = {
           noise_scheduler: 'flowmatch',
           optimizer: 'adamw8bit',
           timestep_type: 'sigmoid',
+          timestep_weighting: 'none',
           content_or_style: 'balanced',
           optimizer_params: {
             weight_decay: 1e-4,

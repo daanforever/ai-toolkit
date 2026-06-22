@@ -1978,6 +1978,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 saddle_point_boost = 1.0  # RMS stagnation LR multiplier on relative_step (Adafactor)
                 step_efficiency = 0.0  # Step efficiency: update_rms / update_rms_max (Adafactor)
                 dynamic_gain = 0.0  # Dynamic gain (Adafactor)
+                effective_lr = 0.0  # Weighted mean update_rms/grad_rms per param (Adafactor)
+                precond_gain = 0.0  # Preconditioner+clip gain before lr/momentum (Adafactor)
+                momentum_gain = 0.0  # Momentum gain: final/scaled update (Adafactor)
                 beta1 = 0.0  # Momentum coefficient (Adafactor)
                 if not did_oom and loss_dict is not None:
                     if hasattr(optimizer, 'get_avg_learning_rate'):
@@ -2020,10 +2023,18 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         step_efficiency = optimizer.get_avg_step_efficiency()
                     if hasattr(optimizer, 'get_avg_dynamic_gain'):
                         dynamic_gain = optimizer.get_avg_dynamic_gain()
+                    if hasattr(optimizer, 'get_avg_effective_lr'):
+                        effective_lr = optimizer.get_avg_effective_lr()
+                    if hasattr(optimizer, 'get_avg_precond_gain'):
+                        precond_gain = optimizer.get_avg_precond_gain()
+                    if hasattr(optimizer, 'get_avg_momentum_gain'):
+                        momentum_gain = optimizer.get_avg_momentum_gain()
                     if hasattr(optimizer, 'get_avg_beta1'):
                         beta1 = optimizer.get_avg_beta1()
 
                     prog_bar_string = f"lr: {learning_rate:.1e}"
+                    if effective_lr > 0:
+                        prog_bar_string += f" eff: {effective_lr:.1e}"
                     if update_rms > 0:
                         prog_bar_string += f" upd: {update_rms:.2e}"
                     for key, value in loss_dict.items():
@@ -2106,6 +2117,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                         for key, value in loss_dict.items():
                                             self.writer.add_scalar(f"{key}", value, self.step_num)
                                             self.writer.add_scalar(f"lr", learning_rate, self.step_num)
+                                            self.writer.add_scalar(f"train/lr_mean", learning_rate, self.step_num)
                                             self.writer.add_scalar(f"train/update_rms", update_rms, self.step_num)
                                             self.writer.add_scalar(f"train/update_rms_max", update_rms_max, self.step_num)
                                             self.writer.add_scalar(f"train/param_rms", param_rms, self.step_num)
@@ -2119,6 +2131,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                             self.writer.add_scalar(f"train/saddle_point_boost", saddle_point_boost, self.step_num)
                                             self.writer.add_scalar(f"train/step_efficiency", step_efficiency, self.step_num)
                                             self.writer.add_scalar(f"train/dynamic_gain", dynamic_gain, self.step_num)
+                                            self.writer.add_scalar(f"train/effective_lr", effective_lr, self.step_num)
+                                            self.writer.add_scalar(f"train/precond_gain", precond_gain, self.step_num)
+                                            self.writer.add_scalar(f"train/momentum_gain", momentum_gain, self.step_num)
                                             self.writer.add_scalar(f"train/beta1", beta1, self.step_num)
                                 if self.progress_bar is not None:
                                     self.progress_bar.unpause()
@@ -2185,6 +2200,22 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
                             self.logger.log({
                                 'train/dynamic_gain': dynamic_gain,
+                            })
+
+                            self.logger.log({
+                                'train/effective_lr': effective_lr,
+                            })
+
+                            self.logger.log({
+                                'train/precond_gain': precond_gain,
+                            })
+
+                            self.logger.log({
+                                'train/momentum_gain': momentum_gain,
+                            })
+
+                            self.logger.log({
+                                'train/lr_mean': learning_rate,
                             })
 
                             self.logger.log({
@@ -2258,6 +2289,22 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
                             self.logger.log({
                                 'train/dynamic_gain': dynamic_gain,
+                            })
+
+                            self.logger.log({
+                                'train/effective_lr': effective_lr,
+                            })
+
+                            self.logger.log({
+                                'train/precond_gain': precond_gain,
+                            })
+
+                            self.logger.log({
+                                'train/momentum_gain': momentum_gain,
+                            })
+
+                            self.logger.log({
+                                'train/lr_mean': learning_rate,
                             })
 
                             self.logger.log({

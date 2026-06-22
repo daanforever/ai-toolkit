@@ -3,6 +3,7 @@
 import os
 import sys
 
+import pytest
 import torch
 
 # Add project root to sys.path for `import toolkit...` when running tests from repo root.
@@ -457,4 +458,37 @@ def test_gaussian_bimodal_content_or_style_overrides_one_step_timestep_type():
     # Pure one_step: every index 0 → timestep value 1000, zero variance.
     assert result.timesteps.float().std().item() > 40.0
     assert result.timesteps.min().item() < 450.0
+
+
+def test_gaussian_timestep_type_invalid_for_scheduler():
+    from extensions_built_in.diffusion_models.z_image_diffsynth.scheduler_config import (
+        build_scheduler_config,
+    )
+    from toolkit.samplers.custom_flowmatch_sampler import CustomFlowMatchEulerDiscreteScheduler
+
+    sched = CustomFlowMatchEulerDiscreteScheduler(**build_scheduler_config(False))
+    with pytest.raises(ValueError, match="Invalid timestep type"):
+        sched.set_train_timesteps(100, device="cpu", timestep_type="gaussian_bimodal")
+
+
+def test_shift_schedule_independent_of_timestep_weighting_field():
+    """timestep_weighting is not passed to set_train_timesteps; shift grid is unchanged."""
+    from extensions_built_in.diffusion_models.z_image_diffsynth.scheduler_config import (
+        build_scheduler_config,
+    )
+    from toolkit.samplers.custom_flowmatch_sampler import CustomFlowMatchEulerDiscreteScheduler
+
+    latents = torch.zeros(1, 16, 64, 64)
+    sched = CustomFlowMatchEulerDiscreteScheduler(**build_scheduler_config(False))
+    t_shift = sched.set_train_timesteps(
+        1000, device="cpu", timestep_type="shift", latents=latents
+    )
+    sched2 = CustomFlowMatchEulerDiscreteScheduler(**build_scheduler_config(False))
+    t_shift_again = sched2.set_train_timesteps(
+        1000, device="cpu", timestep_type="shift", latents=latents
+    )
+    assert torch.equal(t_shift, t_shift_again)
+    linear_sched = CustomFlowMatchEulerDiscreteScheduler(**build_scheduler_config(False))
+    t_linear = linear_sched.set_train_timesteps(1000, device="cpu", timestep_type="linear")
+    assert not torch.allclose(t_shift, t_linear)
 
