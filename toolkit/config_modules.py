@@ -399,6 +399,9 @@ class TrainConfig:
         self.show_turbo_outputs = kwargs.get('show_turbo_outputs', False)
         self.min_snr_gamma = kwargs.get('min_snr_gamma', None)
         self.snr_gamma = kwargs.get('snr_gamma', None)
+        # Optional override for SNR weighting mode (e.g. flowmatch2).
+        # If unset, training code falls back to scheduler/model deduction.
+        self.prediction_type = kwargs.get('prediction_type', None)
         # trains a gamma, offset, and scale to adjust loss to adapt to timestep differentials
         # this should balance the learning rate across all timesteps over time
         self.learnable_snr_gos = kwargs.get('learnable_snr_gos', False)

@@ -884,11 +884,13 @@ class BaseSDTrainProcess(BaseTrainProcess):
             print_acc("load_weights not implemented for non-network models")
 
     def apply_snr(self, seperated_loss, timesteps):
-        pred_type = (
-            "flowmatch"
-            if getattr(self.sd, "is_flow_matching", False)
-            else getattr(self.sd, "prediction_type", "epsilon")
-        )
+        pred_type = getattr(self.train_config, "prediction_type", None)
+        if not pred_type:
+            pred_type = (
+                "flowmatch"
+                if getattr(self.sd, "is_flow_matching", False)
+                else getattr(self.sd, "prediction_type", "epsilon")
+            )
         if self.train_config.learnable_snr_gos:
             # add snr_gamma
             seperated_loss = apply_learnable_snr_gos(seperated_loss, timesteps, self.snr_gos)
