@@ -54,7 +54,11 @@ def expected_flow_match_min_snr_weight(snr: Union[float, torch.Tensor], gamma: f
     snr_tensor = torch.as_tensor(snr, dtype=torch.float32)
     gamma_tensor = torch.ones_like(snr_tensor) * gamma
     denom = (1.0 + torch.sqrt(snr_tensor)) ** 2
-    return torch.minimum(gamma_tensor, snr_tensor) / denom
+    return torch.where(
+        snr_tensor > gamma_tensor,
+        gamma_tensor / denom,
+        torch.ones_like(snr_tensor),
+    )
 
 
 def format_snr_weight_check_lines(

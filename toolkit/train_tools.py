@@ -769,7 +769,13 @@ def apply_snr_weight(
         if fixed:
             snr_weight = torch.div(gamma_tensor, denom).float().to(loss.device)
         else:
-            snr_weight = torch.div(torch.minimum(gamma_tensor, snr), denom).float().to(loss.device)
+            # min(gamma, snr) in the numerator is not equivalent to epsilon min-SNR:
+            # when SNR <= gamma the weight must stay 1, not snr/denom.
+            snr_weight = torch.where(
+                snr > gamma_tensor,
+                gamma_tensor / denom,
+                torch.ones_like(snr),
+            ).float().to(loss.device)
     elif prediction_type == "v_prediction":
         if fixed:
             snr_weight = torch.div(gamma_tensor, snr + 1.0).float().to(loss.device)

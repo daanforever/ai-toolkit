@@ -102,14 +102,24 @@ def test_min_snr_caps_low_noise_not_high_noise(toolkit_scheduler):
     expected_low = expected_flow_match_min_snr_weight(snr_low, gamma).item()
     expected_high = expected_flow_match_min_snr_weight(snr_high, gamma).item()
     capped_low = gamma / (1.0 + snr_low.item() ** 0.5) ** 2
-    uncapped_high = snr_high.item() / (1.0 + snr_high.item() ** 0.5) ** 2
 
-    assert abs(weighted[0].item() - expected_low) < 1e-5
-    assert abs(weighted[1].item() - expected_high) < 1e-5
+    assert weighted[0].item() == pytest.approx(expected_low, abs=1e-5)
+    assert weighted[1].item() == pytest.approx(expected_high, abs=1e-5)
+    assert weighted[1].item() == pytest.approx(1.0)
+    assert weighted[0].item() < 1.0
     assert abs(weighted[0].item() - capped_low) < 1e-5, "ts=50 must use capped min-SNR weight"
-    assert abs(weighted[1].item() - uncapped_high) < 1e-5, "ts=950 must use uncapped SNR weight"
     uncapped_low = snr_low.item() / (1.0 + snr_low.item() ** 0.5) ** 2
     assert weighted[0].item() < uncapped_low, "ts=50 capped weight must be below uncapped high-SNR weight"
+
+    for g in (1.0, 5.0):
+        w = apply_snr_weight(
+            torch.ones(1, device=device),
+            torch.tensor([high_noise_ts], device=device),
+            toolkit_scheduler,
+            g,
+            prediction_type="flowmatch",
+        )
+        assert w.item() == pytest.approx(1.0), f"ts=950 weight must be 1.0 for gamma={g}"
 
 
 if __name__ == "__main__":

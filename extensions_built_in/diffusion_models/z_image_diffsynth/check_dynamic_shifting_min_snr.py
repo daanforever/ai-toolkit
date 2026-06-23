@@ -204,7 +204,7 @@ def main() -> None:
         prediction_type=flowmatch,
     )
     print(f"  t=50 (low noise):  weight={w[0].item():.6f} (should be capped)")
-    print(f"  t=950 (high noise): weight={w[1].item():.6f} (should be uncapped)")
+    print(f"  t=950 (high noise): weight={w[1].item():.6f} (should be 1.0)")
 
     print("\n=== gamma=0 note (trainer behaviour) ===")
     print("  min_snr_gamma=0: apply_snr_weight is NOT called (uniform loss on all timesteps).")
