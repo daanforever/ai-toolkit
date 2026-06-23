@@ -1081,11 +1081,13 @@ class SDTrainer(BaseSDTrainProcess):
             loss = loss + prior_loss
 
         if not self.train_config.train_turbo:
-            pred_type = (
-                "flowmatch"
-                if getattr(self.sd, "is_flow_matching", False)
-                else getattr(self.sd, "prediction_type", "epsilon")
-            )
+            pred_type = getattr(self.train_config, "prediction_type", None)
+            if not pred_type:
+                pred_type = (
+                    "flowmatch"
+                    if getattr(self.sd, "is_flow_matching", False)
+                    else getattr(self.sd, "prediction_type", "epsilon")
+                )
             if self.train_config.learnable_snr_gos:
                 # add snr_gamma
                 loss = apply_learnable_snr_gos(loss, timesteps, self.snr_gos)
