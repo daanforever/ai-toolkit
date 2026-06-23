@@ -745,16 +745,15 @@ def apply_snr_weight(
 ):
     timestep_values = torch.as_tensor(timesteps, device=loss.device, dtype=torch.float32)
 
-    if prediction_type in ("flowmatch", "rectified_flow"):
+    # 1. Calculate SNR
+    if prediction_type in ("flowmatch", "rectified_flow", "flowmatch2"):
         # SNR from noise level t = timestep / ntt (matches CustomFlowMatch add_noise).
         ntt = float(noise_scheduler.config.num_train_timesteps)
         t = (timestep_values / ntt).clamp(min=1e-8, max=1.0)
         snr = ((1.0 - t) ** 2) / (t ** 2 + 1e-8)
     else:
         all_snr = get_all_snr(noise_scheduler, loss.device)
-        offset = 0
-        if noise_scheduler.timesteps[0] == 1000:
-            offset = 1
+        offset = 1 if noise_scheduler.timesteps[0] == 1000 else 0
         timestep_indices = (timestep_values - offset).clamp(min=0, max=all_snr.shape[0] - 1)
 
         # Support non-integer timesteps by linearly interpolating SNR between table entries.
@@ -763,30 +762,43 @@ def apply_snr_weight(
         lerp = (timestep_indices - idx_low.float()).to(all_snr.dtype)
         snr = all_snr[idx_low] * (1.0 - lerp) + all_snr[idx_high] * lerp
 
-    gamma_tensor = torch.ones_like(snr) * gamma
+    # 2. Convert to tensors
+    snr_tensor = torch.as_tensor(snr, dtype=torch.float32, device=loss.device)
+    gamma_tensor = torch.full_like(snr_tensor, gamma)
+
+    # 3. Calculate weights
     if prediction_type in ("flowmatch", "rectified_flow"):
-        denom = (1.0 + torch.sqrt(snr)) ** 2
+        # "Inverted U-shape" weight (Inverted U-shape) - focus on middle steps
+        denom = (1.0 + torch.sqrt(snr_tensor)) ** 2
         if fixed:
-            snr_weight = torch.div(gamma_tensor, denom).float().to(loss.device)
+            snr_weight = torch.div(gamma_tensor, denom)
         else:
-            # min(gamma, snr) in the numerator is not equivalent to epsilon min-SNR:
-            # when SNR <= gamma the weight must stay 1, not snr/denom.
-            snr_weight = torch.where(
-                snr > gamma_tensor,
-                gamma_tensor / denom,
-                torch.ones_like(snr),
-            ).float().to(loss.device)
+            snr_weight = torch.div(torch.minimum(gamma_tensor, snr_tensor), denom)
+
+    elif prediction_type == "flowmatch2":
+        # Flat weight (base 1.0), which is only extinguished at low noise (SNR > gamma)
+        gamma_over_snr = torch.div(gamma_tensor, snr_tensor)
+        if fixed:
+            snr_weight = gamma_over_snr
+        else:
+            snr_weight = torch.minimum(gamma_over_snr, torch.ones_like(snr_tensor))
+
     elif prediction_type == "v_prediction":
+        # Classic Min-SNR for V-pred
         if fixed:
-            snr_weight = torch.div(gamma_tensor, snr + 1.0).float().to(loss.device)
+            snr_weight = torch.div(gamma_tensor, snr_tensor + 1.0)
         else:
-            snr_weight = torch.div(torch.minimum(gamma_tensor, snr), snr + 1.0).float().to(loss.device)
+            snr_weight = torch.div(torch.minimum(gamma_tensor, snr_tensor), snr_tensor + 1.0)
+
     else:
-        gamma_over_snr = torch.div(gamma_tensor, snr)
+        # epsilon (default)
+        gamma_over_snr = torch.div(gamma_tensor, snr_tensor)
         if fixed:
-            snr_weight = gamma_over_snr.float().to(loss.device)  # directly using gamma over snr
+            snr_weight = gamma_over_snr
         else:
-            snr_weight = torch.minimum(gamma_over_snr, torch.ones_like(gamma_over_snr)).float().to(loss.device)
+            snr_weight = torch.minimum(gamma_over_snr, torch.ones_like(snr_tensor))
+
+    # Multiply loss by calculated weight
     snr_adjusted_loss = loss * snr_weight
 
     return snr_adjusted_loss
