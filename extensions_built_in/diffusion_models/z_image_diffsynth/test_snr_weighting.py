@@ -4,7 +4,7 @@ SNR / min_snr_gamma tests for Z-Image DiffSynth toolkit training loop.
 When model.model_kwargs.use_diffsynth_training_loop is False, the model uses
 CustomFlowMatchEulerDiscreteScheduler and ZImageDiffSynthTrainer leaves
 min_snr_gamma / snr_gamma from train config enabled. SDTrainer.calculate_loss
-then calls apply_snr_weight with prediction_type="flowmatch".
+then calls apply_snr_weight with train_config.prediction_type (e.g. flowmatch2).
 
 Run from repo root with venv:
   venv\\Scripts\\python.exe -m pytest extensions_built_in/diffusion_models/z_image_diffsynth/test_snr_weighting.py -q
@@ -97,19 +97,17 @@ def test_min_snr_caps_low_noise_not_high_noise(toolkit_scheduler):
         timesteps,
         toolkit_scheduler,
         gamma,
-        prediction_type="flowmatch",
+        prediction_type="flowmatch2",
     )
     expected_low = expected_flow_match_min_snr_weight(snr_low, gamma).item()
     expected_high = expected_flow_match_min_snr_weight(snr_high, gamma).item()
-    capped_low = gamma / (1.0 + snr_low.item() ** 0.5) ** 2
+    capped_low = gamma / snr_low.item()
 
     assert weighted[0].item() == pytest.approx(expected_low, abs=1e-5)
     assert weighted[1].item() == pytest.approx(expected_high, abs=1e-5)
     assert weighted[1].item() == pytest.approx(1.0)
     assert weighted[0].item() < 1.0
-    assert abs(weighted[0].item() - capped_low) < 1e-5, "ts=50 must use capped min-SNR weight"
-    uncapped_low = snr_low.item() / (1.0 + snr_low.item() ** 0.5) ** 2
-    assert weighted[0].item() < uncapped_low, "ts=50 capped weight must be below uncapped high-SNR weight"
+    assert abs(weighted[0].item() - capped_low) < 1e-5, "ts=50 must use min-SNR weight gamma/snr"
 
     for g in (1.0, 5.0):
         w = apply_snr_weight(
@@ -117,7 +115,7 @@ def test_min_snr_caps_low_noise_not_high_noise(toolkit_scheduler):
             torch.tensor([high_noise_ts], device=device),
             toolkit_scheduler,
             g,
-            prediction_type="flowmatch",
+            prediction_type="flowmatch2",
         )
         assert w.item() == pytest.approx(1.0), f"ts=950 weight must be 1.0 for gamma={g}"
 

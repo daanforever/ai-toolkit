@@ -51,14 +51,10 @@ def lookup_snr(
 
 
 def expected_flow_match_min_snr_weight(snr: Union[float, torch.Tensor], gamma: float) -> torch.Tensor:
+    """Expected min-SNR weight for flowmatch2: min(gamma / snr, 1)."""
     snr_tensor = torch.as_tensor(snr, dtype=torch.float32)
     gamma_tensor = torch.ones_like(snr_tensor) * gamma
-    denom = (1.0 + torch.sqrt(snr_tensor)) ** 2
-    return torch.where(
-        snr_tensor > gamma_tensor,
-        gamma_tensor / denom,
-        torch.ones_like(snr_tensor),
-    )
+    return torch.minimum(gamma_tensor / snr_tensor, torch.ones_like(snr_tensor))
 
 
 def schedule_slot_indices(num_timesteps: int = 1000, step: int = 100) -> list[int]:
@@ -162,7 +158,7 @@ def assert_apply_snr_flow_match_weights(
         timestep_tensor,
         scheduler,
         gamma,
-        prediction_type="flowmatch",
+        prediction_type="flowmatch2",
     )
     assert weighted.shape == loss.shape, "apply_snr_weight must preserve loss shape"
 
