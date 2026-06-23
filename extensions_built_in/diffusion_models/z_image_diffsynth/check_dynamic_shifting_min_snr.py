@@ -95,7 +95,7 @@ def analyze_combo(
             timesteps,
             sched,
             gamma,
-            prediction_type=flowmatch,
+            prediction_type="flowmatch",
         )
         expected = expected_flow_match_min_snr_weight(snr, gamma)
         formula_ok = torch.allclose(weighted, expected, rtol=1e-4, atol=1e-6)
@@ -201,7 +201,7 @@ def main() -> None:
         torch.tensor([low_t, high_t]),
         sched,
         gamma,
-        prediction_type=flowmatch,
+        prediction_type="flowmatch",
     )
     print(f"  t=50 (low noise):  weight={w[0].item():.6f} (should be capped)")
     print(f"  t=950 (high noise): weight={w[1].item():.6f} (should be 1.0)")
@@ -213,7 +213,7 @@ def main() -> None:
         torch.tensor([500.0]),
         make_scheduler(True),
         0.0,
-        prediction_type=flowmatch,
+        prediction_type="flowmatch",
     )
     print(f"  If mis-applied with gamma=0, weight would be {w0.item():.6f} (zeros loss).")
 

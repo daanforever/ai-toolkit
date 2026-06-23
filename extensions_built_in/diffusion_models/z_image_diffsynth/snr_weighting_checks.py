@@ -61,27 +61,87 @@ def expected_flow_match_min_snr_weight(snr: Union[float, torch.Tensor], gamma: f
     )
 
 
+def schedule_slot_indices(num_timesteps: int = 1000, step: int = 100) -> list[int]:
+    """Training slot indices 0, step, 2*step, …, last slot (always include final index)."""
+    if step < 1:
+        raise ValueError(f"step must be >= 1, got {step}")
+    last = num_timesteps - 1
+    slots = list(range(0, last + 1, step))
+    if slots[-1] != last:
+        slots.append(last)
+    return slots
+
+
 def format_snr_weight_check_lines(
     timestep_list: Sequence[float],
     snr: torch.Tensor,
     expected: torch.Tensor,
     weighted: torch.Tensor,
     gamma: float,
+    *,
+    slot_indices: Sequence[int] | None = None,
 ) -> str:
-    w_ts, w_snr, w_exp, w_act = 12, 14, 16, 14
-    lines = [
-        f"min_snr_gamma={gamma:g}",
-        (
+    w_slot, w_ts, w_snr, w_exp, w_act = 6, 12, 14, 16, 14
+    header = f"min_snr_gamma={gamma:g}\n"
+    if slot_indices is not None:
+        header += (
+            f"{'slot':>{w_slot}}  {'timestep':>{w_ts}}  {'snr':>{w_snr}}  "
+            f"{'expected_weight':>{w_exp}}  {'actual_weight':>{w_act}}"
+        )
+    else:
+        header += (
             f"{'timestep':>{w_ts}}  {'snr':>{w_snr}}  "
             f"{'expected_weight':>{w_exp}}  {'actual_weight':>{w_act}}"
-        ),
-    ]
-    for i, ts in enumerate(timestep_list):
-        lines.append(
-            f"{ts:>{w_ts}g}  {snr[i].item():>{w_snr}.6g}  "
-            f"{expected[i].item():>{w_exp}.6g}  {weighted[i].item():>{w_act}.6g}"
         )
+    lines = [header]
+    for i, ts in enumerate(timestep_list):
+        if slot_indices is not None:
+            lines.append(
+                f"{slot_indices[i]:>{w_slot}d}  {ts:>{w_ts}g}  {snr[i].item():>{w_snr}.6g}  "
+                f"{expected[i].item():>{w_exp}.6g}  {weighted[i].item():>{w_act}.6g}"
+            )
+        else:
+            lines.append(
+                f"{ts:>{w_ts}g}  {snr[i].item():>{w_snr}.6g}  "
+                f"{expected[i].item():>{w_exp}.6g}  {weighted[i].item():>{w_act}.6g}"
+            )
     return "\n" + "\n".join(lines)
+
+
+def print_flowmatch_snr_weight_table(
+    scheduler,
+    *,
+    gamma: float = 5.0,
+    device: str = "cpu",
+    slot_step: int = 100,
+    verbose: bool = True,
+) -> torch.Tensor:
+    """Print min-SNR weights for scheduler timesteps at every `slot_step` training slots."""
+    ntt = int(scheduler.config.num_train_timesteps)
+    slots = schedule_slot_indices(ntt, slot_step)
+    timestep_list = [float(scheduler.timesteps[i].item()) for i in slots]
+    weighted = assert_apply_snr_flow_match_weights(
+        scheduler,
+        timestep_list,
+        gamma=gamma,
+        device=device,
+        verbose=False,
+    )
+    snr = lookup_snr(None, scheduler, timestep_list, device)
+    expected = expected_flow_match_min_snr_weight(snr, gamma)
+    if verbose:
+        print(
+            format_snr_weight_check_lines(
+                timestep_list,
+                snr,
+                expected,
+                weighted,
+                gamma,
+                slot_indices=slots,
+            ),
+            flush=True,
+        )
+    return weighted
 
 
 def assert_apply_snr_flow_match_weights(
