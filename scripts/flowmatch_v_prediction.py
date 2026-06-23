@@ -10,7 +10,7 @@ def test_flowmatch_v_prediction(gamma):
     loss = torch.ones(1)
     t = torch.tensor([float(ts)])
     w_old = apply_snr_weight(loss, t, sched, gamma, prediction_type='v_prediction')
-    w_new = apply_snr_weight(loss, t, sched, gamma, prediction_type='flow_match')
+    w_new = apply_snr_weight(loss, t, sched, gamma, prediction_type='flowmatch')
     snr = get_all_snr(sched, 'cpu')[int(ts)-1].item()
     print(f't={ts:3d} snr={snr:10.4f}  v_pred={w_old.item():.6f}  flow_match={w_new.item():.6f}  ratio={w_new.item()/w_old.item():.3f}')
 

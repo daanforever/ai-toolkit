@@ -554,7 +554,7 @@ def test_min_snr_gamma_high_timestep_and_accumulation_mixing(tmp_path, monkeypat
             fixed=fixed,
             prediction_type=prediction_type,
         )
-        if prediction_type in ("flow_match", "flowmatch", "rectified_flow"):
+        if prediction_type in ("flowmatch", "flowmatch", "rectified_flow"):
             with torch.no_grad():
                 base_loss = loss.detach().clone()
                 ts = torch.as_tensor(timesteps).detach().clone()
