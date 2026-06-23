@@ -44,7 +44,7 @@ class Adafactor(torch.optim.Optimizer):
             The same decay is used for group-level gradient RMS running max (``grad_rms_max`` on each
             param group) for consistency.
             When scale_parameter=True and relative_step=True, also used for the group-level running max
-            of parameter RMS (``rms_max`` on each param group), which normalizes each parameter's scale
+            of parameter RMS (``rms_max`` on each param group) and running min (``rms_min``), which normalizes each parameter's scale
             to (0, 1] for LR (useful for mixed-scale groups e.g. LoRA). Group-level metrics
             (``rms_ema``, ``update_rms``, ``lr_mean``, ``gns``, ``step_efficiency``, ``dynamic_gain``,
             ``effective_lr``, ``precond_gain``, ``momentum_gain``, etc.)
@@ -713,6 +713,18 @@ class Adafactor(torch.optim.Optimizer):
             group[key] = current
         group[key] = torch.maximum(current, candidate)
 
+    @staticmethod
+    def _group_running_min_update(group, key: str, candidate: torch.Tensor) -> None:
+        """In-place: group[key] = min(group[key], candidate), with device alignment."""
+        if key not in group:
+            group[key] = candidate.clone().detach()
+            return
+        current = group[key]
+        if isinstance(current, torch.Tensor) and current.device != candidate.device:
+            current = current.to(candidate.device)
+            group[key] = current
+        group[key] = torch.minimum(current, candidate)
+
     def _finalize_group_step_metrics(
         self,
         group,
@@ -880,6 +892,8 @@ class Adafactor(torch.optim.Optimizer):
             decay_rate = group["rms_max_decay_rate"]
             if "rms_max" in group:
                 group["rms_max"] = group["rms_max"] * decay_rate
+            if "rms_min" in group:
+                group["rms_min"] = group["rms_min"] / decay_rate
             if "update_rms_max" in group:
                 group["update_rms_max"] = group["update_rms_max"] * decay_rate
             if "grad_rms_max" in group:
@@ -972,6 +986,7 @@ class Adafactor(torch.optim.Optimizer):
                 state["RMS"] = self._rms(p_data_fp32)
                 rms_t = state["RMS"]
                 self._group_running_max_update(group, "rms_max", rms_t)
+                self._group_running_min_update(group, "rms_min", rms_t)
 
                 state["grad_rms"] = self._rms(grad)
                 gr = state["grad_rms"]
@@ -1154,6 +1169,20 @@ class Adafactor(torch.optim.Optimizer):
         if len(per_group) == 0:
             return 0.0
         return torch.tensor(per_group, dtype=torch.float64).max().item()
+
+    def get_min_rms(self):
+        """
+        Absolute min of per-group ``rms_min`` across all parameter groups.
+        Use with get_avg_rms() to monitor parameter scale vs recent min.
+        """
+        per_group = [
+            self._group_scalar_item(group, "rms_min", 0.0)
+            for group in self.param_groups
+            if "rms_min" in group
+        ]
+        if len(per_group) == 0:
+            return 0.0
+        return torch.tensor(per_group, dtype=torch.float64).min().item()
 
     def get_avg_update_rms(self):
         """
