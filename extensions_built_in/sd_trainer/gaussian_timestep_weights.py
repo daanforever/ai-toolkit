@@ -18,6 +18,18 @@ from functools import lru_cache
 import torch
 
 
+def _normalize_weights_to_unit_interval(raw: torch.Tensor) -> torch.Tensor:
+    """
+    Normalize arbitrary non-negative weights into [0, 1].
+
+    Guards against NaN/Inf and enforces strict clipping, so downstream code
+    never sees values outside the unit interval due to numeric edge cases.
+    """
+    safe_raw = torch.nan_to_num(raw, nan=0.0, posinf=0.0, neginf=0.0)
+    max_value = safe_raw.max().clamp(min=1e-8)
+    return (safe_raw / max_value).clamp_(0.0, 1.0)
+
+
 def scheduler_timesteps_align_with_index_grid(
     schedule: torch.Tensor,
     ntt: int,
@@ -136,8 +148,8 @@ def _compute_weights(ntt, mu_normalized, sigma, device_str):
     # Truncated normal PDF (denom: σ * (Φ(b)-Φ(a)) for unit area)
     raw = phi / (sigma * normalization + 1e-8)
 
-    # Scale to [0, 1] by maximum
-    weights = raw / raw.max().clamp(min=1e-8)
+    # Scale to [0, 1] with numeric guards
+    weights = _normalize_weights_to_unit_interval(raw)
     return weights
 
 
@@ -206,7 +218,7 @@ def _compute_bimodal_weights(ntt, mu1_normalized, sigma1, mu2_normalized, sigma2
         return phi / (sigma * normalization + 1e-8)
 
     raw = 0.5 * raw_truncnorm(m1, s1) + 0.5 * raw_truncnorm(m2, s2)
-    return raw / raw.max().clamp(min=1e-8)
+    return _normalize_weights_to_unit_interval(raw)
 
 
 def evaluate_gaussian_timestep_bimodal(

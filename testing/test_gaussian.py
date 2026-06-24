@@ -50,6 +50,9 @@ def test_evaluate_gaussian_timestep_peak_near_mean():
     )
     probs = weights / weights.sum().clamp(min=1e-8)
 
+    assert float(weights.min().item()) >= 0.0
+    assert float(weights.max().item()) <= 1.0
+
     # Peak should be very close to `mu` (discrete grid).
     argmax_t = int(torch.argmax(probs).item())
     assert abs(argmax_t - int(mu)) <= 1
@@ -137,6 +140,8 @@ def test_evaluate_gaussian_timestep_bimodal_two_peaks():
     lo2, hi2 = max(0, int(mu2) - 80), min(ntt, int(mu2) + 80)
     peak1_idx = lo1 + int(torch.argmax(weights[lo1:hi1]).item())
     peak2_idx = lo2 + int(torch.argmax(weights[lo2:hi2]).item())
+    assert float(weights.min().item()) >= 0.0
+    assert float(weights.max().item()) <= 1.0
     assert abs(peak1_idx - mu1) <= 25
     assert abs(peak2_idx - mu2) <= 25
 
