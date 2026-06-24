@@ -50,11 +50,39 @@ def lookup_snr(
     return ((1.0 - t) ** 2) / (t ** 2 + 1e-8)
 
 
+def expected_flowmatch_inverted_u_weight(
+    snr: Union[float, torch.Tensor],
+    gamma: float,
+    *,
+    fixed: bool = False,
+) -> torch.Tensor:
+    """Expected SNR weight for flowmatch / rectified_flow: min(gamma, snr) / (1 + sqrt(snr))^2."""
+    snr_tensor = torch.as_tensor(snr, dtype=torch.float32)
+    gamma_tensor = torch.full_like(snr_tensor, gamma)
+    numer = gamma_tensor if fixed else torch.minimum(gamma_tensor, snr_tensor)
+    denom = (1.0 + torch.sqrt(snr_tensor)) ** 2
+    return numer / denom
+
+
 def expected_flow_match_min_snr_weight(snr: Union[float, torch.Tensor], gamma: float) -> torch.Tensor:
     """Expected min-SNR weight for flowmatch2: min(gamma / snr, 1)."""
     snr_tensor = torch.as_tensor(snr, dtype=torch.float32)
     gamma_tensor = torch.ones_like(snr_tensor) * gamma
     return torch.minimum(gamma_tensor / snr_tensor, torch.ones_like(snr_tensor))
+
+
+def expected_flowmatch_snr_weight(
+    snr: Union[float, torch.Tensor],
+    gamma: float,
+    *,
+    prediction_type: str = "flowmatch2",
+    fixed: bool = False,
+) -> torch.Tensor:
+    if prediction_type in ("flowmatch", "rectified_flow"):
+        return expected_flowmatch_inverted_u_weight(snr, gamma, fixed=fixed)
+    if prediction_type == "flowmatch2":
+        return expected_flow_match_min_snr_weight(snr, gamma)
+    raise ValueError(f"unsupported prediction_type for flow-match SNR checks: {prediction_type!r}")
 
 
 def schedule_slot_indices(num_timesteps: int = 1000, step: int = 100) -> list[int]:
@@ -104,12 +132,95 @@ def format_snr_weight_check_lines(
     return "\n" + "\n".join(lines)
 
 
+def flowmatch_snr_weights_for_timesteps(
+    scheduler,
+    timestep_list: Sequence[float],
+    gammas: Sequence[float],
+    device: str,
+    *,
+    prediction_type: str = "flowmatch",
+) -> tuple[torch.Tensor, list[torch.Tensor]]:
+    snr = lookup_snr(None, scheduler, timestep_list, device)
+    loss = torch.ones(len(timestep_list), device=device, dtype=torch.float32)
+    timestep_tensor = torch.tensor(timestep_list, device=device, dtype=torch.float32)
+    weights_per_gamma = [
+        apply_snr_weight(
+            loss,
+            timestep_tensor,
+            scheduler,
+            gamma,
+            prediction_type=prediction_type,
+        )
+        for gamma in gammas
+    ]
+    return snr, weights_per_gamma
+
+
+def format_flowmatch_snr_weight_matrix(
+    timestep_list: Sequence[float],
+    snr: torch.Tensor,
+    gammas: Sequence[float],
+    weights_per_gamma: Sequence[torch.Tensor],
+    *,
+    slot_indices: Sequence[int] | None = None,
+) -> str:
+    gamma_cols = ", ".join(f"{g:g}" for g in gammas)
+    if slot_indices is not None:
+        lines = [f"slot, timestep, snr, {gamma_cols}"]
+    else:
+        lines = [f"timestep, snr, {gamma_cols}"]
+    for i, ts in enumerate(timestep_list):
+        row = []
+        if slot_indices is not None:
+            row.append(f"{slot_indices[i]:d}")
+        row.extend([f"{ts:g}", f"{snr[i].item():g}"])
+        for weights in weights_per_gamma:
+            row.append(f"{weights[i].item():g}")
+        lines.append(", ".join(row))
+    return "\n".join(lines)
+
+
+def print_flowmatch_snr_weight_matrix(
+    scheduler,
+    *,
+    gammas: Sequence[float],
+    device: str = "cpu",
+    slot_step: int = 100,
+    prediction_type: str = "flowmatch",
+    verbose: bool = True,
+) -> tuple[torch.Tensor, list[torch.Tensor]]:
+    """Print CSV: timestep, snr, <gamma columns> at every `slot_step` training slots."""
+    ntt = int(scheduler.config.num_train_timesteps)
+    slots = schedule_slot_indices(ntt, slot_step)
+    timestep_list = [float(scheduler.timesteps[i].item()) for i in slots]
+    snr, weights_per_gamma = flowmatch_snr_weights_for_timesteps(
+        scheduler,
+        timestep_list,
+        gammas,
+        device,
+        prediction_type=prediction_type,
+    )
+    if verbose:
+        print(
+            format_flowmatch_snr_weight_matrix(
+                timestep_list,
+                snr,
+                gammas,
+                weights_per_gamma,
+                slot_indices=slots,
+            ),
+            flush=True,
+        )
+    return snr, weights_per_gamma
+
+
 def print_flowmatch_snr_weight_table(
     scheduler,
     *,
     gamma: float = 5.0,
     device: str = "cpu",
     slot_step: int = 100,
+    prediction_type: str = "flowmatch2",
     verbose: bool = True,
 ) -> torch.Tensor:
     """Print min-SNR weights for scheduler timesteps at every `slot_step` training slots."""
@@ -121,10 +232,11 @@ def print_flowmatch_snr_weight_table(
         timestep_list,
         gamma=gamma,
         device=device,
+        prediction_type=prediction_type,
         verbose=False,
     )
     snr = lookup_snr(None, scheduler, timestep_list, device)
-    expected = expected_flow_match_min_snr_weight(snr, gamma)
+    expected = expected_flowmatch_snr_weight(snr, gamma, prediction_type=prediction_type)
     if verbose:
         print(
             format_snr_weight_check_lines(
@@ -148,6 +260,7 @@ def assert_apply_snr_flow_match_weights(
     rtol: float = 1e-4,
     atol: float = 1e-6,
     verbose: bool = True,
+    prediction_type: str = "flowmatch2",
 ) -> torch.Tensor:
     timestep_list = [float(t) for t in timesteps]
     all_snr = get_all_snr(scheduler, device)
@@ -158,12 +271,12 @@ def assert_apply_snr_flow_match_weights(
         timestep_tensor,
         scheduler,
         gamma,
-        prediction_type="flowmatch2",
+        prediction_type=prediction_type,
     )
     assert weighted.shape == loss.shape, "apply_snr_weight must preserve loss shape"
 
     snr = lookup_snr(all_snr, scheduler, timestep_list, device)
-    expected = expected_flow_match_min_snr_weight(snr, gamma)
+    expected = expected_flowmatch_snr_weight(snr, gamma, prediction_type=prediction_type)
     if verbose:
         print(format_snr_weight_check_lines(timestep_list, snr, expected, weighted, gamma), flush=True)
     for i, ts in enumerate(timestep_list):
