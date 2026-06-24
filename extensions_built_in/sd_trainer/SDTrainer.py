@@ -399,10 +399,11 @@ class SDTrainer(BaseSDTrainProcess):
         
         if self.train_config.blank_prompt_preservation and self.cached_blank_embeds is None:
             # make sure we have this if not unloading
-            self.cached_blank_embeds = self.sd.encode_prompt("").to(
-                self.device_torch,
-                dtype=self.sd.torch_dtype
-            ).detach()
+            with torch.no_grad():
+                self.cached_blank_embeds = self.sd.encode_prompt("").to(
+                    self.device_torch,
+                    dtype=self.sd.torch_dtype
+                ).detach()
         
         if self.train_config.diffusion_feature_extractor_path is not None:
             vae = self.sd.vae
