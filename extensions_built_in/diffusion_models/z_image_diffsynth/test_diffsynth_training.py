@@ -8,6 +8,7 @@ Run from repo root with venv:
 import torch
 import torch.nn.functional as F
 from types import SimpleNamespace
+import importlib
 
 import pytest
 
@@ -19,6 +20,7 @@ from extensions_built_in.diffusion_models.z_image_diffsynth.trainer import (
     ZImageDiffSynthTrainer,
     _read_use_diffsynth_training_loop_from_config,
 )
+from toolkit.config_modules import TrainConfig
 
 
 def test_use_diffsynth_prompt_encoding_inherits_training_loop():
@@ -151,6 +153,7 @@ def test_zimage_trainer_aggregate_applies_timestep_weight_once():
         train_turbo=False,
         linear_timesteps2=False,
         timestep_type="linear",
+        timestep_weighting="none",
     )
     z.sd = SimpleNamespace(noise_scheduler=TSched())
     z.writer = None
@@ -169,9 +172,10 @@ def test_zimage_trainer_aggregate_applies_timestep_weight_once():
     assert torch.allclose(out, ref.view(1), rtol=1e-5, atol=1e-6)
 
 
-def test_default_aggregate_no_double_timestep_weight():
+def test_default_aggregate_does_not_apply_timestep_weight():
     """
-    Regression: MSE path must apply linear_timesteps_weights only once (via hook), not hook + _apply.
+    Regression: SDTrainer aggregate path should not apply timestep weighting directly.
+    Weighting is applied later in calculate_loss after SNR.
     """
     from extensions_built_in.sd_trainer.SDTrainer import SDTrainer
     from types import SimpleNamespace
@@ -214,9 +218,115 @@ def test_default_aggregate_no_double_timestep_weight():
     mm = torch.ones(1, 1, 4, 4)
     out = f._aggregate_flow_matching_mse_loss(pred, target, ts, mm, pred, None, None)
     assert out.shape == (1,)
-    assert calls["apply"] == 1
+    assert calls["apply"] == 0
     # mask all ones, mean sq = 0, loss = 0
     assert float(out.item()) == 0.0
+
+
+def test_calculate_loss_applies_timestep_weight_after_snr(monkeypatch):
+    sdtrainer_module = importlib.import_module("extensions_built_in.sd_trainer.SDTrainer")
+    SDTrainer = sdtrainer_module.SDTrainer
+
+    class _NoiseScheduler:
+        def __init__(self):
+            self.timesteps = torch.arange(1000, dtype=torch.float32)
+            self.config = SimpleNamespace(
+                num_train_timesteps=1000,
+                prediction_type="epsilon",
+            )
+
+    class _Batch:
+        def __init__(self, bsz: int):
+            self.mask_tensor = None
+            self.loss_multiplier_list = [1.0] * bsz
+            self.latents = torch.zeros(bsz, 1, 2, 2)
+            self.tensor = torch.zeros_like(self.latents)
+            self.file_items = None
+            self.audio_pred = None
+            self.audio_target = None
+            self.sigmas = None
+
+        def get_is_reg_list(self):
+            return [False] * self.latents.shape[0]
+
+    trainer = object.__new__(SDTrainer)
+    cfg = TrainConfig()
+    cfg.dtype = "fp32"
+    cfg.loss_target = "noise"
+    cfg.loss_type = "mse"
+    cfg.train_turbo = False
+    cfg.do_guidance_loss = False
+    cfg.do_differential_guidance = False
+    cfg.do_prior_divergence = False
+    cfg.inverted_mask_prior = False
+    cfg.correct_pred_norm = False
+    cfg.match_noise_norm = False
+    cfg.pred_scaler = 1.0
+    cfg.target_noise_multiplier = 1.0
+    cfg.learnable_snr_gos = False
+    cfg.snr_gamma = None
+    cfg.min_snr_gamma = 1.0
+    cfg.prediction_type = "epsilon"
+    cfg.linear_timesteps = False
+    cfg.linear_timesteps2 = False
+    cfg.timestep_weighting = "gaussian"
+    cfg.content_or_style = "balanced"
+    cfg.target_norm_std = False
+    trainer.train_config = cfg
+    trainer.sd = SimpleNamespace(
+        is_flow_matching=True,
+        prediction_type="epsilon",
+        noise_scheduler=_NoiseScheduler(),
+    )
+    trainer.device_torch = torch.device("cpu")
+    trainer.dfe = None
+    trainer.adapter = None
+    trainer.writer = None
+    trainer.logger = None
+    trainer.step_num = 0
+    trainer.logging_config = SimpleNamespace(log_every=None)
+    trainer.accelerator = SimpleNamespace(is_main_process=False)
+    trainer.snr_gos = None
+
+    state = {"snr_called": False, "timestep_called": 0}
+
+    def _wrapped_apply_snr_weight(
+        loss,
+        timesteps,
+        noise_scheduler,
+        gamma,
+        fixed=False,
+        prediction_type="epsilon",
+    ):
+        state["snr_called"] = True
+        return loss * 3.0
+
+    def _wrapped_timestep_weight(self, loss, timesteps):
+        state["timestep_called"] += 1
+        assert state["snr_called"], "timestep weighting must run after SNR weighting"
+        assert loss.dim() == 1
+        return loss * 5.0
+
+    monkeypatch.setattr(sdtrainer_module, "apply_snr_weight", _wrapped_apply_snr_weight)
+    monkeypatch.setattr(SDTrainer, "_apply_flow_timestep_element_weights", _wrapped_timestep_weight)
+
+    bsz = 2
+    batch = _Batch(bsz)
+    noise_pred = torch.zeros(bsz, 1, 2, 2)
+    noise = torch.ones_like(noise_pred)
+    noisy_latents = torch.zeros_like(noise_pred)
+    timesteps = torch.tensor([100.0, 900.0])
+
+    loss = SDTrainer.calculate_loss(
+        trainer,
+        noise_pred=noise_pred,
+        noise=noise,
+        noisy_latents=noisy_latents,
+        timesteps=timesteps,
+        batch=batch,
+    )
+    assert state["timestep_called"] == 1
+    assert torch.allclose(loss, torch.tensor(15.0), rtol=1e-6, atol=1e-6)
 
 
 if __name__ == "__main__":

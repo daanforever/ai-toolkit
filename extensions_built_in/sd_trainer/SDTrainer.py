@@ -543,6 +543,12 @@ class SDTrainer(BaseSDTrainProcess):
 
         timestep_weight_for_logging = None
 
+        def _reshape_weight_for_loss(weight: torch.Tensor) -> torch.Tensor:
+            if len(loss.shape) <= 1:
+                return weight.detach()
+            view_shape = (-1,) + (1,) * (len(loss.shape) - 1)
+            return weight.view(*view_shape).detach()
+
         # handle linear timesteps and only adjust the weight of the timesteps
         if do_weighted_timesteps:
             # Explicit timestep_weighting=weighted uses default_weighing_scheme;
@@ -555,12 +561,9 @@ class SDTrainer(BaseSDTrainProcess):
                 v2=self.train_config.linear_timesteps2,
                 timestep_type=weighting_scheme,
             ).to(loss.device, dtype=loss.dtype)
-            if len(loss.shape) == 4:
-                timestep_weight = timestep_weight.view(-1, 1, 1, 1).detach()
-            elif len(loss.shape) == 5:
-                timestep_weight = timestep_weight.view(-1, 1, 1, 1, 1).detach()
+            timestep_weight_for_logging = timestep_weight.detach()
+            timestep_weight = _reshape_weight_for_loss(timestep_weight)
             loss = loss * timestep_weight
-            timestep_weight_for_logging = timestep_weight
         elif self.train_config.timestep_weighting == "gaussian":
             ntt = self.sd.noise_scheduler.config.num_train_timesteps
             schedule = self.sd.noise_scheduler.timesteps
@@ -591,12 +594,9 @@ class SDTrainer(BaseSDTrainProcess):
                 ntt,
                 noise_scheduler_timesteps=schedule,
             )
-            if len(loss.shape) == 4:
-                timestep_weight = timestep_weight.view(-1, 1, 1, 1).detach()
-            elif len(loss.shape) == 5:
-                timestep_weight = timestep_weight.view(-1, 1, 1, 1, 1).detach()
+            timestep_weight_for_logging = timestep_weight.detach()
+            timestep_weight = _reshape_weight_for_loss(timestep_weight)
             loss = loss * timestep_weight
-            timestep_weight_for_logging = timestep_weight
         elif self.train_config.timestep_weighting == "gaussian_bimodal":
             ntt = self.sd.noise_scheduler.config.num_train_timesteps
             schedule = self.sd.noise_scheduler.timesteps
@@ -625,12 +625,9 @@ class SDTrainer(BaseSDTrainProcess):
                 ntt,
                 noise_scheduler_timesteps=schedule,
             )
-            if len(loss.shape) == 4:
-                timestep_weight = timestep_weight.view(-1, 1, 1, 1).detach()
-            elif len(loss.shape) == 5:
-                timestep_weight = timestep_weight.view(-1, 1, 1, 1, 1).detach()
+            timestep_weight_for_logging = timestep_weight.detach()
+            timestep_weight = _reshape_weight_for_loss(timestep_weight)
             loss = loss * timestep_weight
-            timestep_weight_for_logging = timestep_weight
         elif self.train_config.content_or_style == 'fixed_cycle' and self.train_config.fixed_cycle_weight_peak_timesteps:
             # fixed_cycle: weight loss by Gaussian peaks at fixed_cycle_weight_peak_timesteps (e.g. 500, 375), mean-normalized
             peaks = self.train_config.fixed_cycle_weight_peak_timesteps
@@ -642,12 +639,9 @@ class SDTrainer(BaseSDTrainProcess):
             diff_cycle = cycle_ts.unsqueeze(1).float() - peaks_t.unsqueeze(0)
             mean_w = torch.exp(-(diff_cycle / sigma) ** 2).max(dim=1)[0].mean().clamp(min=1e-8)
             timestep_weight = (weight_per_timestep / mean_w).to(loss.device, dtype=loss.dtype)
-            if len(loss.shape) == 4:
-                timestep_weight = timestep_weight.view(-1, 1, 1, 1).detach()
-            elif len(loss.shape) == 5:
-                timestep_weight = timestep_weight.view(-1, 1, 1, 1, 1).detach()
+            timestep_weight_for_logging = timestep_weight.detach()
+            timestep_weight = _reshape_weight_for_loss(timestep_weight)
             loss = loss * timestep_weight
-            timestep_weight_for_logging = timestep_weight
 
         if self.writer is not None and self.accelerator.is_main_process:
             log_timestep_weights(
@@ -672,7 +666,6 @@ class SDTrainer(BaseSDTrainProcess):
             batch: 'DataLoaderBatchDTO',
     ) -> torch.Tensor:
         loss = torch.nn.functional.mse_loss(pred.float(), target.float(), reduction="none")
-        loss = self._apply_flow_timestep_element_weights(loss, timesteps)
 
         if self.train_config.do_prior_divergence and prior_pred is not None:
             loss = loss + (torch.nn.functional.mse_loss(pred.float(), prior_pred.float(), reduction="none") * -1.0)
@@ -959,6 +952,8 @@ class SDTrainer(BaseSDTrainProcess):
 
         ignore_snr = False
 
+        apply_timestep_weighting = not (loss_target == 'source' or loss_target == 'unaugmented')
+
         if loss_target == 'source' or loss_target == 'unaugmented':
             assert not self.train_config.train_turbo
             # ignore_snr = True
@@ -1010,9 +1005,6 @@ class SDTrainer(BaseSDTrainProcess):
                     prior_pred,
                     batch,
                 )
-
-            if self.train_config.loss_type in ("mae", "wavelet", "stepped"):
-                loss = self._apply_flow_timestep_element_weights(loss, timesteps)
 
         if loss.dim() > 1:
             if self.train_config.do_prior_divergence and prior_pred is not None:
@@ -1105,6 +1097,9 @@ class SDTrainer(BaseSDTrainProcess):
                     self.train_config.min_snr_gamma,
                     prediction_type=pred_type
                 )
+
+        if apply_timestep_weighting:
+            loss = self._apply_flow_timestep_element_weights(loss, timesteps)
 
         loss = loss.mean()
         
