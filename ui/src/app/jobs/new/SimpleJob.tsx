@@ -512,24 +512,37 @@ export default function SimpleJob({
                   min={0}
                   required
                 />
-                <NumberInput
-                  label="Weight Decay"
-                  className="pt-2"
-                  value={jobConfig.config.process[0].train.optimizer_params.weight_decay}
-                  onChange={value => setJobConfig(value, 'config.process[0].train.optimizer_params.weight_decay')}
-                  placeholder="eg. 0.0001"
-                  min={0}
-                  required
-                />
-                <SelectInput
-                  label="Weight Decay Mode"
-                  className="pt-2"
-                  value={jobConfig.config.process[0].train.optimizer_params.weight_decay_mode ?? 'absolute'}
-                  onChange={value =>
-                    setJobConfig(value, 'config.process[0].train.optimizer_params.weight_decay_mode')
-                  }
-                  options={weightDecayModeOptions}
-                />
+                <div className="pt-2 flex items-end gap-2">
+                  <NumberInput
+                    label="Weight Decay"
+                    className="flex-1"
+                    value={jobConfig.config.process[0].train.optimizer_params.weight_decay}
+                    onChange={value => setJobConfig(value, 'config.process[0].train.optimizer_params.weight_decay')}
+                    placeholder="eg. 0.0001"
+                    min={0}
+                    required
+                  />
+                  <NumberInput
+                    label="Weight Decay Increment"
+                    className="flex-1"
+                    value={jobConfig.config.process[0].train.optimizer_params.weight_decay_increment ?? 0.0}
+                    onChange={value =>
+                      setJobConfig(value, 'config.process[0].train.optimizer_params.weight_decay_increment')
+                    }
+                    placeholder="eg. 0.00001"
+                    min={0}
+                    required
+                  />
+                  <SelectInput
+                    label="Weight Decay Mode"
+                    className="flex-1"
+                    value={jobConfig.config.process[0].train.optimizer_params.weight_decay_mode ?? 'absolute'}
+                    onChange={value =>
+                      setJobConfig(value, 'config.process[0].train.optimizer_params.weight_decay_mode')
+                    }
+                    options={weightDecayModeOptions}
+                  />
+                </div>
               </div>
               <div>
                 {disableSections.includes('train.timestep_type') ? null : (

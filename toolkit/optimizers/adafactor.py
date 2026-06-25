@@ -55,6 +55,9 @@ class Adafactor(torch.optim.Optimizer):
             Suggested values: 0.9 (default), 0.95 or 0.99 for smoother updates.
         weight_decay (`float`, *optional*, defaults to 0.0):
             Weight decay (L2 penalty)
+        weight_decay_increment (`float`, *optional*, defaults to 0.0):
+            Value added to `weight_decay` once per optimizer step (applied after step updates,
+            so it takes effect starting from the next step).
         weight_decay_mode (`str`, *optional*, defaults to `"absolute"`):
             Weight decay mode: `"update_rms"` uses update RMS, `"param_rms"` uses parameter RMS,
             `"absolute"` uses decoupled factor `(1 - lr * weight_decay)`.
@@ -146,6 +149,7 @@ class Adafactor(torch.optim.Optimizer):
         beta2=0.99,
         rms_max_decay_rate=0.97,
         weight_decay=0.0,
+        weight_decay_increment=0.0,
         weight_decay_mode: str = "absolute",
         scale_parameter=False,
         relative_step=False,
@@ -171,6 +175,7 @@ class Adafactor(torch.optim.Optimizer):
             "beta2": beta2,
             "rms_max_decay_rate": rms_max_decay_rate,
             "weight_decay": weight_decay,
+            "weight_decay_increment": weight_decay_increment,
             "weight_decay_mode": weight_decay_mode,
             "scale_parameter": scale_parameter,
             "relative_step": relative_step,
@@ -191,6 +196,7 @@ class Adafactor(torch.optim.Optimizer):
             group["warmup_active"] = False
             group["factored"] = factored
             group["emergency_brake"] = emergency_brake
+            group["weight_decay_increment"] = weight_decay_increment
             group["weight_decay_mode"] = weight_decay_mode
 
         # Create stagnation detector for RMS(parameter) based heuristic.
@@ -210,6 +216,7 @@ class Adafactor(torch.optim.Optimizer):
         self._clip_threshold = clip_threshold
         self._rms_max_decay_rate = rms_max_decay_rate
         self._weight_decay = weight_decay
+        self._weight_decay_increment = weight_decay_increment
         self._weight_decay_mode = weight_decay_mode
         self._scale_parameter = scale_parameter
         self._relative_step = relative_step
@@ -264,10 +271,19 @@ class Adafactor(torch.optim.Optimizer):
 
     def set_weight_decay(self, value: float) -> None:
         """Update weight_decay at runtime (e.g. from UI)."""
+        self._weight_decay = value
         for group in self.param_groups:
             group["weight_decay"] = value
         if is_debug_enabled():
             print_acc(f"Adafactor: applied runtime weight_decay={value}")
+
+    def set_weight_decay_increment(self, value: float) -> None:
+        """Update weight_decay_increment at runtime (e.g. from UI)."""
+        self._weight_decay_increment = value
+        for group in self.param_groups:
+            group["weight_decay_increment"] = value
+        if is_debug_enabled():
+            print_acc(f"Adafactor: applied runtime weight_decay_increment={value}")
 
     def set_weight_decay_mode(self, value: str) -> None:
         """Update weight_decay_mode at runtime (e.g. from UI)."""
@@ -316,6 +332,7 @@ class Adafactor(torch.optim.Optimizer):
             group["clip_threshold"] = self._clip_threshold
             group["rms_max_decay_rate"] = self._rms_max_decay_rate
             group["weight_decay"] = self._weight_decay
+            group["weight_decay_increment"] = self._weight_decay_increment
             group["weight_decay_mode"] = self._weight_decay_mode
             group["scale_parameter"] = self._scale_parameter
             group["relative_step"] = self._relative_step
@@ -1105,6 +1122,9 @@ class Adafactor(torch.optim.Optimizer):
                     )
                 )
 
+            group["weight_decay"] = group.get("weight_decay", 0.0) + group.get(
+                "weight_decay_increment", 0.0
+            )
             self._finalize_group_step_metrics(group, metrics)
 
         return loss
@@ -1112,6 +1132,11 @@ class Adafactor(torch.optim.Optimizer):
     def get_avg_learning_rate(self):
         """Average learning rate across groups (unified tensor reduction, same as get_avg_update_rms*)."""
         return self._scalars_per_group_to_avg(self.get_learning_rates())
+
+    def get_weight_decay(self):
+        """Average weight_decay across groups (unified tensor reduction)."""
+        per_group = [float(group.get("weight_decay", 0.0)) for group in self.param_groups]
+        return self._scalars_per_group_to_avg(per_group)
 
     def get_update_rms(self):
         """

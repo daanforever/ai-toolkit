@@ -1967,6 +1967,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 # torch.cuda.empty_cache()
                 # if optimizer has get_lrs method, then use it
                 learning_rate = 0.0
+                weight_decay = 0.0
                 update_rms = 0.0  # Average weight update RMS (for monitoring optimizer step magnitude)
                 update_rms_max = 0.0  # Max RMS across param groups (for graphs)
                 param_rms = 0.0  # Average parameter RMS across groups (Adafactor)
@@ -1998,6 +1999,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         )
                     else:
                         learning_rate = optimizer.param_groups[0]['lr']
+                    if hasattr(optimizer, 'get_weight_decay'):
+                        weight_decay = optimizer.get_weight_decay()
+                    else:
+                        weight_decay = optimizer.param_groups[0].get('weight_decay', 0.0)
                     
                     # Get average weight update RMS if optimizer supports it (e.g., Adafactor)
                     if hasattr(optimizer, 'get_avg_update_rms'):
@@ -2038,6 +2043,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         beta1 = optimizer.get_avg_beta1()
 
                     prog_bar_string = f"lr: {learning_rate:.1e}"
+                    if weight_decay > 0:
+                        prog_bar_string += f" wd: {weight_decay:.1e}"
                     if effective_lr > 0:
                         prog_bar_string += f" eff: {effective_lr:.1e}"
                     if update_rms > 0:
@@ -2123,6 +2130,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                             self.writer.add_scalar(f"{key}", value, self.step_num)
                                             self.writer.add_scalar(f"lr", learning_rate, self.step_num)
                                             self.writer.add_scalar(f"train/lr_mean", learning_rate, self.step_num)
+                                            self.writer.add_scalar(f"train/weight_decay", weight_decay, self.step_num)
                                             self.writer.add_scalar(f"train/update_rms", update_rms, self.step_num)
                                             self.writer.add_scalar(f"train/update_rms_max", update_rms_max, self.step_num)
                                             self.writer.add_scalar(f"train/param_rms", param_rms, self.step_num)
@@ -2148,6 +2156,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
                             # log to logger
                             self.logger.log({
                                 'learning_rate': learning_rate,
+                            })
+                            self.logger.log({
+                                'weight_decay': weight_decay,
                             })
                             # Log differential guidance norm if available
                             if hasattr(self, 'diff_guidance_norm') and self.diff_guidance_norm is not None:

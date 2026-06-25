@@ -87,6 +87,9 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     train?.timestep_weighting ?? defaultJobConfig.config.process[0].train.timestep_weighting ?? 'none';
   const contentOrStyle = train?.content_or_style ?? defaultJobConfig.config.process[0].train.content_or_style;
   const weightDecay = optimizerParams?.weight_decay ?? defaultJobConfig.config.process[0].train.optimizer_params.weight_decay;
+  const weightDecayIncrement =
+    optimizerParams?.weight_decay_increment ??
+    defaultJobConfig.config.process[0].train.optimizer_params.weight_decay_increment;
   const weightDecayMode =
     optimizerParams?.weight_decay_mode ??
     defaultJobConfig.config.process[0].train.optimizer_params.weight_decay_mode;
@@ -190,12 +193,17 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
       return;
     }
     if (!process.train.optimizer_params) {
-      process.train.optimizer_params = { weight_decay: 1e-4, weight_decay_mode: 'absolute' };
+      process.train.optimizer_params = {
+        weight_decay: 1e-4,
+        weight_decay_increment: 0.0,
+        weight_decay_mode: 'absolute',
+      };
     }
     process.train.timestep_type = timestepType;
     process.train.timestep_weighting = timestepWeighting;
     process.train.content_or_style = contentOrStyle;
     process.train.optimizer_params.weight_decay = weightDecay;
+    process.train.optimizer_params.weight_decay_increment = weightDecayIncrement;
     process.train.optimizer_params.weight_decay_mode = weightDecayMode;
     (process.train.optimizer_params as Record<string, number | null>).beta1 = beta1;
     (process.train.optimizer_params as Record<string, number>).beta2 = beta2;
@@ -301,6 +309,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         lr?: number;
         min_lr?: number;
         weight_decay?: number;
+        weight_decay_increment?: number;
         weight_decay_mode?: WeightDecayMode;
         beta1?: number | null;
         beta2?: number;
@@ -323,6 +332,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         fixed_cycle_weight_sigma?: number;
       } = {
         weight_decay: weightDecay,
+        weight_decay_increment: weightDecayIncrement,
         weight_decay_mode: weightDecayMode,
         beta1: beta1 === 0 ? null : beta1,
         beta2: beta2,
@@ -380,6 +390,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     timestepWeighting,
     contentOrStyle,
     weightDecay,
+    weightDecayIncrement,
     weightDecayMode,
     beta1,
     beta2,
@@ -490,6 +501,22 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
               onChange={(e) => {
                 const v = parseFloat(e.target.value);
                 if (Number.isFinite(v)) setValue(v, `${OPTIMIZER_PARAMS_PATH}.weight_decay`);
+                setApplyStatus('idle');
+              }}
+              className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+            />
+          </div>
+          <div className="space-y-2 flex-1 min-w-[180px]">
+            <p className="text-xs text-gray-400">Weight decay increment</p>
+            <input
+              type="number"
+              min={0}
+              step="any"
+              placeholder="e.g. 0.00001 or 0"
+              value={weightDecayIncrement}
+              onChange={(e) => {
+                const v = parseFloat(e.target.value);
+                if (Number.isFinite(v)) setValue(v, `${OPTIMIZER_PARAMS_PATH}.weight_decay_increment`);
                 setApplyStatus('idle');
               }}
               className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"

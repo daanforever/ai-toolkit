@@ -75,6 +75,7 @@ export const defaultJobConfig: JobConfig = {
           content_or_style: 'balanced',
           optimizer_params: {
             weight_decay: 1e-4,
+            weight_decay_increment: 0.0,
             weight_decay_mode: 'absolute',
           },
           unload_text_encoder: false,
@@ -200,6 +201,16 @@ export const migrateJobConfig = (jobConfig: JobConfig): JobConfig => {
       log_every: 1,
       use_ui_logger: true,
     };
+  }
+
+  if (!jobConfig.config.process[0].train.optimizer_params) {
+    jobConfig.config.process[0].train.optimizer_params = {
+      weight_decay: 1e-4,
+      weight_decay_increment: 0.0,
+      weight_decay_mode: 'absolute',
+    };
+  } else if (!('weight_decay_increment' in jobConfig.config.process[0].train.optimizer_params)) {
+    jobConfig.config.process[0].train.optimizer_params.weight_decay_increment = 0.0;
   }
   return jobConfig;
 };

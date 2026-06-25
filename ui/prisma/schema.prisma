@@ -51,6 +51,7 @@ model RuntimeParams {
   runtime_gaussian_mean_2  Float?
   runtime_gaussian_std_2   Float?
   runtime_weight_decay     Float?
+  runtime_weight_decay_increment Float?
   runtime_weight_decay_mode String?
   runtime_beta1            Float?
   runtime_beta2            Float?
