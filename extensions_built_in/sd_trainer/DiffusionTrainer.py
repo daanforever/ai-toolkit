@@ -736,8 +736,7 @@ class DiffusionTrainer(SDTrainer):
         while getattr(optimizer, "optimizer", None) is not None:
             optimizer = optimizer.optimizer
         if hasattr(optimizer, "set_weight_decay"):
-            pg0 = optimizer.param_groups[0] if optimizer.param_groups else {}
-            if pg0.get("weight_decay") == value:
+            if getattr(optimizer, "_weight_decay", None) == value:
                 self._last_applied_runtime_weight_decay = value
                 return
             if is_debug_enabled():

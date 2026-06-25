@@ -79,6 +79,22 @@ def test_weight_decay_increment_applies_after_step():
     assert opt.get_weight_decay() == pytest.approx(0.2)
 
 
+def test_base_weight_decay_unchanged_while_param_groups_accumulate():
+    """_weight_decay stays at base; param_groups weight_decay grows with increment."""
+    opt, param = _make_opt("absolute", lr=0.2, wd=0.1, wd_increment=0.05)
+    param.grad = torch.zeros_like(param)
+    opt.step()
+    assert opt._weight_decay == pytest.approx(0.1)
+    assert opt.param_groups[0]["weight_decay"] == pytest.approx(0.15)
+    assert opt.param_groups[0]["weight_decay"] != opt._weight_decay
+
+    param.grad = torch.zeros_like(param)
+    opt.step()
+    assert opt._weight_decay == pytest.approx(0.1)
+    assert opt.param_groups[0]["weight_decay"] == pytest.approx(0.2)
+    assert opt.get_weight_decay() == pytest.approx(0.2)
+
+
 def test_set_weight_decay_increment_updates_groups():
     opt, _ = _make_opt("absolute")
     opt.set_weight_decay_increment(0.01)
