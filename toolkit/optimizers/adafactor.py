@@ -331,7 +331,7 @@ class Adafactor(torch.optim.Optimizer):
             group["eps"] = self._eps
             group["clip_threshold"] = self._clip_threshold
             group["rms_max_decay_rate"] = self._rms_max_decay_rate
-            group["weight_decay"] = self._weight_decay
+            group["weight_decay"] = group.get("weight_decay", self._weight_decay)
             group["weight_decay_increment"] = self._weight_decay_increment
             group["weight_decay_mode"] = self._weight_decay_mode
             group["scale_parameter"] = self._scale_parameter

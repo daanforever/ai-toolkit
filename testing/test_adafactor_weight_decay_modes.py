@@ -107,6 +107,21 @@ def test_get_weight_decay_returns_current_value():
     assert opt.get_weight_decay() == pytest.approx(0.123)
 
 
+def test_load_state_dict_preserves_accumulated_weight_decay():
+    opt, param = _make_opt("absolute", lr=0.2, wd=0.1, wd_increment=0.05)
+    param.grad = torch.zeros_like(param)
+    opt.step()
+    param.grad = torch.zeros_like(param)
+    opt.step()
+    assert opt.get_weight_decay() == pytest.approx(0.2)
+
+    state = opt.state_dict()
+    opt2, _ = _make_opt("absolute", lr=0.2, wd=0.1, wd_increment=0.05)
+    opt2.load_state_dict(state)
+    assert opt2.get_weight_decay() == pytest.approx(0.2)
+    assert opt2._weight_decay == pytest.approx(0.1)
+
+
 def test_invalid_weight_decay_mode_raises():
     with pytest.raises(ValueError):
         _make_opt("unknown_mode")
