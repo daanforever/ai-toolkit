@@ -1048,7 +1048,9 @@ class TrainVAEProcess(BaseTrainProcess):
                     loss_string += f" lpm: {lpm_loss:.2e}"
                 
 
-                if hasattr(optimizer, 'get_avg_learning_rate'):
+                if hasattr(optimizer, 'get_mean_learning_rate'):
+                    learning_rate = optimizer.get_mean_learning_rate()
+                elif hasattr(optimizer, 'get_avg_learning_rate'):
                     learning_rate = optimizer.get_avg_learning_rate()
                 elif self.optimizer_type.startswith('dadaptation') or \
                         self.optimizer_type.lower().startswith('prodigy'):

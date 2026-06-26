@@ -1976,7 +1976,6 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 grad_rms = 0.0  # Average gradient RMS across groups (Adafactor)
                 grad_rms_max = 0.0  # Running max of gradient RMS (for graphs)
                 gns = 0.0  # Gradient Noise Scale (Adafactor with momentum)
-                dir_consistency = 0.0  # Directional consistency with EMA (Adafactor with momentum)
                 dir_consistency_mean = 0.0  # Mean directional consistency per group (Adafactor emergency brake)
                 instability_score = 0.0  # Soft brake cumulative instability score per group (Adafactor emergency brake)
                 saddle_point_boost = 1.0  # RMS stagnation LR multiplier on relative_step (Adafactor)
@@ -1987,7 +1986,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 momentum_gain = 0.0  # Momentum gain: final/scaled update (Adafactor)
                 beta1 = 0.0  # Momentum coefficient (Adafactor)
                 if not did_oom and loss_dict is not None:
-                    if hasattr(optimizer, 'get_avg_learning_rate'):
+                    if hasattr(optimizer, 'get_mean_learning_rate'):
+                        learning_rate = optimizer.get_mean_learning_rate()
+                    elif hasattr(optimizer, 'get_avg_learning_rate'):
                         learning_rate = optimizer.get_avg_learning_rate()
                     elif hasattr(optimizer, 'get_learning_rates'):
                         learning_rate = optimizer.get_learning_rates()[0]
@@ -2005,42 +2006,40 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         weight_decay = optimizer.param_groups[0].get('weight_decay', 0.0)
                     
                     # Get average weight update RMS if optimizer supports it (e.g., Adafactor)
-                    if hasattr(optimizer, 'get_avg_update_rms'):
-                        update_rms = optimizer.get_avg_update_rms()
-                    if hasattr(optimizer, 'get_avg_update_rms_max'):
-                        update_rms_max = optimizer.get_avg_update_rms_max()
-                    if hasattr(optimizer, 'get_avg_rms'):
-                        param_rms = optimizer.get_avg_rms()
+                    if hasattr(optimizer, 'get_mean_update_rms'):
+                        update_rms = optimizer.get_mean_update_rms()
+                    if hasattr(optimizer, 'get_mean_update_rms_max'):
+                        update_rms_max = optimizer.get_mean_update_rms_max()
+                    if hasattr(optimizer, 'get_mean_rms'):
+                        param_rms = optimizer.get_mean_rms()
                     if hasattr(optimizer, 'get_max_rms'):
                         param_rms_max = optimizer.get_max_rms()
                     if hasattr(optimizer, 'get_min_rms'):
                         param_rms_min = optimizer.get_min_rms()
-                    if hasattr(optimizer, 'get_avg_grad_rms'):
-                        grad_rms = optimizer.get_avg_grad_rms()
-                    if hasattr(optimizer, 'get_avg_grad_rms_max'):
-                        grad_rms_max = optimizer.get_avg_grad_rms_max()
-                    if hasattr(optimizer, 'get_avg_gns'):
-                        gns = optimizer.get_avg_gns()
-                    if hasattr(optimizer, 'get_avg_dir_consistency'):
-                        dir_consistency = optimizer.get_avg_dir_consistency()
+                    if hasattr(optimizer, 'get_mean_grad_rms'):
+                        grad_rms = optimizer.get_mean_grad_rms()
+                    if hasattr(optimizer, 'get_mean_grad_rms_max'):
+                        grad_rms_max = optimizer.get_mean_grad_rms_max()
+                    if hasattr(optimizer, 'get_mean_gns'):
+                        gns = optimizer.get_mean_gns()
                     if hasattr(optimizer, 'get_mean_dir_consistency'):
                         dir_consistency_mean = optimizer.get_mean_dir_consistency()
-                    if hasattr(optimizer, 'get_avg_instability_score'):
-                        instability_score = optimizer.get_avg_instability_score()
-                    if hasattr(optimizer, 'get_avg_saddle_point_boost'):
-                        saddle_point_boost = optimizer.get_avg_saddle_point_boost()
-                    if hasattr(optimizer, 'get_avg_step_efficiency'):
-                        step_efficiency = optimizer.get_avg_step_efficiency()
-                    if hasattr(optimizer, 'get_avg_dynamic_gain'):
-                        dynamic_gain = optimizer.get_avg_dynamic_gain()
-                    if hasattr(optimizer, 'get_avg_effective_lr'):
-                        effective_lr = optimizer.get_avg_effective_lr()
-                    if hasattr(optimizer, 'get_avg_precond_gain'):
-                        precond_gain = optimizer.get_avg_precond_gain()
-                    if hasattr(optimizer, 'get_avg_momentum_gain'):
-                        momentum_gain = optimizer.get_avg_momentum_gain()
-                    if hasattr(optimizer, 'get_avg_beta1'):
-                        beta1 = optimizer.get_avg_beta1()
+                    if hasattr(optimizer, 'get_mean_instability_score'):
+                        instability_score = optimizer.get_mean_instability_score()
+                    if hasattr(optimizer, 'get_mean_saddle_point_boost'):
+                        saddle_point_boost = optimizer.get_mean_saddle_point_boost()
+                    if hasattr(optimizer, 'get_mean_step_efficiency'):
+                        step_efficiency = optimizer.get_mean_step_efficiency()
+                    if hasattr(optimizer, 'get_mean_dynamic_gain'):
+                        dynamic_gain = optimizer.get_mean_dynamic_gain()
+                    if hasattr(optimizer, 'get_mean_effective_lr'):
+                        effective_lr = optimizer.get_mean_effective_lr()
+                    if hasattr(optimizer, 'get_mean_precond_gain'):
+                        precond_gain = optimizer.get_mean_precond_gain()
+                    if hasattr(optimizer, 'get_mean_momentum_gain'):
+                        momentum_gain = optimizer.get_mean_momentum_gain()
+                    if hasattr(optimizer, 'get_mean_beta1'):
+                        beta1 = optimizer.get_mean_beta1()
 
                     prog_bar_string = f"lr: {learning_rate:.1e}"
                     if weight_decay > 0:
@@ -2129,7 +2128,6 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                         for key, value in loss_dict.items():
                                             self.writer.add_scalar(f"{key}", value, self.step_num)
                                             self.writer.add_scalar(f"lr", learning_rate, self.step_num)
-                                            self.writer.add_scalar(f"train/lr_mean", learning_rate, self.step_num)
                                             self.writer.add_scalar(f"train/weight_decay", weight_decay, self.step_num)
                                             self.writer.add_scalar(f"train/update_rms", update_rms, self.step_num)
                                             self.writer.add_scalar(f"train/update_rms_max", update_rms_max, self.step_num)
@@ -2139,7 +2137,6 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                             self.writer.add_scalar(f"train/grad_rms", grad_rms, self.step_num)
                                             self.writer.add_scalar(f"train/grad_rms_max", grad_rms_max, self.step_num)
                                             self.writer.add_scalar(f"train/gns", gns, self.step_num)
-                                            self.writer.add_scalar(f"train/dir_consistency", dir_consistency, self.step_num)
                                             self.writer.add_scalar(f"train/dir_consistency_mean", dir_consistency_mean, self.step_num)
                                             self.writer.add_scalar(f"train/instability_score", instability_score, self.step_num)
                                             self.writer.add_scalar(f"train/saddle_point_boost", saddle_point_boost, self.step_num)
@@ -2200,10 +2197,6 @@ class BaseSDTrainProcess(BaseTrainProcess):
                             })
 
                             self.logger.log({
-                                'train/dir_consistency': dir_consistency,
-                            })
-
-                            self.logger.log({
                                 'train/dir_consistency_mean': dir_consistency_mean,
                             })
 
@@ -2233,10 +2226,6 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
                             self.logger.log({
                                 'train/momentum_gain': momentum_gain,
-                            })
-
-                            self.logger.log({
-                                'train/lr_mean': learning_rate,
                             })
 
                             self.logger.log({
@@ -2293,10 +2282,6 @@ class BaseSDTrainProcess(BaseTrainProcess):
                             })
 
                             self.logger.log({
-                                'train/dir_consistency': dir_consistency,
-                            })
-
-                            self.logger.log({
                                 'train/dir_consistency_mean': dir_consistency_mean,
                             })
 
@@ -2326,10 +2311,6 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
                             self.logger.log({
                                 'train/momentum_gain': momentum_gain,
-                            })
-
-                            self.logger.log({
-                                'train/lr_mean': learning_rate,
                             })
 
                             self.logger.log({

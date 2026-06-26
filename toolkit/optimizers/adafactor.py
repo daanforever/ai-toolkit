@@ -550,12 +550,12 @@ class Adafactor(torch.optim.Optimizer):
             if param_group["scale_parameter"] and emergency_brake is not None:
                 emergency_brake = float(emergency_brake)
                 # Instant Brake: multiplicative factor based on current directional consistency
-                # Prefer fresh per-parameter dir_consistency; fallback to group mean (when beta1=None)
+                # Prefer fresh per-parameter dir_consistency; default 0.0 when absent (e.g. beta1=None)
                 dc = param_state.get("dir_consistency")
                 if dc is not None:
                     dir_val = dc.item() if isinstance(dc, torch.Tensor) else float(dc)
                 else:
-                    dir_val = param_group.get("dir_consistency_mean") or 0.0
+                    dir_val = 0.0
 
                 brake = max(emergency_brake, min(1 + dir_val, 1.0))
 
@@ -643,6 +643,7 @@ class Adafactor(torch.optim.Optimizer):
         Used for unified metric aggregation (RMS, update_rms, update_rms_max) so get_* use the same
         path. Only params that have state_key in state are included (same as get_update_rms/get_update_rms_max).
         If ``params`` is given, only those parameters are considered (same reduction pattern).
+        Returns ``default`` when no parameters have ``state_key`` in state.
         """
         values = []
         weights = []
@@ -658,7 +659,7 @@ class Adafactor(torch.optim.Optimizer):
             values.append(v_t.to(device))
             weights.append(torch.tensor(p.numel(), device=device, dtype=torch.float32))
         if not values:
-            return None
+            return default
         v_stacked = torch.stack(values)
         w_stacked = torch.stack(weights)
         if reduction == 'max':
@@ -693,8 +694,8 @@ class Adafactor(torch.optim.Optimizer):
         total_weight = torch.sum(w_stacked)
         return (weighted_sum / (total_weight + 1e-12)).item()
 
-    def _scalars_per_group_to_avg(self, per_group_list: List[float]) -> float:
-        """Unified average over groups for get_avg_*; uses tensor reduction for consistency."""
+    def _scalars_per_group_to_mean(self, per_group_list: List[float]) -> float:
+        """Arithmetic mean over groups for get_mean_*; uses torch.mean()."""
         if len(per_group_list) == 0:
             return 0.0
         return torch.tensor(per_group_list, dtype=torch.float64).mean().item()
@@ -761,10 +762,6 @@ class Adafactor(torch.optim.Optimizer):
         avg_gr = self._get_group_scalars(
             group, "grad_rms", default=0.0, reduction='mean', params=params_list
         )
-        if avg_rms is None:
-            avg_rms = 0.0
-        if avg_gr is None:
-            avg_gr = 0.0
 
         # Weighted mean of ur (same tensor pattern as _get_group_scalars; one .item() at end).
         ur_values = []
@@ -838,7 +835,7 @@ class Adafactor(torch.optim.Optimizer):
                 group, key, default=0.0, reduction='mean', params=params_list
             )
             group[key] = torch.tensor(
-                val if val is not None else 0.0, dtype=torch.float32, device=ref_device
+                val, dtype=torch.float32, device=ref_device
             )
 
     @staticmethod
@@ -916,12 +913,13 @@ class Adafactor(torch.optim.Optimizer):
             if "grad_rms_max" in group:
                 group["grad_rms_max"] = group["grad_rms_max"] * decay_rate
 
-            # Pre-compute mean directional consistency once per group for _get_lr
-            group["dir_consistency_mean"] = self._get_group_scalars(group, "dir_consistency", default=0.0, reduction='mean')
+            prev_dir_consistency = self._get_group_scalars(
+                group, "dir_consistency", default=0.0, reduction="mean"
+            )
 
             # Soft Brake: accumulate instability score when emergency_brake is enabled
             if group.get("emergency_brake", None) is not None:
-                dc_mean = group.get("dir_consistency_mean") or 0.0
+                dc_mean = prev_dir_consistency
                 score = group.get("instability_score") or 0.0
 
                 if dc_mean < 0:
@@ -1129,14 +1127,14 @@ class Adafactor(torch.optim.Optimizer):
 
         return loss
         
-    def get_avg_learning_rate(self):
-        """Average learning rate across groups (unified tensor reduction, same as get_avg_update_rms*)."""
-        return self._scalars_per_group_to_avg(self.get_learning_rates())
+    def get_mean_learning_rate(self):
+        """Mean learning rate across groups (unified tensor reduction, same as get_mean_update_rms*)."""
+        return self._scalars_per_group_to_mean(self.get_learning_rates())
 
     def get_weight_decay(self):
-        """Average weight_decay across groups (unified tensor reduction)."""
+        """Mean weight_decay across groups (unified tensor reduction)."""
         per_group = [float(group.get("weight_decay", 0.0)) for group in self.param_groups]
-        return self._scalars_per_group_to_avg(per_group)
+        return self._scalars_per_group_to_mean(per_group)
 
     def get_update_rms(self):
         """
@@ -1173,19 +1171,19 @@ class Adafactor(torch.optim.Optimizer):
         out = []
         for group in self.param_groups:
             v = self._get_group_scalars(group, "RMS", default=0.0, reduction='mean')
-            out.append(v if v is not None else 0.0)
+            out.append(v)
         return out
 
-    def get_avg_rms(self):
+    def get_mean_rms(self):
         """
-        Average RMS of parameters across all parameter groups (unified tensor reduction).
+        Mean RMS of parameters across all parameter groups (unified tensor reduction).
         """
-        return self._scalars_per_group_to_avg(self.get_rms())
+        return self._scalars_per_group_to_mean(self.get_rms())
 
     def get_max_rms(self):
         """
         Absolute max of per-group ``rms_max`` across all parameter groups.
-        Use with get_avg_rms() to monitor parameter scale vs recent max.
+        Use with get_mean_rms() to monitor parameter scale vs recent max.
         """
         per_group = [
             self._group_scalar_item(group, "rms_max", 0.0)
@@ -1198,7 +1196,7 @@ class Adafactor(torch.optim.Optimizer):
     def get_min_rms(self):
         """
         Absolute min of per-group ``rms_min`` across all parameter groups.
-        Use with get_avg_rms() to monitor parameter scale vs recent min.
+        Use with get_mean_rms() to monitor parameter scale vs recent min.
         """
         per_group = [
             self._group_scalar_item(group, "rms_min", 0.0)
@@ -1209,19 +1207,19 @@ class Adafactor(torch.optim.Optimizer):
             return 0.0
         return torch.tensor(per_group, dtype=torch.float64).min().item()
 
-    def get_avg_update_rms(self):
+    def get_mean_update_rms(self):
         """
-        Average RMS of weight updates across all parameter groups (unified tensor reduction).
+        Mean RMS of weight updates across all parameter groups (unified tensor reduction).
         Useful for monitoring training stability and convergence.
         """
-        return self._scalars_per_group_to_avg(self.get_update_rms())
+        return self._scalars_per_group_to_mean(self.get_update_rms())
 
-    def get_avg_update_rms_max(self):
+    def get_mean_update_rms_max(self):
         """
-        Average of per-group update_rms_max across groups (unified tensor reduction).
-        Use with get_avg_update_rms() to monitor normalization scale and update magnitude vs recent max.
+        Mean of per-group update_rms_max across groups (unified tensor reduction).
+        Use with get_mean_update_rms() to monitor normalization scale and update magnitude vs recent max.
         """
-        return self._scalars_per_group_to_avg(self.get_update_rms_max())
+        return self._scalars_per_group_to_mean(self.get_update_rms_max())
 
     def get_dynamic_gain(self):
         """
@@ -1239,11 +1237,11 @@ class Adafactor(torch.optim.Optimizer):
             out.append(self._group_scalar_item(group, "dynamic_gain", 0.0))
         return out
 
-    def get_avg_dynamic_gain(self):
+    def get_mean_dynamic_gain(self):
         """
-        Average dynamic gain across all parameter groups (unified tensor reduction).
+        Mean dynamic gain across all parameter groups (unified tensor reduction).
         """
-        return self._scalars_per_group_to_avg(self.get_dynamic_gain())
+        return self._scalars_per_group_to_mean(self.get_dynamic_gain())
 
     def get_effective_lr(self):
         """
@@ -1254,9 +1252,9 @@ class Adafactor(torch.optim.Optimizer):
             out.append(self._group_scalar_item(group, "effective_lr", 0.0))
         return out
 
-    def get_avg_effective_lr(self):
-        """Average effective_lr across all parameter groups."""
-        return self._scalars_per_group_to_avg(self.get_effective_lr())
+    def get_mean_effective_lr(self):
+        """Mean effective_lr across all parameter groups."""
+        return self._scalars_per_group_to_mean(self.get_effective_lr())
 
     def get_precond_gain(self):
         """
@@ -1267,9 +1265,9 @@ class Adafactor(torch.optim.Optimizer):
             out.append(self._group_scalar_item(group, "precond_gain", 0.0))
         return out
 
-    def get_avg_precond_gain(self):
-        """Average precond_gain across all parameter groups."""
-        return self._scalars_per_group_to_avg(self.get_precond_gain())
+    def get_mean_precond_gain(self):
+        """Mean precond_gain across all parameter groups."""
+        return self._scalars_per_group_to_mean(self.get_precond_gain())
 
     def get_momentum_gain(self):
         """
@@ -1280,9 +1278,9 @@ class Adafactor(torch.optim.Optimizer):
             out.append(self._group_scalar_item(group, "momentum_gain", 0.0))
         return out
 
-    def get_avg_momentum_gain(self):
-        """Average momentum_gain across all parameter groups."""
-        return self._scalars_per_group_to_avg(self.get_momentum_gain())
+    def get_mean_momentum_gain(self):
+        """Mean momentum_gain across all parameter groups."""
+        return self._scalars_per_group_to_mean(self.get_momentum_gain())
 
     def get_grad_rms(self):
         """
@@ -1308,18 +1306,18 @@ class Adafactor(torch.optim.Optimizer):
             out.append(self._group_scalar_item(group, "grad_rms_max", 0.0))
         return out
 
-    def get_avg_grad_rms(self):
+    def get_mean_grad_rms(self):
         """
-        Average RMS of gradients across all parameter groups (unified tensor reduction).
+        Mean RMS of gradients across all parameter groups (unified tensor reduction).
         """
-        return self._scalars_per_group_to_avg(self.get_grad_rms())
+        return self._scalars_per_group_to_mean(self.get_grad_rms())
 
-    def get_avg_grad_rms_max(self):
+    def get_mean_grad_rms_max(self):
         """
-        Average of per-group grad_rms_max across groups (unified tensor reduction).
-        Use with get_avg_grad_rms() to monitor gradient scale vs recent max.
+        Mean of per-group grad_rms_max across groups (unified tensor reduction).
+        Use with get_mean_grad_rms() to monitor gradient scale vs recent max.
         """
-        return self._scalars_per_group_to_avg(self.get_grad_rms_max())
+        return self._scalars_per_group_to_mean(self.get_grad_rms_max())
 
     def get_gns(self):
         """Get Gradient Noise Scale per group (``gns`` on the param group)."""
@@ -1333,7 +1331,7 @@ class Adafactor(torch.optim.Optimizer):
         out = []
         for group in self.param_groups:
             v = self._get_group_scalars(group, "dir_consistency", default=0.0, reduction='mean')
-            out.append(v if v is not None else 0.0)
+            out.append(v)
         return out
 
     def get_step_efficiency(self):
@@ -1343,25 +1341,13 @@ class Adafactor(torch.optim.Optimizer):
             out.append(self._group_scalar_item(group, "step_efficiency", 0.0))
         return out
 
-    def get_avg_gns(self):
-        """Average GNS across all parameter groups."""
-        return self._scalars_per_group_to_avg(self.get_gns())
-
-    def get_avg_dir_consistency(self):
-        """Average Directional Consistency across all parameter groups."""
-        return self._scalars_per_group_to_avg(self.get_dir_consistency())
-
-    def get_dir_consistency_mean(self):
-        """Get pre-computed mean Directional Consistency per parameter group."""
-        out = []
-        for group in self.param_groups:
-            dc_mean = group.get("dir_consistency_mean", 0.0)
-            out.append(dc_mean if dc_mean is not None else 0.0)
-        return out
+    def get_mean_gns(self):
+        """Mean GNS across all parameter groups."""
+        return self._scalars_per_group_to_mean(self.get_gns())
 
     def get_mean_dir_consistency(self):
-        """Average of pre-computed mean Directional Consistency across all parameter groups."""
-        return self._scalars_per_group_to_avg(self.get_dir_consistency_mean())
+        """Mean Directional Consistency across all parameter groups."""
+        return self._scalars_per_group_to_mean(self.get_dir_consistency())
 
     def get_instability_score(self):
         """Get instability_score per parameter group (soft brake cumulative score)."""
@@ -1371,22 +1357,22 @@ class Adafactor(torch.optim.Optimizer):
             out.append(score if score is not None else 0.0)
         return out
 
-    def get_avg_instability_score(self):
-        """Average instability_score across all parameter groups."""
-        return self._scalars_per_group_to_avg(self.get_instability_score())
+    def get_mean_instability_score(self):
+        """Mean instability_score across all parameter groups."""
+        return self._scalars_per_group_to_mean(self.get_instability_score())
 
     def get_saddle_point_boost(self):
         """Same global saddle_point_boost repeated per group (for API shape); used in relative_step only."""
         b = float(self._saddle_point_boost)
         return [b] * len(self.param_groups)
 
-    def get_avg_saddle_point_boost(self):
+    def get_mean_saddle_point_boost(self):
         """Global saddle_point_boost (identical across groups)."""
         return float(self._saddle_point_boost)
 
-    def get_avg_step_efficiency(self):
-        """Average Step Efficiency across all parameter groups."""
-        return self._scalars_per_group_to_avg(self.get_step_efficiency())
+    def get_mean_step_efficiency(self):
+        """Mean Step Efficiency across all parameter groups."""
+        return self._scalars_per_group_to_mean(self.get_step_efficiency())
 
     def get_beta1(self):
         """Get beta1 (momentum coefficient) for each parameter group."""
@@ -1396,6 +1382,6 @@ class Adafactor(torch.optim.Optimizer):
             out.append(beta1 if beta1 is not None else 0.0)
         return out
 
-    def get_avg_beta1(self):
-        """Average beta1 (momentum coefficient) across all parameter groups."""
-        return self._scalars_per_group_to_avg(self.get_beta1())
+    def get_mean_beta1(self):
+        """Mean beta1 (momentum coefficient) across all parameter groups."""
+        return self._scalars_per_group_to_mean(self.get_beta1())

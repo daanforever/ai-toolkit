@@ -93,4 +93,4 @@ def test_step_advances_boost_when_detector_stagnant(monkeypatch):
     monkeypatch.setattr(opt._saddle_point_detector, "check", fake_check)
     opt.step()
     assert opt._saddle_point_boost == pytest.approx(1.2)
-    assert opt.get_avg_saddle_point_boost() == pytest.approx(1.2)
+    assert opt.get_mean_saddle_point_boost() == pytest.approx(1.2)
