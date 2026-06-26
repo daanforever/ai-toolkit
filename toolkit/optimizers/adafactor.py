@@ -576,14 +576,12 @@ class Adafactor(torch.optim.Optimizer):
 
         new_lr = base_lr * scale * relative
 
-        # Update-to-Weight Ratio safeguard: prevent updates > 10% of parameter magnitude
+        # Group-level update safeguard: cap LR by group RMS scale
         if param_group.get("emergency_brake", None) is not None:
-            if param_rms > eps1:
-                # Cap LR to limit update magnitude relative to parameter scale
-                # Ratio > 0.1 (10% per step) typically indicates overshoot
-                max_allowed_lr = max(base_lr/10, param_rms * 0.1)
-                if new_lr > max_allowed_lr:
-                    new_lr = max_allowed_lr
+            group_param_rms_max = param_group.get("rms_max", torch.tensor(eps1)).item()
+            max_allowed_lr = group_param_rms_max * 0.001
+            if new_lr > max_allowed_lr:
+                new_lr = max_allowed_lr
 
         return new_lr
 

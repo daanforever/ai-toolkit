@@ -46,8 +46,9 @@ def get_lr(param_rms, grad_rms, group, dir_consistency=None):
         relative = (1 + min_lr * ratio) * brake * soft_brake * group.get("saddle_point_boost", 1.0)
 
     new_lr = base_lr * scale * relative
-    if group.get("emergency_brake") is not None and param_rms > eps1:
-        max_allowed = max(base_lr / 10, param_rms * 0.1)
+    if group.get("emergency_brake") is not None:
+        group_param_rms_max = group.get("rms_max", eps1)
+        max_allowed = group_param_rms_max / 1000.0
         new_lr = min(new_lr, max_allowed)
     return new_lr
 
