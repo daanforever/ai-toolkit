@@ -75,16 +75,15 @@ def adafactor_step(grad, state, group):
 
     exp_avg = state["exp_avg"]
     dir_consistency = None
-    if beta1 is not None or group.get("emergency_brake") is not None:
+    if beta1 is not None:
         dir_consistency = F.cosine_similarity(update_hat.flatten(), exp_avg.flatten(), dim=0).item()
 
     lr = get_lr(param_rms, grad_rms, group, dir_consistency)
     scaled = update_hat * lr
 
-    if beta1 is not None or group.get("emergency_brake") is not None:
-        b1 = beta1 if beta1 is not None else 0.9
-        exp_avg.mul_(b1).add_(scaled, alpha=1 - b1)
-        final = exp_avg.clone() if beta1 is not None else scaled
+    if beta1 is not None:
+        exp_avg.mul_(beta1).add_(scaled, alpha=1 - beta1)
+        final = exp_avg.clone()
     else:
         final = scaled
 

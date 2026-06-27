@@ -620,8 +620,8 @@ class Adafactor(torch.optim.Optimizer):
             factored = len(param_shape) >= 2
         else:
             factored = factored_setting
-        # Enable first moment (exp_avg) if beta1 is set OR emergency_brake is enabled
-        use_first_moment = param_group["beta1"] is not None or param_group.get("emergency_brake", None) is not None
+        # Enable first moment (exp_avg) if beta1 is set
+        use_first_moment = param_group["beta1"] is not None
         return factored, use_first_moment
 
     @staticmethod
@@ -1046,25 +1046,16 @@ class Adafactor(torch.optim.Optimizer):
                 if use_first_moment:
                     exp_avg = state["exp_avg"]
 
-                    # Use beta1 if available, otherwise use default 0.9 when emergency_brake is enabled
-                    beta1_for_ema = group["beta1"] if group["beta1"] is not None else 0.9
+                    # Use beta1 if available
+                    beta1_for_ema = group["beta1"]
 
                     # Momentum on clipped+lr-scaled direction (transformers / pre-16acf685)
                     exp_avg.mul_(beta1_for_ema).add_(scaled_update, alpha=(1 - beta1_for_ema))
 
-                    # GNS calculation (only when beta1 is not None)
-                    if group["beta1"] is not None:
-                        signal_sq = exp_avg.pow(2).mean()
-                        current_update_sq = scaled_update.pow(2).mean()
-                        gns_tensor = (current_update_sq - signal_sq) / (signal_sq + 1e-12)
-                    else:
-                        gns_tensor = None
-
-                    # Final update: use exp_avg only if beta1 is not None (momentum mode)
-                    if group["beta1"] is not None:
-                        update = exp_avg
-                    else:
-                        update = scaled_update
+                    signal_sq = exp_avg.pow(2).mean()
+                    current_update_sq = scaled_update.pow(2).mean()
+                    gns_tensor = (current_update_sq - signal_sq) / (signal_sq + 1e-12)
+                    update = exp_avg
 
                 else:
                     gns_tensor = None
