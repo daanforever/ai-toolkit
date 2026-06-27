@@ -621,7 +621,7 @@ class Adafactor(torch.optim.Optimizer):
         else:
             factored = factored_setting
         # Enable first moment (exp_avg) if beta1 is set
-        use_first_moment = param_group["beta1"] is not None
+        use_first_moment = param_group["beta1"] is not None or param_group["beta1"] != 0.0
         return factored, use_first_moment
 
     @staticmethod
