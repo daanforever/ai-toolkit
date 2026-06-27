@@ -364,6 +364,7 @@ class TrainConfig:
         self.gaussian_std: float = kwargs.get('gaussian_std', 0.2)
         self.gaussian_mean_2: float = kwargs.get('gaussian_mean_2', 750)
         self.gaussian_std_2: float = kwargs.get('gaussian_std_2', 0.2)
+        self.gaussian_shift: float = kwargs.get('gaussian_shift', 0.0)
         self.timestep_bias_exponent: float = kwargs.get('timestep_bias_exponent', 3.0)
         # fixed_cycle: deterministic cycle over fixed timestep values (for Turbo LoRA reproducibility)
         _default_fixed_cycle = [999, 875, 750, 625, 500, 375, 250, 125]

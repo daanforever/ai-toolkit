@@ -593,6 +593,7 @@ class SDTrainer(BaseSDTrainProcess):
                 loss.dtype,
                 ntt,
                 noise_scheduler_timesteps=schedule,
+                gaussian_shift=getattr(self.train_config, "gaussian_shift", 0.0),
             )
             timestep_weight_for_logging = timestep_weight.detach()
             timestep_weight = _reshape_weight_for_loss(timestep_weight)
@@ -624,6 +625,7 @@ class SDTrainer(BaseSDTrainProcess):
                 loss.dtype,
                 ntt,
                 noise_scheduler_timesteps=schedule,
+                gaussian_shift=getattr(self.train_config, "gaussian_shift", 0.0),
             )
             timestep_weight_for_logging = timestep_weight.detach()
             timestep_weight = _reshape_weight_for_loss(timestep_weight)

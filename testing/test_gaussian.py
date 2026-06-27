@@ -27,6 +27,7 @@ class _DummyTrainConfig:
     gaussian_std = 0.45
     gaussian_mean_2 = 750.0
     gaussian_std_2 = 0.35
+    gaussian_shift = 0.0
 
 
 class _DummyNoiseScheduler:
@@ -146,6 +147,75 @@ def test_evaluate_gaussian_timestep_bimodal_two_peaks():
     assert abs(peak2_idx - mu2) <= 25
 
 
+def test_gaussian_bimodal_shift_controls_weight_floor():
+    ntt = 1000
+    schedule = torch.linspace(1000, 1, ntt, dtype=torch.float32)
+    t = torch.arange(ntt, dtype=torch.float32)
+
+    w_shifted = evaluate_gaussian_timestep_bimodal(
+        timesteps=t,
+        mu1=999.0,
+        sigma1=0.33,
+        mu2=120.0,
+        sigma2=0.59,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        num_train_timesteps=ntt,
+        noise_scheduler_timesteps=schedule,
+        gaussian_shift=0.46,
+    )
+    w_unshifted = evaluate_gaussian_timestep_bimodal(
+        timesteps=t,
+        mu1=999.0,
+        sigma1=0.33,
+        mu2=120.0,
+        sigma2=0.59,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        num_train_timesteps=ntt,
+        noise_scheduler_timesteps=schedule,
+        gaussian_shift=0.0,
+    )
+
+    assert 0.45 <= float(w_shifted.min().item()) <= 0.47
+    assert float(w_unshifted.min().item()) <= 1e-6
+    assert abs(float(w_shifted.max().item()) - 1.0) <= 1e-6
+    assert abs(float(w_unshifted.max().item()) - 1.0) <= 1e-6
+    assert float(w_unshifted.min().item()) < float(w_shifted.min().item()) - 0.4
+
+
+def test_gaussian_shift_controls_weight_floor_unimodal():
+    ntt = 1000
+    schedule = torch.linspace(1000, 1, ntt, dtype=torch.float32)
+    t = torch.arange(ntt, dtype=torch.float32)
+
+    w_shifted = evaluate_gaussian_timestep(
+        timesteps=t,
+        mu=999.0,
+        sigma=0.33,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        num_train_timesteps=ntt,
+        noise_scheduler_timesteps=schedule,
+        gaussian_shift=0.46,
+    )
+    w_unshifted = evaluate_gaussian_timestep(
+        timesteps=t,
+        mu=999.0,
+        sigma=0.33,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        num_train_timesteps=ntt,
+        noise_scheduler_timesteps=schedule,
+        gaussian_shift=0.0,
+    )
+
+    assert 0.45 <= float(w_shifted.min().item()) <= 0.47
+    assert float(w_unshifted.min().item()) <= 1e-6
+    assert abs(float(w_shifted.max().item()) - 1.0) <= 1e-6
+    assert abs(float(w_unshifted.max().item()) - 1.0) <= 1e-6
+
+
 def test_timestep_sampler_gaussian_bimodal_expected_mean():
     torch.manual_seed(1)
     ntt = 1000
@@ -197,13 +267,22 @@ def test_bimodal_identical_peaks_matches_unimodal_weights():
     ntt = 1000
     mu, sigma = 412.0, 0.33
     t = torch.arange(ntt, dtype=torch.float32)
-    w_uni = evaluate_gaussian_timestep(
-        t, mu, sigma, torch.device("cpu"), torch.float32, ntt
-    )
-    w_bi = evaluate_gaussian_timestep_bimodal(
-        t, mu, sigma, mu, sigma, torch.device("cpu"), torch.float32, ntt
-    )
-    assert torch.allclose(w_uni, w_bi, rtol=0, atol=1e-6)
+    for shift in (0.0, 0.46):
+        w_uni = evaluate_gaussian_timestep(
+            t, mu, sigma, torch.device("cpu"), torch.float32, ntt, gaussian_shift=shift
+        )
+        w_bi = evaluate_gaussian_timestep_bimodal(
+            t,
+            mu,
+            sigma,
+            mu,
+            sigma,
+            torch.device("cpu"),
+            torch.float32,
+            ntt,
+            gaussian_shift=shift,
+        )
+        assert torch.allclose(w_uni, w_bi, rtol=0, atol=1e-6)
 
 
 def test_evaluate_gaussian_clamps_timestep_values_to_grid():
@@ -330,7 +409,7 @@ def test_gaussian_bimodal_flowmatch_sigma_must_not_be_used_as_grid_index():
     as a grid row — far from both peaks (300, 800) — and yields an inappropriately low weight.
 
     For the same batch row, timestep_index 987 should be looked up as slot 987 on that grid,
-    not as value 43.6. Regression: observed (43.60465 → ~0.377) vs slot 987 → higher weight.
+    not as value 43.6. Regression: using raw value as index yields a much lower weight than slot 987.
     """
     ntt = 1000
     mu1, s1, mu2, s2 = 300.0, 0.2, 800.0, 0.2
@@ -347,9 +426,9 @@ def test_gaussian_bimodal_flowmatch_sigma_must_not_be_used_as_grid_index():
         torch.tensor([987.0], dtype=dtype), mu1, s1, mu2, s2, device, dtype, ntt
     )
 
-    assert abs(w_if_treat_sigma_as_index.item() - 0.37732598185539246) < 1e-5
+    assert w_if_treat_sigma_as_index.item() < 0.2
     assert w_for_step_slot_987.item() > w_if_treat_sigma_as_index.item() + 0.2
-    assert w_for_step_slot_987.item() > 0.55
+    assert w_for_step_slot_987.item() > 0.4
 
     # Flow-style schedule: value at index 987 is ~13, not 43.6 — still must not use value as slot.
     sched = torch.linspace(1000, 1, ntt, dtype=dtype)

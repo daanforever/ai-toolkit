@@ -101,6 +101,7 @@ class TimestepDistributionLogger:
                 torch.float32,
                 ntt,
                 noise_scheduler_timesteps=scheduler_timesteps,
+                gaussian_shift=getattr(self.train_config, "gaussian_shift", 0.0),
             )
             weights_list = weights_tensor.tolist()
             pairs_10 = list(zip(self._collected_timesteps[:10], weights_list[:10]))
@@ -129,6 +130,7 @@ class TimestepDistributionLogger:
                 torch.float32,
                 ntt,
                 noise_scheduler_timesteps=scheduler_timesteps,
+                gaussian_shift=getattr(self.train_config, "gaussian_shift", 0.0),
             )
             weights_list = weights_tensor.tolist()
             pairs_10 = list(zip(self._collected_timesteps[:10], weights_list[:10]))
@@ -160,6 +162,7 @@ class TimestepDistributionLogger:
         print_acc(f"  gaussian_std: {self.train_config.gaussian_std}")
         print_acc(f"  gaussian_mean_2: {self.train_config.gaussian_mean_2}")
         print_acc(f"  gaussian_std_2: {self.train_config.gaussian_std_2}")
+        print_acc(f"  gaussian_shift: {getattr(self.train_config, 'gaussian_shift', 0.0)}")
 
         indices_min = min(self._collected_indices[:num_samples])
         indices_max = max(self._collected_indices[:num_samples])

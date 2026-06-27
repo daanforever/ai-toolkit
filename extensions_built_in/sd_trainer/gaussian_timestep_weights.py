@@ -1,6 +1,6 @@
 """
 Truncated Gaussian timestep weights for loss scaling and timestep sampling.
-Weights use a truncated normal on [0, 1] (normalized by max). The lookup table is indexed
+Weights use a truncated normal on [0, 1] (min-max normalized with optional shift). The lookup table is indexed
 by discrete training **slots** 0 .. num_train_timesteps-1.
 
 `evaluate_gaussian_timestep*` take batch `timesteps` as slot indices (after `.long().clamp`).
@@ -18,16 +18,30 @@ from functools import lru_cache
 import torch
 
 
-def _normalize_weights_to_unit_interval(raw: torch.Tensor) -> torch.Tensor:
+def _normalize_weights_to_unit_interval(
+    raw: torch.Tensor, gaussian_shift: float = 0.0
+) -> torch.Tensor:
     """
     Normalize arbitrary non-negative weights into [0, 1].
 
     Guards against NaN/Inf and enforces strict clipping, so downstream code
     never sees values outside the unit interval due to numeric edge cases.
+
+    Uses min-max normalization with optional lower-bound shift:
+      w_mm = (raw - min) / (max - min)
+      w = w_mm * (1 - shift) + shift
+    where shift is `gaussian_shift` in [0, 1].
     """
     safe_raw = torch.nan_to_num(raw, nan=0.0, posinf=0.0, neginf=0.0)
     max_value = safe_raw.max().clamp(min=1e-8)
-    return (safe_raw / max_value).clamp_(0.0, 1.0)
+    min_value = safe_raw.min()
+    span = (max_value - min_value).clamp(min=1e-8)
+    shift = float(gaussian_shift)
+    if not math.isfinite(shift):
+        shift = 0.0
+    shift = min(max(shift, 0.0), 1.0)
+    normalized = (safe_raw - min_value) / span
+    return (normalized * (1.0 - shift) + shift).clamp_(0.0, 1.0)
 
 
 def scheduler_timesteps_align_with_index_grid(
@@ -125,7 +139,7 @@ def _resolve_gaussian_mus_to_slots(
 
 
 @lru_cache(maxsize=64)
-def _compute_weights(ntt, mu_normalized, sigma, device_str):
+def _compute_weights(ntt, mu_normalized, sigma, gaussian_shift, device_str):
     """
     Compute truncated normal weights for ntt timesteps. Cached by lru_cache.
     All args must be hashable (int, float, str).
@@ -149,7 +163,7 @@ def _compute_weights(ntt, mu_normalized, sigma, device_str):
     raw = phi / (sigma * normalization + 1e-8)
 
     # Scale to [0, 1] with numeric guards
-    weights = _normalize_weights_to_unit_interval(raw)
+    weights = _normalize_weights_to_unit_interval(raw, gaussian_shift=gaussian_shift)
     return weights
 
 
@@ -162,11 +176,12 @@ def evaluate_gaussian_timestep(
     num_train_timesteps,
     *,
     noise_scheduler_timesteps: torch.Tensor | None = None,
+    gaussian_shift: float = 0.0,
 ):
     """
     Return truncated normal weights in [0, 1] per batch element.
 
-    Weights are the truncated normal PDF on [0, 1] (CDF-normalized), then scaled by the maximum.
+    Weights are the truncated normal PDF on [0, 1] (CDF-normalized), then min-max normalized.
     The `timesteps` tensor selects **rows** of the precomputed length-`ntt` table (slot indices
     0 .. ntt-1 after `.long().clamp`). When scheduler timestep *values* differ from slot indices,
     pass mapped indices (see module docstring).
@@ -180,6 +195,7 @@ def evaluate_gaussian_timestep(
         dtype: Target dtype for the returned tensor.
         num_train_timesteps: Number of diffusion timesteps (e.g. 1000).
         noise_scheduler_timesteps: Optional `noise_scheduler.timesteps` for mean resolution.
+        gaussian_shift: Lower-bound shift in [0, 1] after min-max normalization.
 
     Returns:
         1D tensor of weights, same shape as timesteps, on the given device and dtype.
@@ -191,15 +207,25 @@ def evaluate_gaussian_timestep(
     device = torch.device(device)
     device_str = str(device)
 
-    cached_weights = _compute_weights(ntt, mu_normalized, sigma, device_str)
+    cached_weights = _compute_weights(
+        ntt, mu_normalized, sigma, float(gaussian_shift), device_str
+    )
     max_idx = cached_weights.shape[0]
     idx = timesteps.long().clamp(0, max_idx - 1).to(device=device)
     return cached_weights[idx].to(dtype=dtype)
 
 
 @lru_cache(maxsize=64)
-def _compute_bimodal_weights(ntt, mu1_normalized, sigma1, mu2_normalized, sigma2, device_str):
-    """Mixture of two truncated normals on [0,1], equal weights 0.5/0.5, then scale by global max."""
+def _compute_bimodal_weights(
+    ntt,
+    mu1_normalized,
+    sigma1,
+    mu2_normalized,
+    sigma2,
+    gaussian_shift,
+    device_str,
+):
+    """Mixture of two truncated normals on [0,1], equal weights 0.5/0.5, then normalize."""
     device = torch.device(device_str)
     t = torch.arange(ntt, dtype=torch.float32, device=device) / float(ntt - 1)
     s1 = float(sigma1)
@@ -218,7 +244,7 @@ def _compute_bimodal_weights(ntt, mu1_normalized, sigma1, mu2_normalized, sigma2
         return phi / (sigma * normalization + 1e-8)
 
     raw = 0.5 * raw_truncnorm(m1, s1) + 0.5 * raw_truncnorm(m2, s2)
-    return _normalize_weights_to_unit_interval(raw)
+    return _normalize_weights_to_unit_interval(raw, gaussian_shift=gaussian_shift)
 
 
 def evaluate_gaussian_timestep_bimodal(
@@ -232,9 +258,10 @@ def evaluate_gaussian_timestep_bimodal(
     num_train_timesteps,
     *,
     noise_scheduler_timesteps: torch.Tensor | None = None,
+    gaussian_shift: float = 0.0,
 ):
     """
-    Bimodal truncated-normal mixture (50/50), weights in [0, 1] with global max 1.
+    Bimodal truncated-normal mixture (50/50), weights in [0, 1] with optional shift.
     Same slot-indexing contract for `timesteps` and same `mu` / `sigma` resolution rules as
     `evaluate_gaussian_timestep`.
     """
@@ -249,7 +276,13 @@ def evaluate_gaussian_timestep_bimodal(
     device_str = str(device)
 
     cached_weights = _compute_bimodal_weights(
-        ntt, mu1n, float(sigma1), mu2n, float(sigma2), device_str
+        ntt,
+        mu1n,
+        float(sigma1),
+        mu2n,
+        float(sigma2),
+        float(gaussian_shift),
+        device_str,
     )
     max_idx = cached_weights.shape[0]
     idx = timesteps.long().clamp(0, max_idx - 1).to(device=device)
