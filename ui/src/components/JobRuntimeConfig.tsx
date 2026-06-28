@@ -20,6 +20,7 @@ const TIMESTEP_TYPE_OPTIONS = [
   { value: 'sigmoid', label: 'Sigmoid' },
   { value: 'linear', label: 'Linear' },
   { value: 'shift', label: 'Shift' },
+  { value: 'flux_shift', label: 'Flux Shift' },
 ];
 
 const TIMESTEP_WEIGHTING_OPTIONS = [

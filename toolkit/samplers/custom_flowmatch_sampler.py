@@ -120,27 +120,37 @@ class CustomFlowMatchEulerDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
         return self._alphas_cumprod
 
     def get_weights_for_timesteps(self, timesteps: torch.Tensor, v2=False, timestep_type="linear") -> torch.Tensor:
-        # Get the indices of the timesteps
-        step_indices = [(self.timesteps == t).nonzero().item()
-                        for t in timesteps]
+        if timesteps.dim() == 0:
+            timesteps = timesteps.unsqueeze(0)
+        schedule_timesteps = self.timesteps.to(
+            device=timesteps.device, dtype=timesteps.dtype
+        )
+        step_indices = torch.argmin(
+            (schedule_timesteps.unsqueeze(0) - timesteps.unsqueeze(1)).abs(),
+            dim=1,
+        )
 
         # Get the weights for the timesteps
         if timestep_type == "weighted":
             return torch.tensor(
-                [default_weighing_scheme[i] for i in step_indices],
+                [default_weighing_scheme[i] for i in step_indices.tolist()],
                 device=timesteps.device,
                 dtype=timesteps.dtype,
             )
-        if v2:
-            return self.linear_timesteps_weights2[step_indices].flatten()
-        return self.linear_timesteps_weights[step_indices].flatten()
+        weights = self.linear_timesteps_weights2 if v2 else self.linear_timesteps_weights
+        weights = weights.to(device=timesteps.device, dtype=timesteps.dtype)
+        return weights[step_indices].flatten()
 
     def get_sigmas(self, timesteps: torch.Tensor, n_dim, dtype, device) -> torch.Tensor:
         sigmas = self.sigmas.to(device=device, dtype=dtype)
-        schedule_timesteps = self.timesteps.to(device)
         timesteps = timesteps.to(device)
-        step_indices = [(schedule_timesteps == t).nonzero().item()
-                        for t in timesteps]
+        if timesteps.dim() == 0:
+            timesteps = timesteps.unsqueeze(0)
+        schedule_timesteps = self.timesteps.to(device=device, dtype=timesteps.dtype)
+        step_indices = torch.argmin(
+            (schedule_timesteps.unsqueeze(0) - timesteps.unsqueeze(1)).abs(),
+            dim=1,
+        )
 
         sigma = sigmas[step_indices].flatten()
         while len(sigma.shape) < n_dim:

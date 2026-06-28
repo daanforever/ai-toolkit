@@ -953,10 +953,16 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
     def get_sigmas(self, timesteps, n_dim=4, dtype=torch.float32):
         sigmas = self.sd.noise_scheduler.sigmas.to(device=self.device, dtype=dtype)
-        schedule_timesteps = self.sd.noise_scheduler.timesteps.to(self.device)
         timesteps = timesteps.to(self.device)
-
-        step_indices = [(schedule_timesteps == t).nonzero().item() for t in timesteps]
+        if timesteps.dim() == 0:
+            timesteps = timesteps.unsqueeze(0)
+        schedule_timesteps = self.sd.noise_scheduler.timesteps.to(
+            self.device, dtype=timesteps.dtype
+        )
+        step_indices = torch.argmin(
+            (schedule_timesteps.unsqueeze(0) - timesteps.unsqueeze(1)).abs(),
+            dim=1,
+        )
 
         sigma = sigmas[step_indices].flatten()
         while len(sigma.shape) < n_dim:

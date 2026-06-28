@@ -1,6 +1,7 @@
 # ZImageDiffSynthTrainer: DiffusionTrainer for arch zimage_diffsynth (DiffSynth DiT/forward).
 
 from toolkit.extension import Extension
+from toolkit.print import print_acc
 from extensions_built_in.sd_trainer.DiffusionTrainer import DiffusionTrainer
 
 
@@ -50,22 +51,10 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
         use_diffsynth_training_loop = _read_use_diffsynth_training_loop_from_config(cfg)
         use_dynamic_shifting = _read_use_dynamic_shifting_from_config(cfg)
         self.use_diffsynth_training_loop = use_diffsynth_training_loop
+        self._requested_use_dynamic_shifting = use_dynamic_shifting
         self.use_dynamic_shifting = use_dynamic_shifting
-
-        if use_dynamic_shifting and use_diffsynth_training_loop:
-            self.print(
-                "ZImage DiffSynth: use_dynamic_shifting is ignored when "
-                "use_diffsynth_training_loop is true; set use_diffsynth_training_loop: false "
-                "and train.timestep_type: shift for Flux-style dynamic time shifting."
-            )
-        elif use_dynamic_shifting:
-            tt = getattr(tc, "timestep_type", None)
-            if tt not in ("shift", "flux_shift"):
-                self.print(
-                    "ZImage DiffSynth: use_dynamic_shifting requires train.timestep_type "
-                    "'shift' or 'flux_shift' (toolkit loop); dynamic mu is only applied in "
-                    "that scheduler path."
-                )
+        # Set in _aggregate_flow_matching_mse_loss when DiffSynth weighting is already applied.
+        self._skip_post_timestep_weighting_once = False
 
         # Always train Z-Image in flow-matching mode with 1000 train timesteps.
         # We let ZImageDiffSynthModel.get_train_scheduler() provide the actual
@@ -101,6 +90,80 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
             # the inference-style `set_timesteps()` path and produce a different
             # timestep grid than `TimestepSampler`/gaussian weights expect.
             tc.noise_scheduler = "flowmatch"
+        self._refresh_dynamic_shifting_runtime(log_transitions=True)
+
+    def _set_use_dynamic_shifting_state(self, enabled: bool):
+        enabled = bool(enabled)
+        self.use_dynamic_shifting = enabled
+
+        try:
+            mk = dict(getattr(self.model_config, "model_kwargs", None) or {})
+            mk["use_dynamic_shifting"] = enabled
+            self.model_config.model_kwargs = mk
+        except Exception:
+            pass
+
+        cfg = getattr(self, "config", None)
+        if isinstance(cfg, dict):
+            try:
+                model_cfg = cfg.setdefault("model", {})
+                model_kwargs = model_cfg.setdefault("model_kwargs", {})
+                model_kwargs["use_dynamic_shifting"] = enabled
+            except Exception:
+                pass
+
+        sd = getattr(self, "sd", None)
+        scheduler = getattr(sd, "noise_scheduler", None)
+        if scheduler is None:
+            return
+        try:
+            if hasattr(scheduler, "config"):
+                scheduler.config.use_dynamic_shifting = enabled
+        except Exception:
+            pass
+        try:
+            if hasattr(scheduler, "use_dynamic_shifting"):
+                scheduler.use_dynamic_shifting = enabled
+        except Exception:
+            pass
+
+    def _refresh_dynamic_shifting_runtime(self, *, log_transitions: bool = False):
+        requested = bool(getattr(self, "_requested_use_dynamic_shifting", False))
+        timestep_type = getattr(self.train_config, "timestep_type", None)
+        allow_dynamic_shifting = (
+            (not self.use_diffsynth_training_loop)
+            and timestep_type in ("shift", "flux_shift")
+        )
+        should_enable = requested and allow_dynamic_shifting
+        previous = bool(getattr(self, "use_dynamic_shifting", False))
+
+        if previous != should_enable:
+            self._set_use_dynamic_shifting_state(should_enable)
+            if requested:
+                if should_enable:
+                    print_acc(
+                        "ZImage DiffSynth: enabling use_dynamic_shifting for training and sampling "
+                        f"(use_diffsynth_training_loop={self.use_diffsynth_training_loop}, "
+                        f"train.timestep_type={timestep_type!r})."
+                    )
+                else:
+                    print_acc(
+                        "ZImage DiffSynth: ignoring use_dynamic_shifting for both training and sampling "
+                        f"(use_diffsynth_training_loop={self.use_diffsynth_training_loop}, "
+                        f"train.timestep_type={timestep_type!r}; requires 'shift' or 'flux_shift')."
+                    )
+            return
+
+        if log_transitions and requested and not should_enable:
+            print_acc(
+                "ZImage DiffSynth: ignoring use_dynamic_shifting for both training and sampling "
+                f"(use_diffsynth_training_loop={self.use_diffsynth_training_loop}, "
+                f"train.timestep_type={timestep_type!r}; requires 'shift' or 'flux_shift')."
+            )
+
+    def apply_runtime_timestep_type(self):
+        super().apply_runtime_timestep_type()
+        self._refresh_dynamic_shifting_runtime()
 
     def hook_before_train_loop(self):
         """
@@ -140,6 +203,7 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
         batch,
     ):
         if not self.use_diffsynth_training_loop:
+            self._skip_post_timestep_weighting_once = False
             return super()._aggregate_flow_matching_mse_loss(
                 pred,
                 target,
@@ -150,6 +214,7 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
                 batch,
             )
         if self.train_config.do_prior_divergence and prior_pred is not None:
+            self._skip_post_timestep_weighting_once = False
             return super()._aggregate_flow_matching_mse_loss(
                 pred,
                 target,
@@ -169,6 +234,9 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
             v2=self.train_config.linear_timesteps2,
             timestep_type=weighting_scheme,
         )
+        # This path applies DiffSynth timestep weights inside aggregate_flow_matching_mse_diffsynth.
+        # Skip the generic post-loss weighting pass in SDTrainer.calculate_loss for this batch.
+        self._skip_post_timestep_weighting_once = True
         return dst.aggregate_flow_matching_mse_diffsynth(
             pred,
             target,
@@ -182,6 +250,12 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
             is_main_process=self.accelerator.is_main_process,
             log_every=getattr(self.logging_config, "log_every", None),
         )
+
+    def _apply_flow_timestep_element_weights(self, loss, timesteps):
+        if getattr(self, "_skip_post_timestep_weighting_once", False):
+            self._skip_post_timestep_weighting_once = False
+            return loss
+        return super()._apply_flow_timestep_element_weights(loss, timesteps)
 
 
 class ZImageDiffSynthTrainerExtension(Extension):

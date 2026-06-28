@@ -329,5 +329,242 @@ def test_calculate_loss_applies_timestep_weight_after_snr(monkeypatch):
     assert torch.allclose(loss, torch.tensor(15.0), rtol=1e-6, atol=1e-6)
 
 
+def test_zimage_calculate_loss_does_not_double_apply_timestep_weight():
+    class _NoiseScheduler:
+        def __init__(self):
+            self.timesteps = torch.arange(1000, dtype=torch.float32)
+            self.config = SimpleNamespace(
+                num_train_timesteps=1000,
+                prediction_type="epsilon",
+            )
+
+        def get_weights_for_timesteps(
+            self, timesteps, v2=False, timestep_type="linear"
+        ):
+            return torch.full(
+                (timesteps.shape[0],),
+                2.0,
+                device=timesteps.device,
+                dtype=torch.float32,
+            )
+
+    class _Batch:
+        def __init__(self):
+            self.mask_tensor = None
+            self.loss_multiplier_list = [1.0]
+            self.latents = torch.zeros(1, 1, 2, 2)
+            self.tensor = torch.zeros_like(self.latents)
+            self.file_items = None
+            self.audio_pred = None
+            self.audio_target = None
+            self.sigmas = None
+
+        def get_is_reg_list(self):
+            return [False]
+
+    trainer = object.__new__(ZImageDiffSynthTrainer)
+    trainer.use_diffsynth_training_loop = True
+    trainer._skip_post_timestep_weighting_once = False
+    trainer.train_config = SimpleNamespace(
+        dtype="fp32",
+        loss_target="noise",
+        loss_type="mse",
+        train_turbo=False,
+        do_guidance_loss=False,
+        do_differential_guidance=False,
+        do_prior_divergence=False,
+        inverted_mask_prior=False,
+        correct_pred_norm=False,
+        match_noise_norm=False,
+        pred_scaler=1.0,
+        target_noise_multiplier=1.0,
+        learnable_snr_gos=False,
+        snr_gamma=None,
+        min_snr_gamma=None,
+        prediction_type="flowmatch",
+        linear_timesteps=True,
+        linear_timesteps2=False,
+        timestep_weighting="none",
+        content_or_style="balanced",
+        target_norm_std=False,
+    )
+    trainer.sd = SimpleNamespace(
+        is_flow_matching=True,
+        prediction_type="epsilon",
+        noise_scheduler=_NoiseScheduler(),
+    )
+    trainer.device_torch = torch.device("cpu")
+    trainer.dfe = None
+    trainer.adapter = None
+    trainer.writer = None
+    trainer.logger = None
+    trainer.step_num = 0
+    trainer.logging_config = SimpleNamespace(log_every=None)
+    trainer.accelerator = SimpleNamespace(is_main_process=False)
+    trainer.snr_gos = None
+
+    loss = ZImageDiffSynthTrainer.calculate_loss(
+        trainer,
+        noise_pred=torch.zeros(1, 1, 2, 2),
+        noise=torch.ones(1, 1, 2, 2),
+        noisy_latents=torch.zeros(1, 1, 2, 2),
+        timesteps=torch.tensor([100.0]),
+        batch=_Batch(),
+    )
+
+    # Base MSE is 1.0; with a single timestep-weight application (w=2) final loss is 2.0.
+    assert torch.allclose(loss, torch.tensor(2.0), rtol=1e-6, atol=1e-6)
+
+
+def test_dynamic_shifting_disabled_when_timestep_type_is_not_shift(monkeypatch):
+    from extensions_built_in.sd_trainer.DiffusionTrainer import DiffusionTrainer
+
+    def _fake_init(self, process_id, job, config, **kwargs):
+        self.config = config
+        self.progress_bar = None
+        mk = dict((config.get("model", {}) or {}).get("model_kwargs", {}) or {})
+        self.model_config = SimpleNamespace(model_kwargs=mk)
+        self.train_config = SimpleNamespace(
+            noise_scheduler="placeholder",
+            num_train_timesteps=None,
+            loss_type=None,
+            timestep_type="sigmoid",
+            linear_timesteps=False,
+            linear_timesteps2=False,
+            snr_gamma=1.0,
+            min_snr_gamma=1.0,
+            dtype="bf16",
+            do_prior_divergence=False,
+            timestep_weighting="none",
+            train_turbo=False,
+        )
+
+    monkeypatch.setattr(DiffusionTrainer, "__init__", _fake_init)
+    cfg = {
+        "model": {
+            "model_kwargs": {
+                "use_diffsynth_training_loop": False,
+                "use_dynamic_shifting": True,
+            }
+        }
+    }
+    trainer = ZImageDiffSynthTrainer(0, None, cfg)
+
+    assert trainer.use_dynamic_shifting is False
+    assert trainer.model_config.model_kwargs.get("use_dynamic_shifting") is False
+    assert cfg["model"]["model_kwargs"]["use_dynamic_shifting"] is False
+
+
+def test_dynamic_shifting_runtime_enable_when_timestep_becomes_shift(monkeypatch):
+    from extensions_built_in.sd_trainer.DiffusionTrainer import DiffusionTrainer
+
+    def _fake_init(self, process_id, job, config, **kwargs):
+        self.config = config
+        self.progress_bar = None
+        mk = dict((config.get("model", {}) or {}).get("model_kwargs", {}) or {})
+        self.model_config = SimpleNamespace(model_kwargs=mk)
+        self.train_config = SimpleNamespace(
+            noise_scheduler="placeholder",
+            num_train_timesteps=None,
+            loss_type=None,
+            timestep_type="sigmoid",
+            linear_timesteps=False,
+            linear_timesteps2=False,
+            snr_gamma=1.0,
+            min_snr_gamma=1.0,
+            dtype="bf16",
+            do_prior_divergence=False,
+            timestep_weighting="none",
+            train_turbo=False,
+        )
+
+    def _fake_apply_runtime_timestep_type(self):
+        value = getattr(self, "_runtime_timestep_type_for_test", None)
+        if value is not None:
+            self.train_config.timestep_type = value
+
+    monkeypatch.setattr(DiffusionTrainer, "__init__", _fake_init)
+    monkeypatch.setattr(
+        DiffusionTrainer, "apply_runtime_timestep_type", _fake_apply_runtime_timestep_type
+    )
+    cfg = {
+        "model": {
+            "model_kwargs": {
+                "use_diffsynth_training_loop": False,
+                "use_dynamic_shifting": True,
+            }
+        }
+    }
+    trainer = ZImageDiffSynthTrainer(0, None, cfg)
+    trainer.sd = SimpleNamespace(
+        noise_scheduler=SimpleNamespace(config=SimpleNamespace(use_dynamic_shifting=False))
+    )
+    trainer._runtime_timestep_type_for_test = "shift"
+    trainer.apply_runtime_timestep_type()
+
+    assert trainer.use_dynamic_shifting is True
+    assert trainer.model_config.model_kwargs.get("use_dynamic_shifting") is True
+    assert cfg["model"]["model_kwargs"]["use_dynamic_shifting"] is True
+    assert trainer.sd.noise_scheduler.config.use_dynamic_shifting is True
+
+
+def test_dynamic_shifting_runtime_disable_when_timestep_becomes_linear(monkeypatch):
+    from extensions_built_in.sd_trainer.DiffusionTrainer import DiffusionTrainer
+
+    def _fake_init(self, process_id, job, config, **kwargs):
+        self.config = config
+        self.progress_bar = None
+        mk = dict((config.get("model", {}) or {}).get("model_kwargs", {}) or {})
+        self.model_config = SimpleNamespace(model_kwargs=mk)
+        self.train_config = SimpleNamespace(
+            noise_scheduler="placeholder",
+            num_train_timesteps=None,
+            loss_type=None,
+            timestep_type="sigmoid",
+            linear_timesteps=False,
+            linear_timesteps2=False,
+            snr_gamma=1.0,
+            min_snr_gamma=1.0,
+            dtype="bf16",
+            do_prior_divergence=False,
+            timestep_weighting="none",
+            train_turbo=False,
+        )
+
+    def _fake_apply_runtime_timestep_type(self):
+        value = getattr(self, "_runtime_timestep_type_for_test", None)
+        if value is not None:
+            self.train_config.timestep_type = value
+
+    monkeypatch.setattr(DiffusionTrainer, "__init__", _fake_init)
+    monkeypatch.setattr(
+        DiffusionTrainer, "apply_runtime_timestep_type", _fake_apply_runtime_timestep_type
+    )
+    cfg = {
+        "model": {
+            "model_kwargs": {
+                "use_diffsynth_training_loop": False,
+                "use_dynamic_shifting": True,
+            }
+        }
+    }
+    trainer = ZImageDiffSynthTrainer(0, None, cfg)
+    trainer.sd = SimpleNamespace(
+        noise_scheduler=SimpleNamespace(config=SimpleNamespace(use_dynamic_shifting=False))
+    )
+
+    trainer._runtime_timestep_type_for_test = "shift"
+    trainer.apply_runtime_timestep_type()
+    assert trainer.use_dynamic_shifting is True
+
+    trainer._runtime_timestep_type_for_test = "linear"
+    trainer.apply_runtime_timestep_type()
+
+    assert trainer.use_dynamic_shifting is False
+    assert trainer.model_config.model_kwargs.get("use_dynamic_shifting") is False
+    assert cfg["model"]["model_kwargs"]["use_dynamic_shifting"] is False
+    assert trainer.sd.noise_scheduler.config.use_dynamic_shifting is False
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-q"])

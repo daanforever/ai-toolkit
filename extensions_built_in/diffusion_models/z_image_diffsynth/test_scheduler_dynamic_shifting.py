@@ -166,3 +166,28 @@ def test_sampling_dynamic_vs_static_scheduler():
     assert not torch.allclose(sig_dyn, sig_dyn_large)
     assert torch.allclose(sig_static, sig_static_large)
     assert not torch.allclose(sig_dyn, sig_static)
+
+
+def test_get_sigmas_and_weights_allow_non_exact_float_timesteps():
+    sched = ZImageDiffSynthModel.get_train_scheduler(
+        use_diffsynth_loop=False,
+        use_dynamic_shifting=True,
+    )
+    latents = torch.zeros(1, 16, 64, 64)
+    sched.set_train_timesteps(
+        64,
+        device="cpu",
+        timestep_type="shift",
+        latents=latents,
+        patch_size=2,
+    )
+    ts = sched.timesteps[[0, 10, 20]].clone()
+    ts = ts + torch.tensor([1e-4, -1e-4, 2e-4], dtype=ts.dtype)
+
+    w = sched.get_weights_for_timesteps(ts, v2=False, timestep_type="linear")
+    s = sched.get_sigmas(ts, n_dim=4, dtype=torch.float32, device="cpu")
+
+    assert w.shape == (3,)
+    assert s.shape == (3, 1, 1, 1)
+    assert torch.isfinite(w).all()
+    assert torch.isfinite(s).all()
