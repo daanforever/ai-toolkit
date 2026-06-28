@@ -107,7 +107,7 @@ def test_get_weight_decay_returns_current_value():
     assert opt.get_weight_decay() == pytest.approx(0.123)
 
 
-def test_load_state_dict_preserves_accumulated_weight_decay():
+def test_load_state_dict_preserves_accumulated_weight_decay_from_checkpoint():
     opt, param = _make_opt("absolute", lr=0.2, wd=0.1, wd_increment=0.05)
     param.grad = torch.zeros_like(param)
     opt.step()
@@ -120,6 +120,11 @@ def test_load_state_dict_preserves_accumulated_weight_decay():
     opt2.load_state_dict(state)
     assert opt2.get_weight_decay() == pytest.approx(0.2)
     assert opt2._weight_decay == pytest.approx(0.1)
+
+    # Accumulation resumes from checkpointed value.
+    opt2.param_groups[0]["params"][0].grad = torch.zeros_like(opt2.param_groups[0]["params"][0])
+    opt2.step()
+    assert opt2.get_weight_decay() == pytest.approx(0.25)
 
 
 def test_invalid_weight_decay_mode_raises():

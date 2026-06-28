@@ -191,15 +191,7 @@ class Adafactor(torch.optim.Optimizer):
         super().__init__(params, defaults)
 
         for group in self.param_groups:
-            group["scale_parameter"] = scale_parameter
-            group["relative_step"] = relative_step
-            group["warmup_init"] = warmup_init
-            group["warmup_steps"] = warmup_steps
-            group["warmup_active"] = False
-            group["factored"] = factored
-            group["emergency_brake"] = emergency_brake
-            group["weight_decay_increment"] = weight_decay_increment
-            group["weight_decay_mode"] = weight_decay_mode
+            group.setdefault("warmup_active", False)
 
         # Create stagnation detector for RMS(parameter) based heuristic.
         self._saddle_point_detector = StagnationDetector(
@@ -321,29 +313,48 @@ class Adafactor(torch.optim.Optimizer):
             print_acc(f"Adafactor: applied runtime beta2={value}")
 
     def load_state_dict(self, state_dict):
+        config_keys = (
+            "lr",
+            "min_lr",
+            "eps",
+            "clip_threshold",
+            "rms_max_decay_rate",
+            "weight_decay_increment",
+            "weight_decay_mode",
+            "scale_parameter",
+            "relative_step",
+            "warmup_init",
+            "warmup_steps",
+            "beta1",
+            "beta2",
+            "factored",
+            "emergency_brake",
+        )
+        # Keep current run configuration as source of truth on resume.
+        current_group_configs = []
+        for group in self.param_groups:
+            cfg = {}
+            for key in config_keys:
+                if key in group:
+                    cfg[key] = group[key]
+            current_group_configs.append(cfg)
+
         super().load_state_dict(state_dict)
 
         # saddle_point_boost is not checkpointed; always start fresh after load.
         self._saddle_point_boost = 1.0
 
-        # Reapply current run config (checkpoint param_groups may lack keys e.g. clip_threshold).
-        for group in self.param_groups:
-            group["lr"] = self._lr
-            group["min_lr"] = self._min_lr
-            group["eps"] = self._eps
-            group["clip_threshold"] = self._clip_threshold
-            group["rms_max_decay_rate"] = self._rms_max_decay_rate
-            group["weight_decay"] = group.get("weight_decay", self._weight_decay)
-            group["weight_decay_increment"] = self._weight_decay_increment
-            group["weight_decay_mode"] = self._weight_decay_mode
-            group["scale_parameter"] = self._scale_parameter
-            group["relative_step"] = self._relative_step
-            group["warmup_init"] = self._warmup_init
-            group["warmup_steps"] = self._warmup_steps
-            group["beta1"] = self._beta1
-            group["beta2"] = self._beta2
-            group["factored"] = self._factored
-            group["emergency_brake"] = self._emergency_brake
+        # Reapply current run config with per-group priority over checkpoint values.
+        for idx, group in enumerate(self.param_groups):
+            current_cfg = current_group_configs[idx] if idx < len(current_group_configs) else {}
+            # weight_decay is step-accumulated; preserve checkpointed value on resume.
+            if "weight_decay" in self.defaults:
+                group.setdefault("weight_decay", self.defaults["weight_decay"])
+            for key in config_keys:
+                if key in current_cfg:
+                    group[key] = current_cfg[key]
+                elif key in self.defaults:
+                    group.setdefault(key, self.defaults[key])
             group["instability_score"] = group.get("instability_score", 0.0)
 
         self._migrate_optimizer_state_buffers()
@@ -444,9 +455,11 @@ class Adafactor(torch.optim.Optimizer):
     def _global_lr(self) -> None:
         """Once per optimizer step: group-level warmup before any per-parameter _get_lr."""
         groups = self.param_groups
-        if not groups or not groups[0].get("warmup_init"):
+        if not groups:
             return
         for group in groups:
+            if not group.get("warmup_init"):
+                continue
             self._warmup_update_group(group)
 
     @staticmethod
@@ -600,6 +613,9 @@ class Adafactor(torch.optim.Optimizer):
         if param_group.get("emergency_brake", None) is not None:
             group_param_rms_max = param_group.get("rms_max", torch.tensor(eps1)).item()
             max_allowed_lr = group_param_rms_max * 0.001
+            if group_param_rms_max <= eps0:
+                # Prevent zero-init groups (e.g. LoRA B=0) from being hard-frozen by a zero cap.
+                max_allowed_lr = max(max_allowed_lr, float(base_lr) * 0.1)
             if new_lr > max_allowed_lr:
                 new_lr = max_allowed_lr
 
