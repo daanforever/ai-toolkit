@@ -472,7 +472,13 @@ class Adafactor(torch.optim.Optimizer):
     @staticmethod
     def stop_warmup(param_group):
         param_group["warmup_active"] = False
-        for k in ("warmup_progress", "warmup_delta", "warmup_start", "warmup_lr"):
+        for k in (
+            "warmup_progress",
+            "warmup_delta",
+            "warmup_start",
+            "warmup_lr",
+            "warmup_complete_pending_cleanup",
+        ):
             param_group.pop(k, None)
 
         if is_debug_enabled():
@@ -483,8 +489,12 @@ class Adafactor(torch.optim.Optimizer):
 
         Starts a new segment when ``group["lr"]`` or ``warmup_steps`` changes.
         Segment: linear ramp stored in ``warmup_lr``; start level is prior ``warmup_lr`` if
-        present, else ``group["lr"] * eps[1]``. After ``warmup_steps`` updates, calls ``stop_warmup``.
+        present, else ``group["lr"] * eps[1]``. After ``warmup_steps`` updates, marks warmup
+        complete and performs cleanup on the next step (so the last warmup_lr is applied once).
         """
+        if group.pop("warmup_complete_pending_cleanup", False):
+            self.stop_warmup(group)
+
         lr_target = group["lr"]
         if lr_target is None:
             # No explicit LR target in this mode.
@@ -532,7 +542,8 @@ class Adafactor(torch.optim.Optimizer):
             group["warmup_progress"]  += 1
 
             if group["warmup_progress"] >= warmup_steps:
-                self.stop_warmup(group)
+                group["warmup_active"] = False
+                group["warmup_complete_pending_cleanup"] = True
 
         group["warmup_lr_previous"] = group.get("warmup_lr", group["lr"])
 
@@ -899,6 +910,7 @@ class Adafactor(torch.optim.Optimizer):
         step = self._saddle_point_step
         b = self._saddle_point_boost
         if is_stagnant:
+            # Expected experimental behavior: no hard upper cap by design.
             b = b + step
         else:
             b = max(1.0, b - step)
@@ -932,7 +944,9 @@ class Adafactor(torch.optim.Optimizer):
         self.step_hook()
         loss = None
         if closure is not None:
-            loss = closure()
+            # Keep PyTorch closure contract compatibility under @torch.no_grad().
+            with torch.enable_grad():
+                loss = closure()
 
         # Detect RMS(parameter) stagnation from previous steps.
         current_rms = self._mean_group_rms_ema_for_saddle()
@@ -1125,9 +1139,12 @@ class Adafactor(torch.optim.Optimizer):
                     )
                     if weight_decay_mode == "update_rms":
                         # Intentionally no `lr` here: this mode is RMS-conditioned shrinkage by design.
+                        # With typical defaults (lr=1e-4, update_rms~5e-5..1e-4, weight_decay=1e-4),
+                        # multiplier (1 - wd * update_rms) stays ~0.99999999 and cannot flip sign.
                         p_data_fp32.mul_(1.0 - group["weight_decay"] * update_rms)
                     elif weight_decay_mode == "param_rms":
                         # Intentionally no `lr` here: this mode is RMS-conditioned shrinkage by design.
+                        # For param_rms mode under the same defaults and RMS~1, (1 - wd * rms) ~= 0.9999 (>0).
                         p_data_fp32.mul_(1.0 - group["weight_decay"] * rms_t)
                     else:
                         p_data_fp32.mul_(1.0 - lr * group["weight_decay"])

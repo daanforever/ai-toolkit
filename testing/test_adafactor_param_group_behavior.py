@@ -88,6 +88,37 @@ def test_emergency_brake_zero_init_uses_lr_fraction_fallback():
     assert not torch.allclose(p, before)
 
 
+def test_step_closure_runs_with_grad_enabled():
+    """Closure with backward() must work like in standard PyTorch optimizers."""
+    p = torch.nn.Parameter(torch.tensor([2.0], dtype=torch.float32))
+    opt = Adafactor(
+        [p],
+        lr=1e-2,
+        relative_step=False,
+        scale_parameter=False,
+        warmup_init=False,
+        beta1=None,
+        weight_decay=0.0,
+        factored=False,
+    )
+    grad_enabled_flags = []
+
+    def closure():
+        grad_enabled_flags.append(torch.is_grad_enabled())
+        opt.zero_grad()
+        loss = ((p - 1.0) ** 2).sum()
+        loss.backward()
+        return loss
+
+    before = p.detach().clone()
+    loss = opt.step(closure=closure)
+
+    assert grad_enabled_flags == [True]
+    assert isinstance(loss, torch.Tensor)
+    assert torch.allclose(loss.detach(), ((before - 1.0) ** 2).sum())
+    assert torch.all(p < before)
+
+
 def test_load_state_dict_uses_config_priority_except_accumulated_weight_decay():
     """Resume behavior: config wins for static params; checkpoint wins for accumulated weight_decay."""
     p1 = torch.nn.Parameter(torch.ones(2))

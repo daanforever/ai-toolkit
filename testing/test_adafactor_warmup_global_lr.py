@@ -72,3 +72,36 @@ def test_warmup_no_spurious_segment_after_complete():
     opt.step()
     assert not g.get("warmup_active", True)
     assert "warmup_progress" not in g
+
+
+def test_warmup_final_intermediate_lr_is_applied_before_cleanup():
+    """For warmup_steps=2, step2 must still use intermediate warmup_lr, not jump to target."""
+    w1 = torch.nn.Parameter(torch.ones(1))
+    opt = Adafactor(
+        [w1],
+        lr=1.0,
+        relative_step=False,
+        scale_parameter=False,
+        warmup_init=True,
+        warmup_steps=2,
+        beta1=None,
+        weight_decay=0.0,
+        factored=False,
+    )
+    g = opt.param_groups[0]
+    eps1 = g["eps"][1]
+    expected_step_1_lr = 1.0 * eps1
+    expected_step_2_lr = expected_step_1_lr + (1.0 - expected_step_1_lr) / 2.0
+
+    w1.grad = torch.zeros_like(w1)
+    opt.step()
+    assert g["lr_mean"].item() == pytest.approx(expected_step_1_lr)
+
+    w1.grad = torch.zeros_like(w1)
+    opt.step()
+    assert g["lr_mean"].item() == pytest.approx(expected_step_2_lr)
+
+    # Cleanup happens on the next step, then base lr is used.
+    w1.grad = torch.zeros_like(w1)
+    opt.step()
+    assert g["lr_mean"].item() == pytest.approx(1.0)
