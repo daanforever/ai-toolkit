@@ -61,6 +61,8 @@ class Adafactor(torch.optim.Optimizer):
         weight_decay_mode (`str`, *optional*, defaults to `"absolute"`):
             Weight decay mode: `"update_rms"` uses update RMS, `"param_rms"` uses parameter RMS,
             `"absolute"` uses decoupled factor `(1 - lr * weight_decay)`.
+            Note: `"update_rms"` and `"param_rms"` intentionally do not multiply by `lr` because
+            they are designed as RMS-conditioned shrinkage modes with their own scale semantics.
         scale_parameter (`bool`, *optional*, defaults to `False`):
             If True, learning rate is scaled by root mean square.
             Scaling is stronger when update magnitude is large (to protect small parameters).
@@ -448,8 +450,10 @@ class Adafactor(torch.optim.Optimizer):
             self._warmup_update_group(group)
 
     @staticmethod
-    def scheduled_lr_changed(new_lr: float, old_lr: float) -> bool:
+    def scheduled_lr_changed(new_lr: float | None, old_lr: float | None) -> bool:
         """True if scheduled group lr should be treated as changed (``math.isclose`` with fixed tolerances)."""
+        if new_lr is None or old_lr is None:
+            return new_lr != old_lr
         return not math.isclose(new_lr, old_lr, rel_tol=1e-7, abs_tol=1e-12)
 
     @staticmethod
@@ -469,8 +473,21 @@ class Adafactor(torch.optim.Optimizer):
         present, else ``group["lr"] * eps[1]``. After ``warmup_steps`` updates, calls ``stop_warmup``.
         """
         lr_target = group["lr"]
+        if lr_target is None:
+            # No explicit LR target in this mode.
+            group["warmup_active"] = False
+            group.pop("warmup_lr", None)
+            group["warmup_lr_previous"] = group.get("warmup_lr_previous", 1.0)
+            return
+
         lr_target_old = group.get("warmup_target", 0.0)
-        warmup_steps = group["warmup_steps"]
+        warmup_steps = int(group["warmup_steps"])
+        if warmup_steps <= 0:
+            group["warmup_active"] = False
+            group["warmup_lr"] = lr_target
+            group["warmup_lr_previous"] = lr_target
+            return
+
         warmup_steps_old = group.get("warmup_steps_old", 0)
 
         if self.scheduled_lr_changed(lr_target, lr_target_old) or warmup_steps != warmup_steps_old:
@@ -525,6 +542,9 @@ class Adafactor(torch.optim.Optimizer):
             base_lr = param_group["warmup_lr"]
         else:
             base_lr = param_group["lr"]
+        if base_lr is None:
+            # Allow relative-step mode with lr=None.
+            base_lr = 1.0
 
         min_lr     = param_group["min_lr"]          # Minimum learning rate
         eps0       = param_group["eps"][0]          # Small constant for numerical stability (division guard)
@@ -591,6 +611,7 @@ class Adafactor(torch.optim.Optimizer):
         Scaling factor is normalized by number of groups to prevent excessive cumulative updates
         when multiple parameter groups are present.
         """
+        # WIP: reserved for future use; currently not called.
         if global_mean_dynamic_gain is None:
             return
         limited = max(0.0, min(2.0, global_mean_dynamic_gain))
@@ -603,6 +624,7 @@ class Adafactor(torch.optim.Optimizer):
         Softly adjust group["beta2"] toward a GNS-based target (only when relative_step=True).
         Low GNS (< 4) -> target 0.88; high GNS (> 10) -> target 0.99; else 0.9.
         """
+        # WIP: reserved for future use; currently not called.
         target_beta2 = 0.9
         current_gns = self._group_scalar_item(group, "gns", 0.0)
 
@@ -620,8 +642,10 @@ class Adafactor(torch.optim.Optimizer):
             factored = len(param_shape) >= 2
         else:
             factored = factored_setting
+        if factored and len(param_shape) < 2:
+            factored = False
         # Enable first moment (exp_avg) if beta1 is set
-        use_first_moment = param_group["beta1"] is not None or param_group["beta1"] != 0.0
+        use_first_moment = param_group["beta1"] is not None and param_group["beta1"] != 0.0
         return factored, use_first_moment
 
     @staticmethod
@@ -1084,8 +1108,10 @@ class Adafactor(torch.optim.Optimizer):
                         group.get("weight_decay_mode", "absolute")
                     )
                     if weight_decay_mode == "update_rms":
+                        # Intentionally no `lr` here: this mode is RMS-conditioned shrinkage by design.
                         p_data_fp32.mul_(1.0 - group["weight_decay"] * update_rms)
                     elif weight_decay_mode == "param_rms":
+                        # Intentionally no `lr` here: this mode is RMS-conditioned shrinkage by design.
                         p_data_fp32.mul_(1.0 - group["weight_decay"] * rms_t)
                     else:
                         p_data_fp32.mul_(1.0 - lr * group["weight_decay"])
