@@ -9,12 +9,13 @@ from toolkit.accelerator import unwrap_model
 from toolkit.data_loader import get_dataloader_datasets
 from toolkit.print import print_acc
 from toolkit.util.debug import is_debug_enabled
-from typing import List, Literal, Optional, Tuple
+from typing import Callable, List, Literal, Optional, Tuple, TypeVar
 import threading
 import time
 import signal
 
 AITK_Status = Literal["running", "stopped", "error", "completed"]
+T = TypeVar("T")
 
 
 class DiffusionTrainer(SDTrainer):
@@ -57,6 +58,7 @@ class DiffusionTrainer(SDTrainer):
             self._last_applied_runtime_gradient_accumulation = None
             self._last_applied_runtime_save_every = None
             self._last_applied_runtime_sample_every = None
+            self._last_applied_runtime_warmup_steps = None
             self._last_applied_runtime_min_snr_gamma = None
             self._last_applied_runtime_debug = None
             self._last_applied_runtime_fc_key: Optional[
@@ -144,6 +146,21 @@ class DiffusionTrainer(SDTrainer):
         conn.isolation_level = None  # Enable autocommit mode
         return conn
 
+    def _get_runtime_scalar(self, column_name: str, caster: Callable[[object], T]) -> Optional[T]:
+        """Read one runtime scalar column from RuntimeParams for current job."""
+        if not self.is_ui_trainer:
+            return None
+        with self._db_connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"SELECT {column_name} FROM RuntimeParams WHERE jobId = ?",
+                (self.job_id,),
+            )
+            row = cursor.fetchone()
+            if row is None or row[0] is None:
+                return None
+            return caster(row[0])
+
     def should_stop(self):
         if not self.is_ui_trainer:
             return False
@@ -186,21 +203,7 @@ class DiffusionTrainer(SDTrainer):
 
     def get_runtime_lr(self):
         """Read runtime_lr from DB (only when is_ui_trainer). Returns float or None."""
-        if not self.is_ui_trainer:
-            return None
-
-        def _read():
-            with self._db_connect() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT runtime_lr FROM RuntimeParams WHERE jobId = ?", (self.job_id,)
-                )
-                row = cursor.fetchone()
-                if row is None or row[0] is None:
-                    return None
-                return float(row[0])
-
-        return _read()
+        return self._get_runtime_scalar("runtime_lr", float)
 
     def apply_runtime_lr(self):
         """If runtime_lr is set in DB, apply it to the optimizer (e.g. Adafactor)."""
@@ -230,21 +233,7 @@ class DiffusionTrainer(SDTrainer):
 
     def get_runtime_min_lr(self):
         """Read runtime_min_lr from DB (only when is_ui_trainer). Returns float or None."""
-        if not self.is_ui_trainer:
-            return None
-
-        def _read():
-            with self._db_connect() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT runtime_min_lr FROM RuntimeParams WHERE jobId = ?", (self.job_id,)
-                )
-                row = cursor.fetchone()
-                if row is None or row[0] is None:
-                    return None
-                return float(row[0])
-
-        return _read()
+        return self._get_runtime_scalar("runtime_min_lr", float)
 
     def apply_runtime_min_lr(self):
         """If runtime_min_lr is set in DB, apply it to the optimizer (e.g. Adafactor)."""
@@ -375,117 +364,27 @@ class DiffusionTrainer(SDTrainer):
 
     def get_runtime_batch_size(self):
         """Read runtime_batch_size from DB (only when is_ui_trainer). Returns int or None."""
-        if not self.is_ui_trainer:
-            return None
-
-        def _read():
-            with self._db_connect() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT runtime_batch_size FROM RuntimeParams WHERE jobId = ?",
-                    (self.job_id,),
-                )
-                row = cursor.fetchone()
-                if row is None or row[0] is None:
-                    return None
-                return int(row[0])
-
-        return _read()
+        return self._get_runtime_scalar("runtime_batch_size", int)
 
     def get_runtime_weight_decay(self):
         """Read runtime_weight_decay from DB (only when is_ui_trainer). Returns float or None."""
-        if not self.is_ui_trainer:
-            return None
-
-        def _read():
-            with self._db_connect() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT runtime_weight_decay FROM RuntimeParams WHERE jobId = ?",
-                    (self.job_id,),
-                )
-                row = cursor.fetchone()
-                if row is None or row[0] is None:
-                    return None
-                return float(row[0])
-
-        return _read()
+        return self._get_runtime_scalar("runtime_weight_decay", float)
 
     def get_runtime_weight_decay_increment(self):
         """Read runtime_weight_decay_increment from DB (only when is_ui_trainer). Returns float or None."""
-        if not self.is_ui_trainer:
-            return None
-
-        def _read():
-            with self._db_connect() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT runtime_weight_decay_increment FROM RuntimeParams WHERE jobId = ?",
-                    (self.job_id,),
-                )
-                row = cursor.fetchone()
-                if row is None or row[0] is None:
-                    return None
-                return float(row[0])
-
-        return _read()
+        return self._get_runtime_scalar("runtime_weight_decay_increment", float)
 
     def get_runtime_weight_decay_mode(self):
         """Read runtime_weight_decay_mode from DB (only when is_ui_trainer). Returns str or None."""
-        if not self.is_ui_trainer:
-            return None
-
-        def _read():
-            with self._db_connect() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT runtime_weight_decay_mode FROM RuntimeParams WHERE jobId = ?",
-                    (self.job_id,),
-                )
-                row = cursor.fetchone()
-                if row is None or row[0] is None:
-                    return None
-                return str(row[0])
-
-        return _read()
+        return self._get_runtime_scalar("runtime_weight_decay_mode", str)
 
     def get_runtime_beta1(self):
         """Read runtime_beta1 from DB (only when is_ui_trainer). Returns float or None."""
-        if not self.is_ui_trainer:
-            return None
-
-        def _read():
-            with self._db_connect() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT runtime_beta1 FROM RuntimeParams WHERE jobId = ?",
-                    (self.job_id,),
-                )
-                row = cursor.fetchone()
-                if row is None or row[0] is None:
-                    return None
-                return float(row[0])
-
-        return _read()
+        return self._get_runtime_scalar("runtime_beta1", float)
 
     def get_runtime_beta2(self):
         """Read runtime_beta2 from DB (only when is_ui_trainer). Returns float or None."""
-        if not self.is_ui_trainer:
-            return None
-
-        def _read():
-            with self._db_connect() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT runtime_beta2 FROM RuntimeParams WHERE jobId = ?",
-                    (self.job_id,),
-                )
-                row = cursor.fetchone()
-                if row is None or row[0] is None:
-                    return None
-                return float(row[0])
-
-        return _read()
+        return self._get_runtime_scalar("runtime_beta2", float)
 
     def apply_runtime_batch_size(self):
         """If runtime_batch_size is set in DB, apply it to train_config and recreate data loaders."""
@@ -530,22 +429,7 @@ class DiffusionTrainer(SDTrainer):
 
     def get_runtime_gradient_accumulation(self):
         """Read runtime_gradient_accumulation from DB (only when is_ui_trainer). Returns int or None."""
-        if not self.is_ui_trainer:
-            return None
-
-        def _read():
-            with self._db_connect() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT runtime_gradient_accumulation FROM RuntimeParams WHERE jobId = ?",
-                    (self.job_id,),
-                )
-                row = cursor.fetchone()
-                if row is None or row[0] is None:
-                    return None
-                return int(row[0])
-
-        return _read()
+        return self._get_runtime_scalar("runtime_gradient_accumulation", int)
 
     def apply_runtime_gradient_accumulation(self):
         """If runtime_gradient_accumulation is set in DB, apply it to train_config."""
@@ -568,79 +452,23 @@ class DiffusionTrainer(SDTrainer):
 
     def get_runtime_save_every(self):
         """Read runtime_save_every from DB (only when is_ui_trainer). Returns int or None."""
-        if not self.is_ui_trainer:
-            return None
-
-        def _read():
-            with self._db_connect() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT runtime_save_every FROM RuntimeParams WHERE jobId = ?",
-                    (self.job_id,),
-                )
-                row = cursor.fetchone()
-                if row is None or row[0] is None:
-                    return None
-                return int(row[0])
-
-        return _read()
+        return self._get_runtime_scalar("runtime_save_every", int)
 
     def get_runtime_sample_every(self):
         """Read runtime_sample_every from DB (only when is_ui_trainer). Returns int or None."""
-        if not self.is_ui_trainer:
-            return None
+        return self._get_runtime_scalar("runtime_sample_every", int)
 
-        def _read():
-            with self._db_connect() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT runtime_sample_every FROM RuntimeParams WHERE jobId = ?",
-                    (self.job_id,),
-                )
-                row = cursor.fetchone()
-                if row is None or row[0] is None:
-                    return None
-                return int(row[0])
-
-        return _read()
+    def get_runtime_warmup_steps(self):
+        """Read runtime_warmup_steps from DB (only when is_ui_trainer). Returns int or None."""
+        return self._get_runtime_scalar("runtime_warmup_steps", int)
 
     def get_runtime_min_snr_gamma(self):
         """Read runtime_min_snr_gamma from DB (only when is_ui_trainer). Returns float or None."""
-        if not self.is_ui_trainer:
-            return None
-
-        def _read():
-            with self._db_connect() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT runtime_min_snr_gamma FROM RuntimeParams WHERE jobId = ?",
-                    (self.job_id,),
-                )
-                row = cursor.fetchone()
-                if row is None or row[0] is None:
-                    return None
-                return float(row[0])
-
-        return _read()
+        return self._get_runtime_scalar("runtime_min_snr_gamma", float)
 
     def get_runtime_debug(self):
         """Read runtime_debug from DB (only when is_ui_trainer). Returns bool or None."""
-        if not self.is_ui_trainer:
-            return None
-
-        def _read():
-            with self._db_connect() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT runtime_debug FROM RuntimeParams WHERE jobId = ?",
-                    (self.job_id,),
-                )
-                row = cursor.fetchone()
-                if row is None or row[0] is None:
-                    return None
-                return bool(row[0])
-
-        return _read()
+        return self._get_runtime_scalar("runtime_debug", bool)
 
     def apply_runtime_debug(self):
         """If runtime_debug is set in DB, apply it to logging_config.debug."""
@@ -700,6 +528,33 @@ class DiffusionTrainer(SDTrainer):
             print_acc(
                 f"\nruntime sample_every from UI/DB: {old_sample_every} -> {sample_every}"
             )
+
+    def apply_runtime_warmup_steps(self):
+        """If runtime_warmup_steps is set in DB, apply it to optimizer (e.g. Adafactor)."""
+        if not self.is_ui_trainer:
+            return
+        value = self.get_runtime_warmup_steps()
+        if value is None:
+            return
+        if value == self._last_applied_runtime_warmup_steps:
+            return
+        optimizer = unwrap_model(self.optimizer)
+        while getattr(optimizer, "optimizer", None) is not None:
+            optimizer = optimizer.optimizer
+        if hasattr(optimizer, "set_warmup_steps"):
+            pg0 = optimizer.param_groups[0] if optimizer.param_groups else {}
+            if pg0.get("warmup_steps", None) == value:
+                self._last_applied_runtime_warmup_steps = value
+                return
+            if is_debug_enabled():
+                print_acc(f"\nruntime_warmup_steps from UI/DB: {value}")
+            optimizer.set_warmup_steps(value)
+        else:
+            if is_debug_enabled():
+                print_acc(
+                    f"\nruntime_warmup_steps from DB not applied: optimizer has no set_warmup_steps (type: {type(optimizer).__name__})"
+                )
+        self._last_applied_runtime_warmup_steps = value
 
     def apply_runtime_min_snr_gamma(self):
         """If runtime_min_snr_gamma is set in DB, apply it to train_config."""
@@ -854,22 +709,7 @@ class DiffusionTrainer(SDTrainer):
 
     def get_runtime_content_or_style(self):
         """Read runtime_content_or_style from DB (only when is_ui_trainer). Returns str or None."""
-        if not self.is_ui_trainer:
-            return None
-
-        def _read():
-            with self._db_connect() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT runtime_content_or_style FROM RuntimeParams WHERE jobId = ?",
-                    (self.job_id,),
-                )
-                row = cursor.fetchone()
-                if row is None or row[0] is None:
-                    return None
-                return str(row[0])
-
-        return _read()
+        return self._get_runtime_scalar("runtime_content_or_style", str)
 
     def apply_runtime_content_or_style(self):
         """If runtime_content_or_style is set in DB, apply it to train_config."""
@@ -890,22 +730,7 @@ class DiffusionTrainer(SDTrainer):
 
     def get_runtime_timestep_type(self):
         """Read runtime_timestep_type from DB (only when is_ui_trainer). Returns str or None."""
-        if not self.is_ui_trainer:
-            return None
-
-        def _read():
-            with self._db_connect() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT runtime_timestep_type FROM RuntimeParams WHERE jobId = ?",
-                    (self.job_id,),
-                )
-                row = cursor.fetchone()
-                if row is None or row[0] is None:
-                    return None
-                return str(row[0])
-
-        return _read()
+        return self._get_runtime_scalar("runtime_timestep_type", str)
 
     def apply_runtime_timestep_type(self):
         """If runtime_timestep_type is set in DB, apply it to train_config."""
@@ -1164,6 +989,7 @@ class DiffusionTrainer(SDTrainer):
         self._last_applied_runtime_gradient_accumulation = None
         self._last_applied_runtime_save_every = None
         self._last_applied_runtime_sample_every = None
+        self._last_applied_runtime_warmup_steps = None
         self._last_applied_runtime_min_snr_gamma = None
         self._last_applied_runtime_debug = None
         self._last_applied_runtime_fc_key = None
@@ -1296,6 +1122,7 @@ class DiffusionTrainer(SDTrainer):
             self.apply_runtime_gradient_accumulation()
             self.apply_runtime_save_every()
             self.apply_runtime_sample_every()
+            self.apply_runtime_warmup_steps()
             self.apply_runtime_min_snr_gamma()
             self.apply_runtime_debug()
 

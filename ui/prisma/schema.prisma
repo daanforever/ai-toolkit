@@ -66,6 +66,7 @@ model RuntimeParams {
   runtime_gradient_accumulation Int?
   runtime_save_every       Int?
   runtime_sample_every     Int?
+  runtime_warmup_steps     Int?
   runtime_min_snr_gamma    Float?
   runtime_debug            Boolean?
   updated_at               DateTime @updatedAt

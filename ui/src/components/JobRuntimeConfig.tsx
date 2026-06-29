@@ -94,6 +94,9 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
   const weightDecayMode =
     optimizerParams?.weight_decay_mode ??
     defaultJobConfig.config.process[0].train.optimizer_params.weight_decay_mode;
+  const warmupSteps =
+    optimizerParams?.warmup_steps ??
+    defaultJobConfig.config.process[0].train.optimizer_params.warmup_steps;
   const beta1 = optimizerParams?.beta1 != null
     ? Number(optimizerParams.beta1)
     : null;
@@ -198,6 +201,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         weight_decay: 1e-4,
         weight_decay_increment: 0.0,
         weight_decay_mode: 'absolute',
+        warmup_steps: 100,
       };
     }
     process.train.timestep_type = timestepType;
@@ -206,6 +210,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     process.train.optimizer_params.weight_decay = weightDecay;
     process.train.optimizer_params.weight_decay_increment = weightDecayIncrement;
     process.train.optimizer_params.weight_decay_mode = weightDecayMode;
+    process.train.optimizer_params.warmup_steps = warmupSteps;
     (process.train.optimizer_params as Record<string, number | null>).beta1 = beta1;
     (process.train.optimizer_params as Record<string, number>).beta2 = beta2;
     (process.train as Record<string, number>).lr = lr;
@@ -325,6 +330,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         gradient_accumulation?: number;
         save_every?: number;
         sample_every?: number;
+        warmup_steps?: number;
         min_snr_gamma?: number;
         debug?: boolean;
         fixed_cycle_timesteps?: number[];
@@ -347,6 +353,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         gradient_accumulation: gradientAccumulation,
         save_every: saveEvery,
         sample_every: sampleEvery,
+        warmup_steps: warmupSteps,
         min_snr_gamma: minSnrGamma,
         debug,
       };
@@ -406,6 +413,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     gradientAccumulation,
     saveEvery,
     sampleEvery,
+    warmupSteps,
     minSnrGamma,
     debug,
     datasets,
@@ -620,7 +628,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
             </div>
           </div>
           <div className="space-y-2">
-            <p className="text-xs text-gray-400">Save every / Sample every (steps)</p>
+            <p className="text-xs text-gray-400">Save every / Sample every / Warmup steps</p>
             <div className="flex items-center gap-2 flex-wrap">
               <input
                 type="number"
@@ -651,6 +659,23 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
                   const num = v === '' ? 250 : parseInt(v, 10);
                   if (Number.isInteger(num) && num >= 1) {
                     setValue(num, 'config.process[0].sample.sample_every');
+                    setApplyStatus('idle');
+                  }
+                }}
+                className="rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none min-w-[120px]"
+              />
+              <input
+                type="number"
+                min={0}
+                max={100000}
+                step={1}
+                placeholder="e.g. 100"
+                value={warmupSteps}
+                onChange={(e) => {
+                  const v = e.target.value.trim();
+                  const num = v === '' ? 0 : parseInt(v, 10);
+                  if (Number.isInteger(num) && num >= 0) {
+                    setValue(num, `${OPTIMIZER_PARAMS_PATH}.warmup_steps`);
                     setApplyStatus('idle');
                   }
                 }}
