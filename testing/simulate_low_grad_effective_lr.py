@@ -145,8 +145,10 @@ def decompose_one_step(group, grad_scale, state):
     clip_d = max(pre_rms / clip, 1.0)
     update_hat = pre / clip_d
 
-    exp_avg_before = state["exp_avg_before"]
-    dir_consistency = F.cosine_similarity(update_hat.flatten(), exp_avg_before.flatten(), dim=0).item()
+    beta2_direction_ema_before = state["beta2_direction_ema_before"]
+    dir_consistency = F.cosine_similarity(
+        update_hat.flatten(), beta2_direction_ema_before.flatten(), dim=0
+    ).item()
     lr = get_lr(param_rms, grad_rms, group, dir_consistency)
     scaled = update_hat * lr
 
@@ -186,6 +188,7 @@ def run_with_tracked_state(group, grad_levels, **warmup_kw):
     for g in grad_levels:
         grad = direction * g
         state["exp_avg_before"] = state["exp_avg"].clone()
+        state["beta2_direction_ema_before"] = state.get("beta2_direction_ema", torch.zeros_like(grad)).clone()
         state["_last_grad"] = grad
         adafactor_step(grad, state, group)
         d = decompose_one_step(group, g, state)

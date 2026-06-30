@@ -47,7 +47,7 @@ class Adafactor(torch.optim.Optimizer):
             of parameter RMS (``rms_max`` on each param group) and running min (``rms_min``), which normalizes each parameter's scale
             to (0, 1] for LR (useful for mixed-scale groups e.g. LoRA). Group-level metrics
             (``rms_ema``, ``update_rms``, ``lr_mean``, ``gns``, ``step_efficiency``, ``dynamic_gain``,
-            ``effective_lr``, ``precond_gain``, ``momentum_gain``, etc.)
+            ``effective_lr``, ``precond_gain``, ``momentum_gain``, ``beta2``, etc.)
             live on ``param_groups`` rather than in per-parameter ``state``.
         beta1 (`float`, *optional*):
             Coefficient used for computing running averages of gradient
@@ -169,6 +169,7 @@ class Adafactor(torch.optim.Optimizer):
         saddle_point_step: float = 0.01,
     ):
         weight_decay_mode = self._validate_weight_decay_mode(weight_decay_mode)
+        eps = self._normalize_eps(eps)
         defaults = {
             "lr": lr,
             "eps": eps,
@@ -191,6 +192,7 @@ class Adafactor(torch.optim.Optimizer):
         super().__init__(params, defaults)
 
         for group in self.param_groups:
+            group["eps"] = self._normalize_eps(group.get("eps", eps), fallback_eps1=eps[1])
             group.setdefault("warmup_active", False)
 
         # Create stagnation detector for RMS(parameter) based heuristic.
@@ -355,6 +357,7 @@ class Adafactor(torch.optim.Optimizer):
                     group[key] = current_cfg[key]
                 elif key in self.defaults:
                     group.setdefault(key, self.defaults[key])
+            group["eps"] = self._normalize_eps(group.get("eps", self._eps), fallback_eps1=self._eps[1])
             group["instability_score"] = group.get("instability_score", 0.0)
 
         self._migrate_optimizer_state_buffers()
@@ -367,6 +370,19 @@ class Adafactor(torch.optim.Optimizer):
                 f"Expected one of: {', '.join(cls._WEIGHT_DECAY_MODES)}"
             )
         return value
+
+    @staticmethod
+    def _normalize_eps(
+        eps: Tuple[float, float] | List[float] | float,
+        fallback_eps1: float = 1e-3,
+    ) -> Tuple[float, float]:
+        if isinstance(eps, (tuple, list)):
+            if len(eps) != 2:
+                raise ValueError(
+                    f"Invalid eps '{eps}'. Expected a tuple/list of two floats: (eps0, eps1)."
+                )
+            return float(eps[0]), float(eps[1])
+        return float(eps), float(fallback_eps1)
 
     def _migrate_optimizer_state_buffers(self):
         """Add or reset momentum buffers after load when optimizer_params changed."""
@@ -594,7 +610,7 @@ class Adafactor(torch.optim.Optimizer):
             if param_group["scale_parameter"] and emergency_brake is not None:
                 emergency_brake = float(emergency_brake)
                 # Instant Brake: multiplicative factor based on current directional consistency
-                # Prefer fresh per-parameter dir_consistency; default 0.0 when absent (e.g. beta1=None)
+                # Prefer fresh per-parameter dir_consistency; default 0.0 when absent (e.g. first step)
                 dc = param_state.get("dir_consistency")
                 if dc is not None:
                     dir_val = dc.item() if isinstance(dc, torch.Tensor) else float(dc)
@@ -867,7 +883,7 @@ class Adafactor(torch.optim.Optimizer):
         else:
             group["gns"] = torch.tensor(0.0, dtype=torch.float32, device=ref_device)
 
-        eps0 = group["eps"][0] if isinstance(group["eps"], (tuple, list)) else group["eps"]
+        eps0 = group["eps"][0]
         eps_t = torch.tensor(float(eps0), dtype=torch.float32, device=ref_device)
         u_rms_t = group["update_rms"]
         u_max = group["update_rms_max"]
@@ -1060,10 +1076,8 @@ class Adafactor(torch.optim.Optimizer):
                 self._group_running_max_update(group, "grad_rms_max", gr)
 
                 beta2 = group["beta2"]
-                eps = group["eps"]
-                if isinstance(eps, tuple) or isinstance(eps, list):
-                    eps = eps[0]
-                update = (grad**2) + eps
+                eps0 = group["eps"][0]
+                update = (grad**2) + eps0
                 if factored:
                     exp_avg_sq_row = state["exp_avg_sq_row"]
                     exp_avg_sq_col = state["exp_avg_sq_col"]
@@ -1087,15 +1101,32 @@ class Adafactor(torch.optim.Optimizer):
                 update_hat = update.div_(
                     (self._rms(update) / group["clip_threshold"]).clamp_(min=1.0))
 
-                if use_first_moment:
-                    exp_avg = state["exp_avg"]
-                    # Directional Consistency (before EMA, before LR) — fresh for _get_lr brake
-                    state["dir_consistency"] = torch.nn.functional.cosine_similarity(
-                        update_hat.flatten(), exp_avg.flatten(), dim=0, eps=1e-8
-                    )
+                if (
+                    "beta2_direction_ema" not in state
+                    or state["beta2_direction_ema"].shape != grad.shape
+                ):
+                    state["beta2_direction_ema"] = torch.zeros_like(grad)
+                else:
+                    state["beta2_direction_ema"] = state["beta2_direction_ema"].to(grad)
+
+                # Directional Consistency on beta2-preconditioned trajectory (before LR).
+                beta2_direction_ema = state["beta2_direction_ema"]
+                state["dir_consistency"] = torch.nn.functional.cosine_similarity(
+                    update_hat.flatten(), beta2_direction_ema.flatten(), dim=0, eps=1e-8
+                )
+                beta2_direction_ema.mul_(beta2).add_(update_hat, alpha=(1.0 - beta2))
 
                 lr = self._get_lr(group, state)
                 scaled_update = update_hat.mul(lr)
+                current_update_sq = scaled_update.pow(2).mean()
+                if "beta2_update_sq_ema" in state:
+                    signal_sq = torch.as_tensor(
+                        state["beta2_update_sq_ema"], device=grad.device, dtype=torch.float32
+                    ).reshape(())
+                else:
+                    signal_sq = current_update_sq.detach()
+                gns_tensor = (current_update_sq - signal_sq) / (signal_sq + 1e-12)
+                state["beta2_update_sq_ema"] = signal_sq * beta2 + current_update_sq.detach() * (1.0 - beta2)
 
                 if use_first_moment:
                     exp_avg = state["exp_avg"]
@@ -1106,28 +1137,21 @@ class Adafactor(torch.optim.Optimizer):
                     # Momentum on clipped+lr-scaled direction (transformers / pre-16acf685)
                     exp_avg.mul_(beta1_for_ema).add_(scaled_update, alpha=(1 - beta1_for_ema))
 
-                    signal_sq = exp_avg.pow(2).mean()
-                    current_update_sq = scaled_update.pow(2).mean()
-                    gns_tensor = (current_update_sq - signal_sq) / (signal_sq + 1e-12)
                     update = exp_avg
 
                 else:
-                    gns_tensor = None
                     update = scaled_update
 
                 update_rms = self._rms(update)
 
                 gr_val = gr.detach().item()
-                if gr_val >= eps:
+                if gr_val >= eps0:
                     hat_rms = self._rms(update_hat).detach().item()
                     scaled_rms = hat_rms * lr
-                    ur_val = update_rms.detach().item()
-                    state["precond_gain"] = hat_rms / (gr_val + eps)
-                    state["effective_lr"] = ur_val / (gr_val + eps)
-                    if group["beta1"] is not None:
-                        state["momentum_gain"] = ur_val / (scaled_rms + eps)
-                    else:
-                        state["momentum_gain"] = 1.0
+                    signal_rms = torch.sqrt(signal_sq + 1e-12).detach().item()
+                    state["precond_gain"] = hat_rms / (gr_val + eps0)
+                    state["effective_lr"] = scaled_rms / (gr_val + eps0)
+                    state["momentum_gain"] = scaled_rms / (signal_rms + eps0)
                 else:
                     state.pop("effective_lr", None)
                     state.pop("precond_gain", None)
@@ -1164,7 +1188,7 @@ class Adafactor(torch.optim.Optimizer):
                         p,
                         update_rms.detach(),
                         float(lr),
-                        gns_tensor.detach() if gns_tensor is not None else None,
+                        gns_tensor.detach(),
                     )
                 )
 
@@ -1293,7 +1317,7 @@ class Adafactor(torch.optim.Optimizer):
 
     def get_effective_lr(self):
         """
-        Weighted mean of per-param ``update_rms / grad_rms`` per group (``effective_lr`` on param group).
+        Weighted mean of per-param ``scaled_update_rms / grad_rms`` per group (beta2 trajectory).
         """
         out = []
         for group in self.param_groups:
@@ -1319,7 +1343,8 @@ class Adafactor(torch.optim.Optimizer):
 
     def get_momentum_gain(self):
         """
-        Weighted mean of per-param ``update_rms / scaled_update_rms`` per group (beta1 momentum).
+        Weighted mean of per-param ``scaled_update_rms / beta2_signal_rms`` per group.
+        Kept under the historical metric name for backward compatibility.
         """
         out = []
         for group in self.param_groups:
@@ -1375,7 +1400,7 @@ class Adafactor(torch.optim.Optimizer):
         return out
 
     def get_dir_consistency(self):
-        """Get Directional Consistency (cosine similarity to EMA) per group."""
+        """Get Directional Consistency (cosine similarity to beta2 direction EMA) per group."""
         out = []
         for group in self.param_groups:
             v = self._get_group_scalars(group, "dir_consistency", default=0.0, reduction='mean')
@@ -1423,7 +1448,7 @@ class Adafactor(torch.optim.Optimizer):
         return self._scalars_per_group_to_mean(self.get_step_efficiency())
 
     def get_beta1(self):
-        """Get beta1 (momentum coefficient) for each parameter group."""
+        """Get beta1 (momentum coefficient) for each parameter group (legacy metric)."""
         out = []
         for group in self.param_groups:
             beta1 = group.get("beta1", 0.0)
@@ -1431,5 +1456,16 @@ class Adafactor(torch.optim.Optimizer):
         return out
 
     def get_mean_beta1(self):
-        """Mean beta1 (momentum coefficient) across all parameter groups."""
+        """Mean beta1 (momentum coefficient) across all parameter groups (legacy metric)."""
         return self._scalars_per_group_to_mean(self.get_beta1())
+
+    def get_beta2(self):
+        """Get beta2 (second-moment coefficient) for each parameter group."""
+        out = []
+        for group in self.param_groups:
+            out.append(float(group.get("beta2", self._beta2)))
+        return out
+
+    def get_mean_beta2(self):
+        """Mean beta2 (second-moment coefficient) across all parameter groups."""
+        return self._scalars_per_group_to_mean(self.get_beta2())

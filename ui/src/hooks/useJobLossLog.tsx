@@ -15,7 +15,7 @@ export type MetricFilter = 'loss' | 'learning_rate' | 'diff_guidance' | 'all' | 
 
 function categorizeMetric(key: string): 'loss' | 'learning_rate' | 'diff_guidance' | 'other' {
   if (key === 'learning_rate' || key === 'train/lr_mean') return 'learning_rate';
-  if (/effective_lr|precond_gain|momentum_gain|lr_mean/i.test(key)) return 'learning_rate';
+  if (/effective_lr|precond_gain|momentum_gain|lr_mean|beta2/i.test(key)) return 'learning_rate';
   if (key === 'diff_guidance_norm') return 'diff_guidance';
   if (/loss/i.test(key)) return 'loss';
   return 'other';

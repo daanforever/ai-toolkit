@@ -1991,6 +1991,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 precond_gain = 0.0  # Preconditioner+clip gain before lr/momentum (Adafactor)
                 momentum_gain = 0.0  # Momentum gain: final/scaled update (Adafactor)
                 beta1 = 0.0  # Momentum coefficient (Adafactor)
+                beta2 = 0.0  # Second-moment coefficient (Adafactor)
                 if not did_oom and loss_dict is not None:
                     if hasattr(optimizer, 'get_mean_learning_rate'):
                         learning_rate = optimizer.get_mean_learning_rate()
@@ -2046,6 +2047,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         momentum_gain = optimizer.get_mean_momentum_gain()
                     if hasattr(optimizer, 'get_mean_beta1'):
                         beta1 = optimizer.get_mean_beta1()
+                    if hasattr(optimizer, 'get_mean_beta2'):
+                        beta2 = optimizer.get_mean_beta2()
 
                     prog_bar_string = f"lr: {learning_rate:.1e}"
                     if weight_decay > 0:
@@ -2152,6 +2155,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                             self.writer.add_scalar(f"train/precond_gain", precond_gain, self.step_num)
                                             self.writer.add_scalar(f"train/momentum_gain", momentum_gain, self.step_num)
                                             self.writer.add_scalar(f"train/beta1", beta1, self.step_num)
+                                            self.writer.add_scalar(f"train/beta2", beta2, self.step_num)
                                 if self.progress_bar is not None:
                                     self.progress_bar.unpause()
                         
@@ -2237,6 +2241,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
                             self.logger.log({
                                 'train/beta1': beta1,
                             })
+                            self.logger.log({
+                                'train/beta2': beta2,
+                            })
 
                             for key, value in loss_dict.items():
                                 self.logger.log({
@@ -2321,6 +2328,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
                             self.logger.log({
                                 'train/beta1': beta1,
+                            })
+                            self.logger.log({
+                                'train/beta2': beta2,
                             })
 
                             for key, value in loss_dict.items():

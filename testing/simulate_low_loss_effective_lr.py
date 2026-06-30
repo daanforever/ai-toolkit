@@ -70,7 +70,12 @@ def decompose_step(grad, state, group):
     update_hat = pre / clip_denom
 
     exp_avg = state["exp_avg"]
-    dc = F.cosine_similarity(update_hat.flatten(), exp_avg.flatten(), dim=0).item()
+    beta2_direction_ema = state.get("beta2_direction_ema")
+    if beta2_direction_ema is None or beta2_direction_ema.shape != update_hat.shape:
+        beta2_direction_ema = torch.zeros_like(update_hat)
+        state["beta2_direction_ema"] = beta2_direction_ema
+    dc = F.cosine_similarity(update_hat.flatten(), beta2_direction_ema.flatten(), dim=0).item()
+    beta2_direction_ema.mul_(beta2).add_(update_hat, alpha=1 - beta2)
     lr = get_lr(param_rms, grad_rms, group, dc)
     scaled = update_hat * lr
 

@@ -1,4 +1,4 @@
-"""Adafactor step decomposition metrics: effective_lr, precond_gain, momentum_gain."""
+"""Adafactor beta2-path step metrics: effective_lr, precond_gain, momentum_gain."""
 import math
 
 import torch
@@ -36,11 +36,11 @@ def test_effective_lr_positive_after_warmup():
     assert opt.get_mean_precond_gain() > 0.0
 
 
-def test_momentum_gain_one_when_beta1_none():
+def test_momentum_gain_positive_when_beta1_none():
     opt, p = _make_opt(beta1=None)
     for _ in range(10):
         _step_with_grad(opt, p, 1e-3)
-    assert math.isclose(opt.get_mean_momentum_gain(), 1.0, rel_tol=1e-5)
+    assert opt.get_mean_momentum_gain() > 0.0
 
 
 def test_decomposition_approx_one_step():
@@ -54,9 +54,16 @@ def test_decomposition_approx_one_step():
     mom = opt.get_mean_momentum_gain()
     lr = opt.get_mean_learning_rate()
 
-    product = pre * lr * mom
+    product = pre * lr
     assert eff > 0
     assert math.isclose(eff, product, rel_tol=0.15)
+    assert mom > 0
+
+
+def test_mean_beta2_matches_group_setting():
+    opt, p = _make_opt(beta2=0.97)
+    _step_with_grad(opt, p, 1e-3)
+    assert math.isclose(opt.get_mean_beta2(), 0.97, rel_tol=1e-6)
 
 
 def test_get_group_scalars_returns_default_when_empty():

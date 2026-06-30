@@ -74,12 +74,22 @@ def adafactor_step(grad, state, group):
     update_hat = pre / clip_denom
 
     exp_avg = state["exp_avg"]
-    dir_consistency = None
-    if beta1 is not None:
-        dir_consistency = F.cosine_similarity(update_hat.flatten(), exp_avg.flatten(), dim=0).item()
+    beta2_direction_ema = state.get("beta2_direction_ema")
+    if beta2_direction_ema is None or beta2_direction_ema.shape != update_hat.shape:
+        beta2_direction_ema = torch.zeros_like(update_hat)
+        state["beta2_direction_ema"] = beta2_direction_ema
+    dir_consistency = F.cosine_similarity(update_hat.flatten(), beta2_direction_ema.flatten(), dim=0).item()
+    beta2_direction_ema.mul_(beta2).add_(update_hat, alpha=1 - beta2)
 
     lr = get_lr(param_rms, grad_rms, group, dir_consistency)
     scaled = update_hat * lr
+    current_update_sq = scaled.pow(2).mean()
+    signal_sq = state.get("beta2_update_sq_ema")
+    if signal_sq is None:
+        signal_sq = current_update_sq.detach()
+    else:
+        signal_sq = torch.as_tensor(signal_sq, device=scaled.device, dtype=torch.float32).reshape(())
+    state["beta2_update_sq_ema"] = signal_sq * beta2 + current_update_sq.detach() * (1 - beta2)
 
     if beta1 is not None:
         exp_avg.mul_(beta1).add_(scaled, alpha=1 - beta1)
@@ -138,7 +148,7 @@ def run_scenario(name, grad_schedule, group_overrides=None):
         m = adafactor_step(grad, state, group)
         if t % max(1, len(grad_schedule) // 12) == 0 or t == len(grad_schedule) - 1:
             dc = m["dir_consistency"]
-            dc_s = f"{dc:7.4f}" if dc is not None else "    n/a"
+            dc_s = f"{dc:7.4f}"
             print(
                 f"{t:4d}  {m['grad_rms']:.2e}  {m['lr']:.2e}  {m['v_row_mean']:.2e}  "
                 f"{m['clip_denom']:6.3f}  {m['eff_precond']:10.4f}  {m['eff_total']:9.4f}  {dc_s}"
