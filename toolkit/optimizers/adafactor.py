@@ -149,6 +149,8 @@ class Adafactor(torch.optim.Optimizer):
         decay_rate=-0.8,
         beta1=None,
         beta2=0.99,
+        beta2_adaptive: bool = False,
+        beta2_min: float = 0.9,
         rms_max_decay_rate=0.97,
         weight_decay=0.0,
         weight_decay_increment=0.0,
@@ -176,6 +178,8 @@ class Adafactor(torch.optim.Optimizer):
             "clip_threshold": clip_threshold,
             "beta1": beta1,
             "beta2": beta2,
+            "beta2_adaptive": beta2_adaptive,
+            "beta2_min": beta2_min,
             "rms_max_decay_rate": rms_max_decay_rate,
             "weight_decay": weight_decay,
             "weight_decay_increment": weight_decay_increment,
@@ -220,6 +224,8 @@ class Adafactor(torch.optim.Optimizer):
         self._warmup_steps = warmup_steps
         self._beta1 = beta1
         self._beta2 = beta2
+        self._beta2_adaptive = beta2_adaptive
+        self._beta2_min = beta2_min
         self._factored = factored
         self._emergency_brake = emergency_brake
         self.is_stochastic_rounding_accumulation = False
@@ -314,6 +320,22 @@ class Adafactor(torch.optim.Optimizer):
         if is_debug_enabled():
             print_acc(f"Adafactor: applied runtime beta2={value}")
 
+    def set_beta2_adaptive(self, value: bool) -> None:
+        """Enable/disable adaptive beta2 based on grad activity."""
+        self._beta2_adaptive = bool(value)
+        for group in self.param_groups:
+            group["beta2_adaptive"] = self._beta2_adaptive
+        if is_debug_enabled():
+            print_acc(f"Adafactor: applied runtime beta2_adaptive={self._beta2_adaptive}")
+
+    def set_beta2_min(self, value: float) -> None:
+        """Update floor for adaptive beta2."""
+        self._beta2_min = float(value)
+        for group in self.param_groups:
+            group["beta2_min"] = self._beta2_min
+        if is_debug_enabled():
+            print_acc(f"Adafactor: applied runtime beta2_min={self._beta2_min}")
+
     def load_state_dict(self, state_dict):
         config_keys = (
             "lr",
@@ -329,6 +351,8 @@ class Adafactor(torch.optim.Optimizer):
             "warmup_steps",
             "beta1",
             "beta2",
+            "beta2_adaptive",
+            "beta2_min",
             "factored",
             "emergency_brake",
         )
@@ -808,6 +832,25 @@ class Adafactor(torch.optim.Optimizer):
             group[key] = current
         group[key] = torch.minimum(current, candidate)
 
+    @staticmethod
+    def _effective_beta2(group, grad_rms: torch.Tensor, eps0: float) -> float:
+        beta2 = float(group["beta2"])
+        if not group.get("beta2_adaptive", False):
+            return beta2
+        beta2_min = float(group.get("beta2_min", 0.9))
+        beta2_min = max(0.0, min(beta2, beta2_min))
+
+        grad_rms_max = group.get("grad_rms_max")
+        if grad_rms_max is None:
+            return beta2
+        max_val = grad_rms_max.item() if isinstance(grad_rms_max, torch.Tensor) else float(grad_rms_max)
+        if max_val <= eps0:
+            return beta2_min
+
+        grad_val = grad_rms.item() if isinstance(grad_rms, torch.Tensor) else float(grad_rms)
+        activity = max(0.0, min(1.0, grad_val / (max_val + eps0)))
+        return beta2_min + (beta2 - beta2_min) * activity
+
     def _finalize_group_step_metrics(
         self,
         group,
@@ -895,7 +938,7 @@ class Adafactor(torch.optim.Optimizer):
         group["step_efficiency"] = u_rms_t / (u_max + eps_t)
         group["dynamic_gain"] = u_rms_t / (g_mean_t + eps_t)
 
-        for key in ("effective_lr", "effective_wd", "precond_gain", "momentum_gain"):
+        for key in ("effective_lr", "effective_wd", "precond_gain", "momentum_gain", "beta2_effective"):
             val = self._get_group_scalars(
                 group, key, default=0.0, reduction='mean', params=params_list
             )
@@ -1077,8 +1120,8 @@ class Adafactor(torch.optim.Optimizer):
                 gr = state["grad_rms"]
                 self._group_running_max_update(group, "grad_rms_max", gr)
 
-                beta2 = group["beta2"]
                 eps0 = group["eps"][0]
+                beta2 = self._effective_beta2(group, gr, eps0)
                 update = (grad**2) + eps0
                 if factored:
                     exp_avg_sq_row = state["exp_avg_sq_row"]
@@ -1129,6 +1172,7 @@ class Adafactor(torch.optim.Optimizer):
                     signal_sq = current_update_sq.detach()
                 gns_tensor = (current_update_sq - signal_sq) / (signal_sq + 1e-12)
                 state["beta2_update_sq_ema"] = signal_sq * beta2 + current_update_sq.detach() * (1.0 - beta2)
+                state["beta2_effective"] = float(beta2)
 
                 if use_first_moment:
                     exp_avg = state["exp_avg"]
@@ -1491,7 +1535,7 @@ class Adafactor(torch.optim.Optimizer):
         """Get beta2 (second-moment coefficient) for each parameter group."""
         out = []
         for group in self.param_groups:
-            out.append(float(group.get("beta2", self._beta2)))
+            out.append(float(group.get("beta2_effective", group.get("beta2", self._beta2))))
         return out
 
     def get_mean_beta2(self):
