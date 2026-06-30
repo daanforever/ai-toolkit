@@ -30,7 +30,7 @@ const TIMESTEP_WEIGHTING_OPTIONS = [
   { value: 'gaussian_bimodal', label: 'Gaussian Bimodal' },
 ];
 const WEIGHT_DECAY_MODE_OPTIONS: Array<{ value: WeightDecayMode; label: string }> = [
-  { value: 'absolute', label: 'Absolute (lr * wd)' },
+  { value: 'absolute', label: 'Absolute (wd * lr)' },
   { value: 'update_rms', label: 'Update RMS (wd * update_rms)' },
   { value: 'param_rms', label: 'Param RMS (wd * param_rms)' },
 ];

@@ -47,7 +47,7 @@ class Adafactor(torch.optim.Optimizer):
             of parameter RMS (``rms_max`` on each param group) and running min (``rms_min``), which normalizes each parameter's scale
             to (0, 1] for LR (useful for mixed-scale groups e.g. LoRA). Group-level metrics
             (``rms_ema``, ``update_rms``, ``lr_mean``, ``gns``, ``step_efficiency``, ``dynamic_gain``,
-            ``effective_lr``, ``precond_gain``, ``momentum_gain``, ``beta2``, etc.)
+            ``effective_lr``, ``effective_wd``, ``precond_gain``, ``momentum_gain``, ``beta2``, etc.)
             live on ``param_groups`` rather than in per-parameter ``state``.
         beta1 (`float`, *optional*):
             Coefficient used for computing running averages of gradient
@@ -60,7 +60,7 @@ class Adafactor(torch.optim.Optimizer):
             so it takes effect starting from the next step).
         weight_decay_mode (`str`, *optional*, defaults to `"absolute"`):
             Weight decay mode: `"update_rms"` uses update RMS, `"param_rms"` uses parameter RMS,
-            `"absolute"` uses decoupled factor `(1 - lr * weight_decay)`.
+            `"absolute"` uses decoupled factor `(1 - weight_decay * lr)`.
             Note: `"update_rms"` and `"param_rms"` intentionally do not multiply by `lr` because
             they are designed as RMS-conditioned shrinkage modes with their own scale semantics.
         scale_parameter (`bool`, *optional*, defaults to `False`):
@@ -895,7 +895,7 @@ class Adafactor(torch.optim.Optimizer):
         group["step_efficiency"] = u_rms_t / (u_max + eps_t)
         group["dynamic_gain"] = u_rms_t / (g_mean_t + eps_t)
 
-        for key in ("effective_lr", "precond_gain", "momentum_gain"):
+        for key in ("effective_lr", "effective_wd", "precond_gain", "momentum_gain"):
             val = self._get_group_scalars(
                 group, key, default=0.0, reduction='mean', params=params_list
             )
@@ -1163,6 +1163,7 @@ class Adafactor(torch.optim.Optimizer):
                     state.pop("momentum_gain", None)
 
                 if group["weight_decay"] != 0:
+                    wd = group["weight_decay"]
                     weight_decay_mode = self._validate_weight_decay_mode(
                         group.get("weight_decay_mode", "absolute")
                     )
@@ -1170,13 +1171,22 @@ class Adafactor(torch.optim.Optimizer):
                         # Intentionally no `lr` here: this mode is RMS-conditioned shrinkage by design.
                         # With typical defaults (lr=1e-4, update_rms~5e-5..1e-4, weight_decay=1e-4),
                         # multiplier (1 - wd * update_rms) stays ~0.99999999 and cannot flip sign.
-                        p_data_fp32.mul_(1.0 - group["weight_decay"] * update_rms)
+                        effective_wd = wd * update_rms
+                        p_data_fp32.mul_(1.0 - effective_wd)
                     elif weight_decay_mode == "param_rms":
                         # Intentionally no `lr` here: this mode is RMS-conditioned shrinkage by design.
                         # For param_rms mode under the same defaults and RMS~1, (1 - wd * rms) ~= 0.9999 (>0).
-                        p_data_fp32.mul_(1.0 - group["weight_decay"] * rms_t)
+                        effective_wd = wd * rms_t
+                        p_data_fp32.mul_(1.0 - effective_wd)
                     else:
-                        p_data_fp32.mul_(1.0 - lr * group["weight_decay"])
+                        effective_wd = wd * lr
+                        p_data_fp32.mul_(1.0 - effective_wd)
+                    if isinstance(effective_wd, torch.Tensor):
+                        state["effective_wd"] = effective_wd.detach().item()
+                    else:
+                        state["effective_wd"] = float(effective_wd)
+                else:
+                    state.pop("effective_wd", None)
 
                 p_data_fp32.add_(-update)
 
@@ -1332,6 +1342,19 @@ class Adafactor(torch.optim.Optimizer):
     def get_mean_effective_lr(self):
         """Mean effective_lr across all parameter groups."""
         return self._scalars_per_group_to_mean(self.get_effective_lr())
+
+    def get_effective_wd(self):
+        """
+        Weighted mean of per-param effective weight decay per group (the scalar in ``p *= (1 - effective_wd)``).
+        """
+        out = []
+        for group in self.param_groups:
+            out.append(self._group_scalar_item(group, "effective_wd", 0.0))
+        return out
+
+    def get_mean_effective_wd(self):
+        """Mean effective_wd across all parameter groups."""
+        return self._scalars_per_group_to_mean(self.get_effective_wd())
 
     def get_precond_gain(self):
         """

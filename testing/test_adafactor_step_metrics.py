@@ -1,4 +1,4 @@
-"""Adafactor beta2-path step metrics: effective_lr, precond_gain, momentum_gain."""
+"""Adafactor beta2-path step metrics: effective_lr, effective_wd, precond_gain, momentum_gain."""
 import math
 
 import torch
@@ -43,6 +43,19 @@ def test_momentum_gain_positive_when_beta1_none():
     assert opt.get_mean_momentum_gain() > 0.0
 
 
+def test_effective_wd_positive_with_weight_decay():
+    opt, p = _make_opt(
+        beta1=None,
+        weight_decay=0.1,
+        relative_step=False,
+        scale_parameter=False,
+        warmup_init=False,
+        lr=1e-4,
+    )
+    _step_with_grad(opt, p, 1e-3)
+    assert opt.get_mean_effective_wd() > 0.0
+
+
 def test_decomposition_approx_one_step():
     opt, p = _make_opt()
     for _ in range(30):
@@ -82,10 +95,10 @@ def test_mean_dir_consistency_returns_float_without_dir_consistency_state():
 
 
 def test_step_metrics_stored_as_float_not_tensor():
-    opt, p = _make_opt()
+    opt, p = _make_opt(weight_decay=0.1)
     _step_with_grad(opt, p, 1e-4)
     st = opt.state[p]
-    for key in ("effective_lr", "precond_gain", "momentum_gain"):
+    for key in ("effective_lr", "effective_wd", "precond_gain", "momentum_gain"):
         assert key in st
         assert isinstance(st[key], float)
     assert "update_hat" not in st

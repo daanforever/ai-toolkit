@@ -49,8 +49,36 @@ def test_weight_decay_mode_absolute_uses_lr():
     before = param.detach().clone()
     param.grad = torch.zeros_like(param)
     opt.step()
-    expected = before * (1.0 - 0.2 * 0.1)
+    expected = before * (1.0 - 0.1 * 0.2)
     assert torch.allclose(param, expected)
+
+
+def test_effective_wd_mode_update_rms_uses_update_scale():
+    opt, param = _make_opt("update_rms", lr=0.2, wd=0.1)
+    param.grad = torch.zeros_like(param)
+    opt.step()
+    assert opt.get_mean_effective_wd() == pytest.approx(0.0)
+
+
+def test_effective_wd_mode_param_rms_uses_parameter_scale():
+    opt, param = _make_opt("param_rms", lr=0.2, wd=0.1)
+    param.grad = torch.zeros_like(param)
+    opt.step()
+    assert opt.get_mean_effective_wd() == pytest.approx(0.1)
+
+
+def test_effective_wd_mode_absolute_uses_lr_scale():
+    opt, param = _make_opt("absolute", lr=0.2, wd=0.1)
+    param.grad = torch.zeros_like(param)
+    opt.step()
+    assert opt.get_mean_effective_wd() == pytest.approx(0.1 * 0.2)
+
+
+def test_effective_wd_zero_when_weight_decay_zero():
+    opt, param = _make_opt("absolute", lr=0.2, wd=0.0)
+    param.grad = torch.zeros_like(param)
+    opt.step()
+    assert opt.get_mean_effective_wd() == pytest.approx(0.0)
 
 
 def test_set_weight_decay_mode_updates_groups():
@@ -66,16 +94,18 @@ def test_weight_decay_increment_applies_after_step():
     param.grad = torch.zeros_like(param)
     opt.step()
 
-    expected_step_1 = before_step_1 * (1.0 - 0.2 * 0.1)
+    expected_step_1 = before_step_1 * (1.0 - 0.1 * 0.2)
     assert torch.allclose(param, expected_step_1)
+    assert opt.get_mean_effective_wd() == pytest.approx(0.1 * 0.2)
     assert opt.get_weight_decay() == pytest.approx(0.15)
 
     before_step_2 = param.detach().clone()
     param.grad = torch.zeros_like(param)
     opt.step()
 
-    expected_step_2 = before_step_2 * (1.0 - 0.2 * 0.15)
+    expected_step_2 = before_step_2 * (1.0 - 0.15 * 0.2)
     assert torch.allclose(param, expected_step_2)
+    assert opt.get_mean_effective_wd() == pytest.approx(0.15 * 0.2)
     assert opt.get_weight_decay() == pytest.approx(0.2)
 
 

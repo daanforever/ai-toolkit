@@ -1988,6 +1988,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 step_efficiency = 0.0  # Step efficiency: update_rms / update_rms_max (Adafactor)
                 dynamic_gain = 0.0  # Dynamic gain (Adafactor)
                 effective_lr = 0.0  # Weighted mean update_rms/grad_rms per param (Adafactor)
+                effective_wd = 0.0  # Weighted mean effective weight decay per param (Adafactor)
                 precond_gain = 0.0  # Preconditioner+clip gain before lr/momentum (Adafactor)
                 momentum_gain = 0.0  # Momentum gain: final/scaled update (Adafactor)
                 beta1 = 0.0  # Momentum coefficient (Adafactor)
@@ -2041,6 +2042,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         dynamic_gain = optimizer.get_mean_dynamic_gain()
                     if hasattr(optimizer, 'get_mean_effective_lr'):
                         effective_lr = optimizer.get_mean_effective_lr()
+                    if hasattr(optimizer, 'get_mean_effective_wd'):
+                        effective_wd = optimizer.get_mean_effective_wd()
                     if hasattr(optimizer, 'get_mean_precond_gain'):
                         precond_gain = optimizer.get_mean_precond_gain()
                     if hasattr(optimizer, 'get_mean_momentum_gain'):
@@ -2152,6 +2155,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                             self.writer.add_scalar(f"train/step_efficiency", step_efficiency, self.step_num)
                                             self.writer.add_scalar(f"train/dynamic_gain", dynamic_gain, self.step_num)
                                             self.writer.add_scalar(f"train/effective_lr", effective_lr, self.step_num)
+                                            self.writer.add_scalar(f"train/effective_wd", effective_wd, self.step_num)
                                             self.writer.add_scalar(f"train/precond_gain", precond_gain, self.step_num)
                                             self.writer.add_scalar(f"train/momentum_gain", momentum_gain, self.step_num)
                                             self.writer.add_scalar(f"train/beta1", beta1, self.step_num)
@@ -2228,6 +2232,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
                             self.logger.log({
                                 'train/effective_lr': effective_lr,
+                            })
+                            self.logger.log({
+                                'train/effective_wd': effective_wd,
                             })
 
                             self.logger.log({
@@ -2316,6 +2323,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
                             self.logger.log({
                                 'train/effective_lr': effective_lr,
+                            })
+                            self.logger.log({
+                                'train/effective_wd': effective_wd,
                             })
 
                             self.logger.log({

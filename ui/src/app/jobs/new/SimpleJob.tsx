@@ -34,7 +34,7 @@ type Props = {
 
 const isDev = process.env.NODE_ENV === 'development';
 const weightDecayModeOptions = [
-  { value: 'absolute', label: 'Absolute (lr * wd)' },
+  { value: 'absolute', label: 'Absolute (wd * lr)' },
   { value: 'update_rms', label: 'Update RMS (wd * update_rms)' },
   { value: 'param_rms', label: 'Param RMS (wd * param_rms)' },
 ];
