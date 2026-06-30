@@ -1015,6 +1015,8 @@ class Adafactor(torch.optim.Optimizer):
                 if grad.is_sparse:
                     raise RuntimeError(
                         "Adafactor does not support sparse gradients.")
+                if not torch.isfinite(grad).all():
+                    grad = torch.nan_to_num(grad, nan=0.0, posinf=0.0, neginf=0.0)
                 
                 # if p has atts _scale then it is quantized. We need to divide the grad by the scale
                 # if hasattr(p, "_scale"):
@@ -1141,6 +1143,9 @@ class Adafactor(torch.optim.Optimizer):
 
                 else:
                     update = scaled_update
+
+                if not torch.isfinite(update).all():
+                    update = torch.nan_to_num(update, nan=0.0, posinf=0.0, neginf=0.0)
 
                 update_rms = self._rms(update)
 
