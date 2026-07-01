@@ -1126,7 +1126,7 @@ class Adafactor(torch.optim.Optimizer):
                 self._group_running_max_update(group, "grad_rms_max", gr)
 
                 eps0 = group["eps"][0]
-                beta2 = self._effective_beta2(group, gr, eps0, state["step"])
+                beta2 = self._effective_beta2(group, gr, eps0, state.get("step", 1))
                 update = (grad**2) + eps0
                 if factored:
                     exp_avg_sq_row = state["exp_avg_sq_row"]
