@@ -1256,9 +1256,8 @@ class Adafactor(torch.optim.Optimizer):
                     )
                 )
 
-            group["weight_decay"] = group.get("weight_decay", 0.0) + group.get(
-                "weight_decay_increment", 0.0
-            )
+            group["weight_decay"] = max(0,  group.get("weight_decay", 0.0) + group.get(
+                "weight_decay_increment", 0.0))
             self._finalize_group_step_metrics(group, metrics)
 
         return loss
