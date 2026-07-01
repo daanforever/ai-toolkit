@@ -2,10 +2,77 @@
 # Attention: to_q, to_k, to_v, to_out.0; FeedForward: w1, w2, w3 (see diffsynth/models/z_image_dit.py).
 # Load convention: prefix "diffusion_model" (diffsynth/utils/lora/general.py).
 
-from typing import Dict, Any
+import re
+from collections import OrderedDict
+from typing import Dict, Any, List, Optional
 
 # Class names that contain the linear layers we want for LoRA (toolkit matches by __class__.__name__).
 TARGET_LORA_MODULES = ["Attention", "FeedForward"]
+
+_DIT_BLOCK_KEY_PATTERNS = (
+    re.compile(
+        r"^(?:transformer|lora_transformer)\$\$_inner_dit\$\$"
+        r"(layers|noise_refiner|context_refiner)\$\$(\d+)(?:\$\$|$)"
+    ),
+    re.compile(
+        r"^(?:transformer|lora_transformer)\._inner_dit\."
+        r"(layers|noise_refiner|context_refiner)\.(\d+)(?:\.|$)"
+    ),
+    re.compile(
+        r"^(?:lora_unet|lora_transformer)__inner_dit_"
+        r"(layers|noise_refiner|context_refiner)_(\d+)(?:_|$)"
+    ),
+)
+
+
+def parse_lora_block_key(lora_name: str) -> Optional[str]:
+    """Parse zimage DiT block key from LoRA module name.
+
+    Supported formats:
+    - transformer$$_inner_dit$$layers$$0$$attention$$to_q
+    - lora_unet__inner_dit_layers_0_attention_to_q
+    - lora_transformer__inner_dit_layers_0_attention_to_q
+    """
+    for pattern in _DIT_BLOCK_KEY_PATTERNS:
+        match = pattern.match(lora_name)
+        if match is None:
+            continue
+        block_name, block_index = match.groups()
+        return f"{block_name}_{int(block_index)}"
+    return None
+
+
+def _block_sort_key(block_key: str):
+    if block_key == "other":
+        return (99, 0, block_key)
+    if "_" not in block_key:
+        return (98, 0, block_key)
+    prefix, suffix = block_key.rsplit("_", 1)
+    if not suffix.isdigit():
+        return (98, 0, block_key)
+    prefix_order = {
+        "layers": 0,
+        "noise_refiner": 1,
+        "context_refiner": 2,
+    }.get(prefix, 50)
+    return (prefix_order, int(suffix), block_key)
+
+
+def group_loras_by_block(loras: List[Any]) -> Dict[str, List[Any]]:
+    grouped: Dict[str, List[Any]] = {}
+    for lora in loras:
+        block_key = parse_lora_block_key(lora.lora_name)
+        if block_key is None:
+            block_key = "other"
+            print(
+                f"[zimage_diffsynth] unknown DiT LoRA name for param grouping: {lora.lora_name}"
+            )
+        grouped.setdefault(block_key, []).append(lora)
+
+    ordered = OrderedDict()
+    for block_key in sorted(grouped.keys(), key=_block_sort_key):
+        ordered[block_key] = grouped[block_key]
+    return ordered
 
 
 def convert_lora_weights_before_save(state_dict: Dict[str, Any]) -> Dict[str, Any]:

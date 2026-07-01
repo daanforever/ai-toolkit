@@ -698,8 +698,16 @@ class LoRASpecialNetwork(ToolkitNetworkMixin, LoRANetwork):
         # call Lora prepare_optimizer_params
         all_params = super().prepare_optimizer_params(text_encoder_lr, unet_lr, default_lr)
 
+        base_model = self.base_model_ref() if self.base_model_ref is not None else None
+        if base_model is not None and self.unet_loras:
+            custom_unet_groups = base_model.get_lora_optimizer_param_groups(
+                self, unet_lr, default_lr
+            )
+            if custom_unet_groups is not None:
+                text_encoder_groups = 1 if self.text_encoder_loras else 0
+                all_params = all_params[:text_encoder_groups] + custom_unet_groups
+
         if self.full_train_in_out:
-            base_model = self.base_model_ref() if self.base_model_ref is not None else None
             if self.is_pixart or self.is_auraflow or self.is_flux or (base_model is not None and base_model.arch == "wan21"):
                 all_params.append({"lr": unet_lr, "params": list(self.transformer_pos_embed.parameters())})
                 all_params.append({"lr": unet_lr, "params": list(self.transformer_proj_out.parameters())})

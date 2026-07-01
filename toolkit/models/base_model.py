@@ -1620,6 +1620,10 @@ class BaseModel:
     def get_transformer_block_names(self) -> Optional[List[str]]:
         # override in child classes to get transformer block names for lora targeting
         return None
+
+    def get_lora_optimizer_param_groups(self, network, unet_lr, default_lr):
+        # override in child classes to customize LoRA param-group packing
+        return None
     
     def get_base_model_version(self) -> str:
         # override in child classes to get the base model version

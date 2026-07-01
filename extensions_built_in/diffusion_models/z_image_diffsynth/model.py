@@ -614,6 +614,35 @@ class ZImageDiffSynthModel(BaseModel):
             names.append("context_refiner")
         return names
 
+    def get_lora_optimizer_param_groups(self, network, unet_lr, default_lr):
+        unet_loras = getattr(network, "unet_loras", None)
+        if not unet_loras:
+            return None
+
+        grouped_loras = lora_mod.group_loras_by_block(unet_loras)
+        if not grouped_loras:
+            return None
+
+        if "other" in grouped_loras:
+            self.print_and_status_update(
+                f"[zimage_diffsynth] LoRA block grouping fallback=other count={len(grouped_loras['other'])}"
+            )
+
+        lr_value = unet_lr if unet_lr is not None else default_lr
+        param_groups = []
+        for _, block_loras in grouped_loras.items():
+            block_params = []
+            for lora in block_loras:
+                block_params.extend(lora.parameters())
+            if not block_params:
+                continue
+            group = {"params": block_params}
+            if lr_value is not None:
+                group["lr"] = lr_value
+            param_groups.append(group)
+
+        return param_groups or None
+
     def convert_lora_weights_before_save(self, state_dict):
         return lora_mod.convert_lora_weights_before_save(state_dict)
 
