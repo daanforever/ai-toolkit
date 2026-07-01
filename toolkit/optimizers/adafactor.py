@@ -421,8 +421,6 @@ class Adafactor(torch.optim.Optimizer):
                 device = ref.device
                 dtype = ref.dtype
 
-                state["step"] = state.get("step", 0) + 1
-
                 if use_first_moment:
                     if (
                         "exp_avg" not in state
@@ -1079,7 +1077,7 @@ class Adafactor(torch.optim.Optimizer):
                 # State Initialization
 
                 if len(state) == 0:
-                    # state["step"] = 0
+                    state["step"] = 0
 
                     if use_first_moment:
                         # Exponential moving average of gradient values
@@ -1108,6 +1106,8 @@ class Adafactor(torch.optim.Optimizer):
                     else:
                         state["exp_avg_sq"] = state["exp_avg_sq"].to(grad)
 
+                state["step"] += 1
+
                 p_data_fp32 = p
                 is_quantized = isinstance(p_data_fp32, QBytesTensor)
                 
@@ -1126,7 +1126,7 @@ class Adafactor(torch.optim.Optimizer):
                 self._group_running_max_update(group, "grad_rms_max", gr)
 
                 eps0 = group["eps"][0]
-                beta2 = self._effective_beta2(group, gr, eps0, state.get("step", 1))
+                beta2 = self._effective_beta2(group, gr, eps0, state["step"])
                 update = (grad**2) + eps0
                 if factored:
                     exp_avg_sq_row = state["exp_avg_sq_row"]
