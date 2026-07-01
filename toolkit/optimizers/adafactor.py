@@ -833,10 +833,13 @@ class Adafactor(torch.optim.Optimizer):
         group[key] = torch.minimum(current, candidate)
 
     @staticmethod
-    def _effective_beta2(group, grad_rms: torch.Tensor, eps0: float) -> float:
+    def _effective_beta2(group, grad_rms: torch.Tensor, eps0: float, step: int) -> float:
         beta2 = float(group["beta2"])
+
         if not group.get("beta2_adaptive", False):
-            return beta2
+            scheduled_beta2 = 1.0 - (0.5 / max(1, int(step)))
+            return min(max(scheduled_beta2, 0.9), 0.999)
+            
         beta2_min = float(group.get("beta2_min", 0.9))
         beta2_min = max(0.0, min(beta2, beta2_min))
 
@@ -1066,6 +1069,8 @@ class Adafactor(torch.optim.Optimizer):
                 #     grad = grad / p._scale
 
                 state = self.state[p]
+                state["step"] = state.get("step", 0) + 1
+                
                 grad_shape = grad.shape
 
                 factored, use_first_moment = self._get_options(
@@ -1110,7 +1115,6 @@ class Adafactor(torch.optim.Optimizer):
                 if p.dtype != torch.float32:
                     p_data_fp32 = p_data_fp32.clone().float()
 
-                # state["step"] += 1
                 state["RMS"] = self._rms(p_data_fp32)
                 rms_t = state["RMS"]
                 self._group_running_max_update(group, "rms_max", rms_t)
@@ -1121,7 +1125,7 @@ class Adafactor(torch.optim.Optimizer):
                 self._group_running_max_update(group, "grad_rms_max", gr)
 
                 eps0 = group["eps"][0]
-                beta2 = self._effective_beta2(group, gr, eps0)
+                beta2 = self._effective_beta2(group, gr, eps0, state["step"])
                 update = (grad**2) + eps0
                 if factored:
                     exp_avg_sq_row = state["exp_avg_sq_row"]
