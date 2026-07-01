@@ -421,6 +421,8 @@ class Adafactor(torch.optim.Optimizer):
                 device = ref.device
                 dtype = ref.dtype
 
+                state["step"] = state.get("step", 0) + 1
+
                 if use_first_moment:
                     if (
                         "exp_avg" not in state
@@ -1069,7 +1071,6 @@ class Adafactor(torch.optim.Optimizer):
                 #     grad = grad / p._scale
 
                 state = self.state[p]
-                state["step"] = state.get("step", 0) + 1
                 
                 grad_shape = grad.shape
 
