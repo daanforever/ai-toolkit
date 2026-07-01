@@ -141,6 +141,46 @@ def copy_stochastic(target: torch.Tensor, source: torch.Tensor, eps: Optional[fl
         assert target.device.type != 'cpu', "Target is on cpu!"
         assert source.device.type != 'cpu', "Source is on cpu!"
         
+        if isinstance(target, QBytesTensor):
+            target_dtype = target._data.dtype
+            device = target._data.device
+            source = source.to(device)
+            
+            # Compute new scale
+            new_scale = compute_scale_for_dtype(source, target_dtype)
+            if not isinstance(new_scale, torch.Tensor):
+                new_scale = torch.tensor(new_scale, device=device, dtype=target._scale.dtype)
+            
+            scaled_source = source / new_scale
+            
+            if target_dtype == torch.int8:
+                noise = torch.rand_like(scaled_source) - 0.5
+                quantized_data = torch.clamp(torch.round(scaled_source + noise), -128, 127).to(target_dtype)
+            elif target_dtype == torch.uint8:
+                noise = torch.rand_like(scaled_source) - 0.5
+                quantized_data = torch.clamp(torch.round(scaled_source + noise), 0, 255).to(target_dtype)
+            elif target_dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+                mantissa_bits, _ = get_format_params(target_dtype)
+                _, exponent = torch.frexp(scaled_source)
+                ulp = 2.0 ** (exponent - mantissa_bits - 1)
+                min_ulp = torch.finfo(target_dtype).tiny * torch.finfo(target_dtype).eps
+                ulp = torch.clamp(ulp, min=min_ulp)
+                noise = (torch.rand_like(scaled_source) - 0.5) * ulp
+                result_float = scaled_source + noise
+                
+                if target_dtype == torch.float8_e4m3fn:
+                    result_float.clamp_(-448.0, 448.0)
+                elif target_dtype == torch.float8_e5m2:
+                    result_float.clamp_(-57344.0, 57344.0)
+                    
+                quantized_data = result_float.to(target_dtype)
+            else:
+                raise ValueError(f"Unsupported dtype for quantized stochastic rounding: {target_dtype}")
+                
+            target._data.copy_(quantized_data)
+            target._scale.copy_(new_scale)
+            return
+            
         if target.dtype == torch.float32:
             target.copy_(source)
             return
@@ -149,12 +189,18 @@ def copy_stochastic(target: torch.Tensor, source: torch.Tensor, eps: Optional[fl
             return
 
         mantissa_bits, _ = get_format_params(target.dtype)
-        round_factor = 2 ** (23 - mantissa_bits)
-
-        # Add uniform noise for stochastic rounding
-        noise = torch.rand_like(source, device=source.device) - 0.5
-        rounded = torch.round(source * round_factor + noise)
-        result_float = rounded / round_factor
+        
+        # Calculate ULP (Unit in the Last Place) based on the exponent
+        _, exponent = torch.frexp(source)
+        ulp = 2.0 ** (exponent - mantissa_bits - 1)
+        
+        # Handle subnormal numbers by clamping to min ULP
+        min_ulp = torch.finfo(target.dtype).tiny * torch.finfo(target.dtype).eps
+        ulp = torch.clamp(ulp, min=min_ulp)
+        
+        # Add uniform noise in [-0.5 * ULP, 0.5 * ULP]
+        noise = (torch.rand_like(source, device=source.device) - 0.5) * ulp
+        result_float = source + noise
 
         # Clamp for float8
         if target.dtype == torch.float8_e4m3fn:
