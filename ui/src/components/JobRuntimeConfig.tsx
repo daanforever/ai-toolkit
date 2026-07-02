@@ -156,7 +156,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
       : '';
   const fixedCycleWeightSigma =
     trainAny?.fixed_cycle_weight_sigma != null &&
-    Number.isFinite(Number(trainAny.fixed_cycle_weight_sigma))
+      Number.isFinite(Number(trainAny.fixed_cycle_weight_sigma))
       ? Number(trainAny.fixed_cycle_weight_sigma)
       : 372.8;
   const batchSize = trainAny?.batch_size != null
@@ -262,30 +262,25 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
       }
       const peaksArr = fixedCycleWeightPeaksStr.trim()
         ? fixedCycleWeightPeaksStr
-            .split(',')
-            .map((s) => parseFloat(s.trim()))
-            .filter((n) => !Number.isNaN(n))
+          .split(',')
+          .map((s) => parseFloat(s.trim()))
+          .filter((n) => !Number.isNaN(n))
         : [];
       const peaksOut =
         peaksArr.length > 0 ? peaksArr : null;
       let seedOut: number | null = null;
       if (fixedCycleSeedStr.trim() !== '') {
         const s = parseInt(fixedCycleSeedStr.trim(), 10);
-        if (!Number.isInteger(s) || s < 0) {
+        if (!Number.isInteger(s)) {
           setApplyStatus('error');
-          setErrorMessage(
-            'Fixed cycle seed must be a non-negative integer or empty'
-          );
+          setErrorMessage('Fixed cycle seed must be an integer or empty');
           return;
         }
         seedOut = s;
       }
-      if (
-        !Number.isFinite(fixedCycleWeightSigma) ||
-        fixedCycleWeightSigma <= 0
-      ) {
+      if (!Number.isFinite(fixedCycleWeightSigma)) {
         setApplyStatus('error');
-        setErrorMessage('Fixed cycle weight sigma must be a positive number');
+        setErrorMessage('Fixed cycle weight sigma must be a finite number');
         return;
       }
       const tr = process.train as Record<string, unknown>;
@@ -446,7 +441,6 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
               <p className="text-xs text-gray-400">LR</p>
               <input
                 type="number"
-                min={1e-6}
                 step="any"
                 placeholder="e.g. 1e-4"
                 value={lr ?? ''}
@@ -465,7 +459,6 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
               <p className="text-xs text-gray-400">Min LR</p>
               <input
                 type="number"
-                min={1e-6}
                 step="any"
                 placeholder="e.g. 1e-6"
                 value={minLr ?? ''}
@@ -483,8 +476,6 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
             <p className="text-xs text-gray-400">Min SNR gamma</p>
             <input
               type="number"
-              min={0}
-              max={100}
               step="any"
               placeholder="e.g. 2 or 5"
               value={minSnrGamma}
@@ -503,7 +494,6 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
             <p className="text-xs text-gray-400">Weight decay</p>
             <input
               type="number"
-              min={0}
               step="any"
               placeholder="e.g. 0.01 or 0"
               value={weightDecay}
@@ -519,7 +509,6 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
             <p className="text-xs text-gray-400">Weight decay increment</p>
             <input
               type="number"
-              min={0}
               step="any"
               placeholder="e.g. 0.00001 or 0"
               value={weightDecayIncrement}
@@ -551,10 +540,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
           <div className="space-y-2 flex-1 min-w-[140px]">
             <p className="text-xs text-gray-400">Beta1</p>
             <input
-              type="number"
-              min={0}
-              max={0.999}
-              step="0.01"
+              type="number" step="0.01"
               placeholder="e.g. 0.9"
               value={beta1 ?? ''}
               onChange={(e) => {
@@ -569,10 +555,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
           <div className="space-y-2 flex-1 min-w-[140px]">
             <p className="text-xs text-gray-400">Beta2</p>
             <input
-              type="number"
-              min={0.001}
-              max={0.9999}
-              step="0.001"
+              type="number" step="0.001"
               placeholder="e.g. 0.99"
               value={beta2}
               onChange={(e) => {
@@ -631,16 +614,13 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
             <p className="text-xs text-gray-400">Save every / Sample every / Warmup steps</p>
             <div className="flex items-center gap-2 flex-wrap">
               <input
-                type="number"
-                min={1}
-                max={10000}
-                step={1}
+                type="number" step={1}
                 placeholder="e.g. 250"
                 value={saveEvery}
                 onChange={(e) => {
                   const v = e.target.value.trim();
                   const num = v === '' ? 250 : parseInt(v, 10);
-                  if (Number.isInteger(num) && num >= 1) {
+                  if (Number.isInteger(num)) {
                     setValue(num, 'config.process[0].save.save_every');
                     setApplyStatus('idle');
                   }
@@ -648,16 +628,13 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
                 className="rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none min-w-[120px]"
               />
               <input
-                type="number"
-                min={1}
-                max={10000}
-                step={1}
+                type="number" step={1}
                 placeholder="e.g. 250"
                 value={sampleEvery}
                 onChange={(e) => {
                   const v = e.target.value.trim();
                   const num = v === '' ? 250 : parseInt(v, 10);
-                  if (Number.isInteger(num) && num >= 1) {
+                  if (Number.isInteger(num)) {
                     setValue(num, 'config.process[0].sample.sample_every');
                     setApplyStatus('idle');
                   }
@@ -665,16 +642,13 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
                 className="rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none min-w-[120px]"
               />
               <input
-                type="number"
-                min={0}
-                max={100000}
-                step={1}
+                type="number" step={1}
                 placeholder="e.g. 100"
                 value={warmupSteps}
                 onChange={(e) => {
                   const v = e.target.value.trim();
                   const num = v === '' ? 0 : parseInt(v, 10);
-                  if (Number.isInteger(num) && num >= 0) {
+                  if (Number.isInteger(num)) {
                     setValue(num, `${OPTIMIZER_PARAMS_PATH}.warmup_steps`);
                     setApplyStatus('idle');
                   }
@@ -689,10 +663,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
           <div className="space-y-2 flex-1 min-w-[140px]">
             <p className="text-xs text-gray-400">Gaussian mean</p>
             <input
-              type="number"
-              min={0}
-              max={999}
-              step="any"
+              type="number" step="any"
               placeholder="e.g. 500"
               value={gaussianMean}
               onChange={(e) => {
@@ -706,9 +677,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
           <div className="space-y-2 flex-1 min-w-[140px]">
             <p className="text-xs text-gray-400">Gaussian std</p>
             <input
-              type="number"
-              min={1e-6}
-              step="any"
+              type="number" step="any"
               placeholder="e.g. 0.2"
               value={gaussianStd}
               onChange={(e) => {
@@ -726,10 +695,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
             <div className="space-y-2 flex-1 min-w-[140px]">
               <p className="text-xs text-gray-400">Gaussian mean 2</p>
               <input
-                type="number"
-                min={0}
-                max={999}
-                step="any"
+                type="number" step="any"
                 placeholder="e.g. 750"
                 value={gaussianMean2}
                 onChange={(e) => {
@@ -744,7 +710,6 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
               <p className="text-xs text-gray-400">Gaussian std 2</p>
               <input
                 type="number"
-                min={1e-6}
                 step="any"
                 placeholder="e.g. 0.2"
                 value={gaussianStd2}
@@ -781,7 +746,6 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
               </p>
               <input
                 type="number"
-                min={0}
                 step={1}
                 placeholder="empty = no shuffle"
                 value={fixedCycleSeedStr}
@@ -791,7 +755,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
                     setValue(null, `${TRAIN_PATH}.fixed_cycle_seed`);
                   } else {
                     const n = parseInt(v, 10);
-                    if (Number.isInteger(n) && n >= 0) {
+                    if (Number.isInteger(n)) {
                       setValue(n, `${TRAIN_PATH}.fixed_cycle_seed`);
                     }
                   }
@@ -827,7 +791,6 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
               <p className="text-xs text-gray-400">Weight sigma</p>
               <input
                 type="number"
-                min={1e-6}
                 step="any"
                 placeholder="e.g. 372.8"
                 value={fixedCycleWeightSigma}
@@ -848,16 +811,13 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
           <div className="space-y-2 flex-1 min-w-[140px]">
             <p className="text-xs text-gray-400">Batch size</p>
             <input
-              type="number"
-              min={1}
-              max={128}
-              step={1}
+              type="number" step={1}
               placeholder="e.g. 1"
               value={batchSize}
               onChange={(e) => {
                 const v = e.target.value.trim();
                 const num = v === '' ? 1 : parseInt(v, 10);
-                if (Number.isInteger(num) && num >= 1) {
+                if (Number.isInteger(num)) {
                   setValue(num, 'config.process[0].train.batch_size');
                   setApplyStatus('idle');
                 }
@@ -868,16 +828,13 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
           <div className="space-y-2 flex-1 min-w-[140px]">
             <p className="text-xs text-gray-400">Gradient accumulation</p>
             <input
-              type="number"
-              min={1}
-              max={64}
-              step={1}
+              type="number" step={1}
               placeholder="e.g. 1"
               value={gradientAccumulation}
               onChange={(e) => {
                 const v = e.target.value.trim();
                 const num = v === '' ? 1 : parseInt(v, 10);
-                if (Number.isInteger(num) && num >= 1) {
+                if (Number.isInteger(num)) {
                   setValue(num, 'config.process[0].train.gradient_accumulation');
                   setApplyStatus('idle');
                 }
@@ -918,12 +875,11 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
                     <label className="block text-xs text-gray-500">Dataset {name}</label>
                     <input
                       type="number"
-                      min={1e-6}
                       step="any"
                       value={d.network_weight ?? 1}
                       onChange={(e) => {
                         const v = parseFloat(e.target.value);
-                        if (Number.isFinite(v) && v > 0) {
+                        if (Number.isFinite(v)) {
                           setValue(v, `config.process[0].datasets[${i}].network_weight`);
                           setApplyStatus('idle');
                         }

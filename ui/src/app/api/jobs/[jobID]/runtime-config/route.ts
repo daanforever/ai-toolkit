@@ -37,7 +37,7 @@ export async function PATCH(
   if (lr !== undefined) {
     if (typeof lr !== 'number' || !Number.isFinite(lr)) {
       return NextResponse.json(
-        { error: 'lr must be a positive number' },
+        { error: 'lr must be a finite number' },
         { status: 400 }
       );
     }
@@ -48,7 +48,7 @@ export async function PATCH(
   if (minLr !== undefined) {
     if (typeof minLr !== 'number' || !Number.isFinite(minLr)) {
       return NextResponse.json(
-        { error: 'min_lr must be a positive number' },
+        { error: 'min_lr must be a finite number' },
         { status: 400 }
       );
     }
@@ -57,9 +57,9 @@ export async function PATCH(
 
   const gaussianMean = body.gaussian_mean;
   if (gaussianMean !== undefined) {
-    if (typeof gaussianMean !== 'number' || !Number.isFinite(gaussianMean) || gaussianMean < 0 || gaussianMean > 999) {
+    if (typeof gaussianMean !== 'number' || !Number.isFinite(gaussianMean)) {
       return NextResponse.json(
-        { error: 'gaussian_mean must be a number in [0, 999]' },
+        { error: 'gaussian_mean must be a finite number' },
         { status: 400 }
       );
     }
@@ -70,7 +70,7 @@ export async function PATCH(
   if (gaussianStd !== undefined) {
     if (typeof gaussianStd !== 'number' || !Number.isFinite(gaussianStd)) {
       return NextResponse.json(
-        { error: 'gaussian_std must be a positive number' },
+        { error: 'gaussian_std must be a finite number' },
         { status: 400 }
       );
     }
@@ -79,9 +79,9 @@ export async function PATCH(
 
   const gaussianMean2 = body.gaussian_mean_2;
   if (gaussianMean2 !== undefined) {
-    if (typeof gaussianMean2 !== 'number' || !Number.isFinite(gaussianMean2) || gaussianMean2 < 0 || gaussianMean2 > 999) {
+    if (typeof gaussianMean2 !== 'number' || !Number.isFinite(gaussianMean2)) {
       return NextResponse.json(
-        { error: 'gaussian_mean_2 must be a number in [0, 999]' },
+        { error: 'gaussian_mean_2 must be a finite number' },
         { status: 400 }
       );
     }
@@ -109,9 +109,9 @@ export async function PATCH(
     }
     for (let i = 0; i < fixedCycleTimesteps.length; i++) {
       const v = fixedCycleTimesteps[i];
-      if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 1000) {
+      if (typeof v !== 'number' || !Number.isFinite(v)) {
         return NextResponse.json(
-          { error: `fixed_cycle_timesteps[${i}] must be a finite number in [0, 1000]` },
+          { error: `fixed_cycle_timesteps[${i}] must be a finite number` },
           { status: 400 }
         );
       }
@@ -124,9 +124,9 @@ export async function PATCH(
     if (fixedCycleSeed === null) {
       data.runtime_fixed_cycle_seed = null;
     } else {
-      if (typeof fixedCycleSeed !== 'number' || !Number.isFinite(fixedCycleSeed) || !Number.isInteger(fixedCycleSeed) || fixedCycleSeed < 0) {
+      if (typeof fixedCycleSeed !== 'number' || !Number.isFinite(fixedCycleSeed) || !Number.isInteger(fixedCycleSeed)) {
         return NextResponse.json(
-          { error: 'fixed_cycle_seed must be an integer in [0, +inf) or null' },
+          { error: 'fixed_cycle_seed must be an integer or null' },
           { status: 400 }
         );
       }
@@ -147,9 +147,9 @@ export async function PATCH(
       }
       for (let i = 0; i < fixedCycleWeightPeakTimesteps.length; i++) {
         const v = fixedCycleWeightPeakTimesteps[i];
-        if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 1000) {
+        if (typeof v !== 'number' || !Number.isFinite(v)) {
           return NextResponse.json(
-            { error: `fixed_cycle_weight_peak_timesteps[${i}] must be a finite number in [0, 1000]` },
+            { error: `fixed_cycle_weight_peak_timesteps[${i}] must be a finite number` },
             { status: 400 }
           );
         }
@@ -160,9 +160,9 @@ export async function PATCH(
 
   const fixedCycleWeightSigma = body.fixed_cycle_weight_sigma;
   if (fixedCycleWeightSigma !== undefined) {
-    if (typeof fixedCycleWeightSigma !== 'number' || !Number.isFinite(fixedCycleWeightSigma) || fixedCycleWeightSigma <= 0) {
+    if (typeof fixedCycleWeightSigma !== 'number' || !Number.isFinite(fixedCycleWeightSigma)) {
       return NextResponse.json(
-        { error: 'fixed_cycle_weight_sigma must be a positive finite number' },
+        { error: 'fixed_cycle_weight_sigma must be a finite number' },
         { status: 400 }
       );
     }
@@ -171,9 +171,9 @@ export async function PATCH(
 
   const weightDecay = body.weight_decay;
   if (weightDecay !== undefined) {
-    if (typeof weightDecay !== 'number' || !Number.isFinite(weightDecay) || weightDecay < 0) {
+    if (typeof weightDecay !== 'number' || !Number.isFinite(weightDecay)) {
       return NextResponse.json(
-        { error: 'weight_decay must be a non-negative number' },
+        { error: 'weight_decay must be a finite number' },
         { status: 400 }
       );
     }
@@ -182,9 +182,9 @@ export async function PATCH(
 
   const weightDecayIncrement = body.weight_decay_increment;
   if (weightDecayIncrement !== undefined) {
-    if (typeof weightDecayIncrement !== 'number' || !Number.isFinite(weightDecayIncrement) || weightDecayIncrement < 0) {
+    if (typeof weightDecayIncrement !== 'number' || !Number.isFinite(weightDecayIncrement)) {
       return NextResponse.json(
-        { error: 'weight_decay_increment must be a non-negative number' },
+        { error: 'weight_decay_increment must be a finite number' },
         { status: 400 }
       );
     }
@@ -206,9 +206,9 @@ export async function PATCH(
   if (beta1 !== undefined) {
     if (beta1 === null || beta1 === 0) {
       data.runtime_beta1 = null;
-    } else if (typeof beta1 !== 'number' || !Number.isFinite(beta1) || beta1 < 0 || beta1 >= 1) {
+    } else if (typeof beta1 !== 'number' || !Number.isFinite(beta1)) {
       return NextResponse.json(
-        { error: 'beta1 must be null or a number in [0, 1)' },
+        { error: 'beta1 must be null or a finite number' },
         { status: 400 }
       );
     } else {
@@ -218,9 +218,9 @@ export async function PATCH(
 
   const beta2 = body.beta2;
   if (beta2 !== undefined) {
-    if (typeof beta2 !== 'number' || !Number.isFinite(beta2) || beta2 <= 0 || beta2 >= 1) {
+    if (typeof beta2 !== 'number' || !Number.isFinite(beta2)) {
       return NextResponse.json(
-        { error: 'beta2 must be a number in (0, 1)' },
+        { error: 'beta2 must be a finite number' },
         { status: 400 }
       );
     }
@@ -261,7 +261,7 @@ export async function PATCH(
       const w = networkWeights[i];
       if (typeof w !== 'number' || !Number.isFinite(w)) {
         return NextResponse.json(
-          { error: `network_weights[${i}] must be a positive number` },
+          { error: `network_weights[${i}] must be a finite number` },
           { status: 400 }
         );
       }
@@ -271,9 +271,9 @@ export async function PATCH(
 
   const batchSize = body.batch_size;
   if (batchSize !== undefined) {
-    if (typeof batchSize !== 'number' || !Number.isInteger(batchSize) || batchSize < 1 || batchSize > 128) {
+    if (typeof batchSize !== 'number' || !Number.isInteger(batchSize)) {
       return NextResponse.json(
-        { error: 'batch_size must be an integer between 1 and 128' },
+        { error: 'batch_size must be an integer' },
         { status: 400 }
       );
     }
@@ -282,9 +282,9 @@ export async function PATCH(
 
   const gradientAccumulation = body.gradient_accumulation;
   if (gradientAccumulation !== undefined) {
-    if (typeof gradientAccumulation !== 'number' || !Number.isInteger(gradientAccumulation) || gradientAccumulation < 1 || gradientAccumulation > 64) {
+    if (typeof gradientAccumulation !== 'number' || !Number.isInteger(gradientAccumulation)) {
       return NextResponse.json(
-        { error: 'gradient_accumulation must be an integer between 1 and 64' },
+        { error: 'gradient_accumulation must be an integer' },
         { status: 400 }
       );
     }
@@ -293,9 +293,9 @@ export async function PATCH(
 
   const saveEvery = body.save_every;
   if (saveEvery !== undefined) {
-    if (typeof saveEvery !== 'number' || !Number.isInteger(saveEvery) || saveEvery < 1 || saveEvery > 10000) {
+    if (typeof saveEvery !== 'number' || !Number.isInteger(saveEvery)) {
       return NextResponse.json(
-        { error: 'save_every must be an integer between 1 and 10000' },
+        { error: 'save_every must be an integer' },
         { status: 400 }
       );
     }
@@ -304,9 +304,9 @@ export async function PATCH(
 
   const sampleEvery = body.sample_every;
   if (sampleEvery !== undefined) {
-    if (typeof sampleEvery !== 'number' || !Number.isInteger(sampleEvery) || sampleEvery < 1 || sampleEvery > 10000) {
+    if (typeof sampleEvery !== 'number' || !Number.isInteger(sampleEvery)) {
       return NextResponse.json(
-        { error: 'sample_every must be an integer between 1 and 10000' },
+        { error: 'sample_every must be an integer' },
         { status: 400 }
       );
     }
@@ -315,9 +315,9 @@ export async function PATCH(
 
   const warmupSteps = body.warmup_steps;
   if (warmupSteps !== undefined) {
-    if (typeof warmupSteps !== 'number' || !Number.isInteger(warmupSteps) || warmupSteps < 0 || warmupSteps > 100000) {
+    if (typeof warmupSteps !== 'number' || !Number.isInteger(warmupSteps)) {
       return NextResponse.json(
-        { error: 'warmup_steps must be an integer between 0 and 100000' },
+        { error: 'warmup_steps must be an integer' },
         { status: 400 }
       );
     }
@@ -326,9 +326,9 @@ export async function PATCH(
 
   const minSnrGamma = body.min_snr_gamma;
   if (minSnrGamma !== undefined) {
-    if (typeof minSnrGamma !== 'number' || !Number.isFinite(minSnrGamma) || minSnrGamma < 0 || minSnrGamma > 100) {
+    if (typeof minSnrGamma !== 'number' || !Number.isFinite(minSnrGamma)) {
       return NextResponse.json(
-        { error: 'min_snr_gamma must be a number between 0 and 100' },
+        { error: 'min_snr_gamma must be a finite number' },
         { status: 400 }
       );
     }

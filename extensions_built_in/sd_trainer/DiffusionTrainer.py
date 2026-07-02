@@ -832,7 +832,7 @@ class DiffusionTrainer(SDTrainer):
                     if not isinstance(x, (int, float)):
                         return None
                     v = float(x)
-                    if v != v or abs(v) == float("inf") or v < 0.0 or v > 1000.0:
+                    if v != v or abs(v) == float("inf"):
                         return None
                     out.append(v)
                 if len(out) < min_length:
