@@ -105,12 +105,20 @@ class DoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
         weight = self.org_module[0].weight
         if isinstance(weight, QTensor) or isinstance(weight, QBytesTensor):
             return weight.dequantize().data.detach()
+        elif weight.__class__.__name__ == "AffineQuantizedTensor":
+            return weight.dequantize().data.detach()
         else:
             return weight.data.detach()
 
     def get_orig_bias(self):
         if hasattr(self.org_module[0], 'bias') and self.org_module[0].bias is not None:
-            return self.org_module[0].bias.data.detach()
+            bias = self.org_module[0].bias
+            if isinstance(bias, QTensor) or isinstance(bias, QBytesTensor):
+                return bias.dequantize().data.detach()
+            elif bias.__class__.__name__ == "AffineQuantizedTensor":
+                return bias.dequantize().data.detach()
+            else:
+                return bias.data.detach()
         return None
 
     # def dora_forward(self, x, *args, **kwargs):

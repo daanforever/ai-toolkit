@@ -639,6 +639,8 @@ class ToolkitNetworkMixin:
                 load_key = load_key.replace('$$lora_up$$', '.lora_up.')
                 if load_key.endswith('$$alpha'):
                     load_key = load_key[:-7] + '.alpha'
+                if load_key.endswith('$$magnitude'):
+                    load_key = load_key[:-11] + '.magnitude'
 
                 if self.network_type.lower() == "lokr":
                     load_key = load_key.replace('$$lokr_w1', '.lokr_w1')

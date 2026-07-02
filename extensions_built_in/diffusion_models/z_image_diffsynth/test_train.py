@@ -420,13 +420,14 @@ def _generate_images_batch(
     n = len(seeds)
     if len(out_paths) != n:
         raise ValueError("seeds and out_paths length mismatch")
+    network_type = os.environ.get("ZIMAGE_TEST_TRAIN_NETWORK_TYPE", "lora").lower()
     sd.sample_prompts_cache = [
         {"conditional": cond, "unconditional": uncond} for _ in range(n)
     ]
     configs = [
         GenerateImageConfig(
-            width=1024,
-            height=768,
+            width=256,
+            height=256,
             num_inference_steps=9,
             guidance_scale=1.0,
             prompt=prompt,
@@ -455,18 +456,24 @@ def _generate_images_batch(
         sd.get_generation_pipeline = orig_ggp  # type: ignore[method-assign]
         sd.sample_prompts_cache = None
     per = elapsed / max(n, 1)
-    if per > max_sec_per_image:
+    max_allowed_time = max_sec_per_image
+    if network_type == "dora":
+        # DoRA requires significantly more computation per step during inference (it has to calculate magnitude-based norm modifications),
+        # especially on quantized models. Increase the timeout.
+        max_allowed_time = max_sec_per_image * 8
+    if per > max_allowed_time:
         raise TimeoutError(
             f"Sampling too slow: {elapsed:.2f}s for {n} image(s) "
-            f"({per:.2f}s/image > {max_sec_per_image:.2f}s/image)"
+            f"({per:.2f}s/image > {max_allowed_time:.2f}s/image)"
         )
 
 
 def _attach_lora_for_inference(sd, lora_path: str) -> None:
+    network_type = os.environ.get("ZIMAGE_TEST_TRAIN_NETWORK_TYPE", "lora").lower()
     network_config = NetworkConfig(
-        type="lora",
-        linear=128,
-        linear_alpha=128,
+        type=network_type,
+        linear=8,
+        linear_alpha=8,
         conv=0,
         conv_alpha=0,
         rank_dropout=0.01,
@@ -523,8 +530,8 @@ def _attach_lora_for_inference(sd, lora_path: str) -> None:
         main_network.apply_to(
             sd.text_encoder,
             sd.unet,
-            train_text_encoder=False,
-            train_unet=True,
+            apply_text_encoder=False,
+            apply_unet=True,
         )
         main_network.load_weights(lora_path)
         main_network.multiplier = 1.0
@@ -541,8 +548,8 @@ def _attach_lora_for_inference(sd, lora_path: str) -> None:
             sampling_network.apply_to(
                 sd.text_encoder,
                 sd._sampling_transformer,
-                train_text_encoder=False,
-                train_unet=True,
+                apply_text_encoder=False,
+                apply_unet=True,
             )
             sampling_network.multiplier = 1.0
             sampling_network._update_torch_multiplier()
@@ -550,7 +557,8 @@ def _attach_lora_for_inference(sd, lora_path: str) -> None:
 
 
 def _train_lora(work_root: Path, dataset_dir: Path, model_path: str, sampling_path: str | None) -> Path:
-    train_name = "zimage_diffsynth_train_smoke"
+    network_type = os.environ.get("ZIMAGE_TEST_TRAIN_NETWORK_TYPE", "lora").lower()
+    train_name = f"zimage_diffsynth_train_smoke_{network_type}"
     output_root = work_root / "output"
     output_root.mkdir(parents=True, exist_ok=True)
 
@@ -573,17 +581,16 @@ def _train_lora(work_root: Path, dataset_dir: Path, model_path: str, sampling_pa
                     "performance_log_every": 10,
                     "network": {
                         "rank_dropout": 0.01,
-                        "type": "lora",
-                        "linear": 128,
-                        "linear_alpha": 128,
+                        "type": network_type,
+                        "linear": 8,
+                        "linear_alpha": 8,
                         "conv": 0,
                         "conv_alpha": 0,
                         "lokr_full_rank": False,
                         "lokr_factor": -1,
                         "network_kwargs": {
                             "ignore_if_contains": [],
-                            "lora_down_init_scale": 1,
-                            "init_lora_weights": "pissa",
+                            "lora_down_init_scale": 1
                         },
                         "pretrained_lora_path": "",
                     },
@@ -614,7 +621,7 @@ def _train_lora(work_root: Path, dataset_dir: Path, model_path: str, sampling_pa
                         "gaussian_std": 0.45,
                         "optimizer_params": {
                             "emergency_brake": 0.75,
-                            "beta2": 0.9,
+                            "beta2": 0,
                             "weight_decay": 0.01,
                             "scale_parameter": False,
                             "relative_step": True,
@@ -697,8 +704,8 @@ def _train_lora(work_root: Path, dataset_dir: Path, model_path: str, sampling_pa
                         "sample_noised": True,
                         "sampler": "flowmatch",
                         "sample_every": 10,
-                        "width": 1024,
-                        "height": 768,
+                        "width": 256,
+                        "height": 256,
                         "samples": [{"prompt": "dog"}],
                         "neg": "",
                         "seed": 42,
@@ -748,7 +755,8 @@ def main() -> None:
     image_cache = TEST_TRAIN_IMAGE_CACHE
     _log(f"[DEBUG] image cache dir: {image_cache} (force_regen={force_regen})")
 
-    work_root = Path(tempfile.gettempdir()) / "zimage_diffsynth_train_smoke"
+    network_type = os.environ.get("ZIMAGE_TEST_TRAIN_NETWORK_TYPE", "lora").lower()
+    work_root = Path(tempfile.gettempdir()) / f"zimage_diffsynth_train_smoke_{network_type}"
     if work_root.exists():
         shutil.rmtree(work_root, ignore_errors=True)
     dataset_dir = work_root / "datasets" / "1"

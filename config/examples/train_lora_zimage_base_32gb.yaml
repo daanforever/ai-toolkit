@@ -12,8 +12,8 @@ config:
       # LoRA: rank 128 good for character identity; use 64 if VRAM tight. Z-Image typically no conv training.
       network:
         type: "lora"
-        linear: 128
-        linear_alpha: 128
+        linear: 8
+        linear_alpha: 8
       save:
         dtype: bf16
         save_every: 500
