@@ -95,6 +95,8 @@ class DoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
         lora_weight  = self.lora_up.weight @ self.lora_down.weight
         weight_norm = self._get_weight_norm(weight, lora_weight)
         self.magnitude = nn.Parameter(weight_norm.detach().clone(), requires_grad=True)
+        self.register_buffer("train_base_weight_norm", weight_norm.detach().clone())
+        self.initial_base_weight_norm = weight_norm.detach().clone()
 
     def apply_to(self):
         self.org_forward = self.org_module[0].forward
@@ -151,6 +153,11 @@ class DoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
         # during backpropagation"
         weight_norm = weight_norm.detach()
 
+        # Add epsilon clamping to avoid division-by-zero / NaNs
+        weight_norm_fp32 = weight_norm.to(torch.float32)
+        weight_norm_fp32 = torch.clamp(weight_norm_fp32, min=1e-6)
+        weight_norm = weight_norm_fp32.to(weight_norm.dtype)
+
         bias = self.get_orig_bias()
         if bias is not None:
             bias = bias.to(scaled_lora_output.device, dtype=scaled_lora_output.dtype)
@@ -159,5 +166,33 @@ class DoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
             direction_output = org_forwarded
 
         direction_output = direction_output + scaled_lora_output
-        mag_norm_scale = (self.magnitude / weight_norm - 1).view(1, -1).to(direction_output.dtype)
+
+        # Handle magnitude calibration across shared parameters of different base models
+        if hasattr(self, "initial_base_weight_norm") and self.initial_base_weight_norm is not None:
+            # Move initial_base_weight_norm to same device & dtype as magnitude
+            if (
+                self.initial_base_weight_norm.device != self.magnitude.device
+                or self.initial_base_weight_norm.dtype != self.magnitude.dtype
+            ):
+                self.initial_base_weight_norm = self.initial_base_weight_norm.to(
+                    self.magnitude.device, dtype=self.magnitude.dtype
+                )
+            
+            # Fetch shared training base weight norm (if missing, default to initial_base_weight_norm)
+            train_norm = getattr(self, "train_base_weight_norm", self.initial_base_weight_norm)
+            if train_norm is None:
+                train_norm = self.initial_base_weight_norm
+            
+            if train_norm.device != self.magnitude.device or train_norm.dtype != self.magnitude.dtype:
+                train_norm = train_norm.to(self.magnitude.device, dtype=self.magnitude.dtype)
+                
+            train_norm_fp32 = train_norm.to(torch.float32)
+            train_norm_fp32 = torch.clamp(train_norm_fp32, min=1e-6)
+            
+            calibration_ratio = (self.initial_base_weight_norm.to(torch.float32) / train_norm_fp32).to(self.magnitude.dtype)
+            calibrated_magnitude = self.magnitude * calibration_ratio
+        else:
+            calibrated_magnitude = self.magnitude
+
+        mag_norm_scale = (calibrated_magnitude / weight_norm - 1).view(1, -1).to(direction_output.dtype)
         return mag_norm_scale * direction_output

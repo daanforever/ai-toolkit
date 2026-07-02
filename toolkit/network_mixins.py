@@ -309,7 +309,7 @@ class ToolkitModuleMixin:
             # scale it here
             # todo handle our batch split scalers for slider training. For now take the mean of them
             scale = multiplier.mean()
-            scaled_lora_weight = lora_weight * scale
+            scaled_lora_weight = lora_weight * (scale * self.scale)
             scaled_lora_output = scaled_lora_output + self.apply_dora(
                 org_forwarded=org_forwarded,
                 scaled_lora_output=scaled_lora_output,
