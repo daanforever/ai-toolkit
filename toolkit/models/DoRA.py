@@ -135,7 +135,7 @@ class DoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
         weight_norm = torch.linalg.norm(weight, dim=1)
         return weight_norm
 
-    def apply_dora(self, x, scaled_lora_weight):
+    def apply_dora(self, org_forwarded, scaled_lora_output, scaled_lora_weight):
         # ref https://github.com/huggingface/peft/blob/1e6d1d73a0850223b0916052fd8d2382a90eae5a/src/peft/tuners/lora/layer.py#L192
         # lora weight is already scaled
 
@@ -150,5 +150,14 @@ class DoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
         # reflects the updates of ∆V , it won’t receive any gradient
         # during backpropagation"
         weight_norm = weight_norm.detach()
-        dora_weight = transpose(weight + scaled_lora_weight, False)
-        return (self.magnitude / weight_norm - 1).view(1, -1) * F.linear(x.to(dora_weight.dtype), dora_weight)
+
+        bias = self.get_orig_bias()
+        if bias is not None:
+            bias = bias.to(scaled_lora_output.device, dtype=scaled_lora_output.dtype)
+            direction_output = org_forwarded - bias
+        else:
+            direction_output = org_forwarded
+
+        direction_output = direction_output + scaled_lora_output
+        mag_norm_scale = (self.magnitude / weight_norm - 1).view(1, -1).to(direction_output.dtype)
+        return mag_norm_scale * direction_output
