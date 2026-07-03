@@ -46,11 +46,13 @@ def _load_state_dict_from_folder(folder: str, dtype=None, device="cpu") -> dict:
         raise FileNotFoundError(f"No .safetensors files in {folder}")
     state_dict = {}
     for f in files:
-        state_dict.update(load_file(f, device=device))
-    if dtype is not None:
-        for k in state_dict:
-            if state_dict[k].dtype != dtype:
-                state_dict[k] = state_dict[k].to(dtype)
+        shard = load_file(f, device="cpu")
+        if dtype is not None:
+            for k in list(shard.keys()):
+                if shard[k].dtype != dtype:
+                    shard[k] = shard[k].to(dtype)
+        state_dict.update(shard)
+        del shard
     return state_dict
 
 
@@ -63,10 +65,10 @@ def load_dit_from_folder(
     """Load DiffSynth ZImageDiT from a folder of safetensors (DiffSynth-format checkpoint)."""
     _ensure_diffsynth_path()
     from diffsynth.models.z_image_dit import ZImageDiT
-    from diffsynth.core.loader import load_state_dict as ds_load_state_dict
+    import gc
 
     config = config or {}
-    state_dict = _load_state_dict_from_folder(transformer_path, dtype=dtype, device=str(device))
+    state_dict = _load_state_dict_from_folder(transformer_path, dtype=dtype, device="cpu")
     # Optional: strip prefix if present (e.g. transformer. or pipe.dit.)
     for prefix in ("transformer.", "pipe.dit."):
         if any(k.startswith(prefix) for k in state_dict):
@@ -80,6 +82,11 @@ def load_dit_from_folder(
             "DiT checkpoint does not match ZImageDiT (too many missing keys). "
             "Use a DiffSynth-format Z-Image checkpoint (e.g. from DiffSynth-Studio examples)."
         )
+    
+    # Clean up state dict dictionary before GPU transfer to release CPU RAM
+    del state_dict
+    gc.collect()
+
     model = model.to(dtype=dtype, device=device)
     if hasattr(model, "eval"):
         model.eval()
