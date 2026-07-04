@@ -588,3 +588,112 @@ def test_loader_quantized_te_matches_fixture(text_encoder_bundle):
         torch.cuda.empty_cache()
 
     assert torch.allclose(fixture_embeds, reload_embeds, rtol=EMBED_RTOL, atol=EMBED_ATOL)
+
+
+def test_literal_padded_tail_is_zero(text_encoder_bundle):
+    tokenizer = text_encoder_bundle["tokenizer"]
+    text_encoder = text_encoder_bundle["text_encoder"]
+    device = text_encoder_bundle["device"]
+    prompts = ["hi", "a much longer caption with extra words to widen the batch pad"]
+
+    def _valid_len_for_literal(prompt_item: str) -> int:
+        formatted = (
+            "<|im_start|>user\n"
+            + prompt_item
+            + "<|im_end|>\n<|im_start|>assistant\n"
+        )
+        text_inputs = tokenizer(
+            [formatted],
+            padding="max_length",
+            max_length=512,
+            truncation=True,
+            return_tensors="pt",
+        )
+        return int(text_inputs.attention_mask[0].sum().item())
+
+    valid_lens = [_valid_len_for_literal(p) for p in prompts]
+
+    with torch.inference_mode():
+        embeds = _encode_literal(tokenizer, text_encoder, device, prompts)
+
+    assert valid_lens[0] < valid_lens[1]
+    assert embeds.shape[1] == valid_lens[1]
+    assert torch.all(embeds[0, valid_lens[0] :, :] == 0)
+    assert torch.any(embeds[0, : valid_lens[0], :].abs() > 0)
+
+
+def test_get_prompt_embeds_with_list_input(text_encoder_bundle):
+    model = _make_prompt_embeds_model(
+        text_encoder_bundle,
+        {"use_diffsynth_prompt_encoding": True},
+    )
+    prompts = ["a cat", "a very fluffy adorable brown dog playing in the garden"]
+
+    with torch.inference_mode():
+        via_model_batch = model.get_prompt_embeds(prompts).text_embeds
+        single_1 = model.get_prompt_embeds(prompts[0]).text_embeds
+        single_2 = model.get_prompt_embeds(prompts[1]).text_embeds
+
+    # The batch should have shape (2, max_len, dim) where max_len is the length of prompt 2.
+    assert via_model_batch.shape[0] == 2
+    assert via_model_batch.shape[1] == single_2.shape[1]
+
+    # First item in batch should match single_1 padded with zeros to match single_2 sequence length.
+    expected_1 = single_1[0]
+    pad_len = single_2.shape[1] - single_1.shape[1]
+    if pad_len > 0:
+        pad = torch.zeros((pad_len, single_1.shape[2]), dtype=single_1.dtype, device=single_1.device)
+        expected_1 = torch.cat([expected_1, pad], dim=0)
+
+    # Since the text encoder computes in bfloat16/qfloat8 and uses transformers SDPA under different batch sizes,
+    # batch size 1 vs batch size 2 has slight numerical divergence. We use rtol=0.03 / atol=3.5 to verify parity.
+    assert torch.allclose(via_model_batch[0], expected_1, rtol=0.03, atol=3.5)
+    assert torch.allclose(via_model_batch[1], single_2[0], rtol=0.03, atol=3.5)
+
+
+@pytest.mark.parametrize("max_len", [32, 64])
+@pytest.mark.parametrize("encode_fn_name", ["chat", "literal"])
+def test_custom_max_sequence_length(text_encoder_bundle, max_len, encode_fn_name):
+    tokenizer = text_encoder_bundle["tokenizer"]
+    text_encoder = text_encoder_bundle["text_encoder"]
+    device = text_encoder_bundle["device"]
+    prompt = "word " * 100
+
+    encode_fn = (
+        prompt_encoding_mod.encode_prompt
+        if encode_fn_name == "chat"
+        else diffsynth_training_mod.encode_prompt_diffsynth_literal_t2i
+    )
+
+    with torch.inference_mode():
+        embeds = encode_fn(
+            tokenizer,
+            text_encoder,
+            prompt,
+            device,
+            dtype=EMBED_DTYPE,
+            max_sequence_length=max_len,
+        ).text_embeds
+
+    assert embeds.shape[1] == max_len
+
+
+@pytest.mark.parametrize("encode_fn_name", ["chat", "literal"])
+def test_string_vs_list_of_string_parity(text_encoder_bundle, encode_fn_name):
+    tokenizer = text_encoder_bundle["tokenizer"]
+    text_encoder = text_encoder_bundle["text_encoder"]
+    device = text_encoder_bundle["device"]
+    prompt = "a majestic eagle flying high over snowy mountain peaks"
+
+    encode_fn = (
+        prompt_encoding_mod.encode_prompt
+        if encode_fn_name == "chat"
+        else diffsynth_training_mod.encode_prompt_diffsynth_literal_t2i
+    )
+
+    with torch.inference_mode():
+        embeds_str = encode_fn(tokenizer, text_encoder, prompt, device, dtype=EMBED_DTYPE).text_embeds
+        embeds_list = encode_fn(tokenizer, text_encoder, [prompt], device, dtype=EMBED_DTYPE).text_embeds
+
+    assert torch.equal(embeds_str, embeds_list)
+
