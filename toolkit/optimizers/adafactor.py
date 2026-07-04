@@ -837,8 +837,10 @@ class Adafactor(torch.optim.Optimizer):
         beta2 = float(group["beta2"])
 
         if not group.get("beta2_adaptive", False):
-            scheduled_beta2 = 1.0 - (0.5 / max(1, int(step)))
-            return min(max(scheduled_beta2, 0.9), 0.999)
+            return beta2
+
+        scheduled_beta2 = 1.0 - (0.5 / max(1, int(step)))
+        beta2 = min(max(scheduled_beta2, 0.9), 0.999)
             
         beta2_min = float(group.get("beta2_min", 0.9))
         beta2_min = max(0.0, min(beta2, beta2_min))

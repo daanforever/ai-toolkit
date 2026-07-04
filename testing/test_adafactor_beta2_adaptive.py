@@ -12,7 +12,13 @@ def _normalized_direction(shape):
     return direction / direction.norm()
 
 
-def _run_warm_then_tiny(beta2_adaptive: bool):
+def _run_warm_then_tiny(
+    beta2_adaptive: bool,
+    *,
+    warm_steps: int = 120,
+    tiny_steps: int = 20,
+    tiny_grad_scale: float = 1e-5,
+):
     shape = (8, 16)
     direction = _normalized_direction(shape)
     p = torch.nn.Parameter(torch.full(shape, 0.01))
@@ -29,13 +35,13 @@ def _run_warm_then_tiny(beta2_adaptive: bool):
         clip_threshold=1.0,
     )
 
-    for _ in range(120):
+    for _ in range(warm_steps):
         p.grad = (direction * 1e-2).clone()
         opt.step()
 
     before = p.detach().clone()
-    for _ in range(20):
-        p.grad = (direction * 1e-5).clone()
+    for _ in range(tiny_steps):
+        p.grad = (direction * tiny_grad_scale).clone()
         opt.step()
 
     st = opt.state[p]
@@ -50,9 +56,15 @@ def test_beta2_effective_tracks_config_when_adaptive_disabled():
 
 
 def test_adaptive_beta2_recovers_from_stale_second_moment():
-    static_update, _, static_v, _ = _run_warm_then_tiny(beta2_adaptive=False)
-    adaptive_update, adaptive_beta2, adaptive_v, adaptive_beta2_mean = _run_warm_then_tiny(beta2_adaptive=True)
+    stale_kwargs = dict(warm_steps=200, tiny_steps=40, tiny_grad_scale=1e-6)
+    static_update, static_beta2, static_v, _ = _run_warm_then_tiny(
+        beta2_adaptive=False, **stale_kwargs
+    )
+    adaptive_update, adaptive_beta2, adaptive_v, adaptive_beta2_mean = _run_warm_then_tiny(
+        beta2_adaptive=True, **stale_kwargs
+    )
 
+    assert static_beta2 == pytest.approx(0.999, rel=1e-6)
     assert adaptive_beta2 < 0.95
     assert adaptive_beta2_mean < 0.95
     assert adaptive_v < static_v * 0.2
