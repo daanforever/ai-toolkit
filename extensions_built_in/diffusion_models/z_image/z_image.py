@@ -487,7 +487,7 @@ class ZImageModel(BaseModel):
             if len(text_embeds.shape) == 3:
                 # if it is a single batch tensor, unbind it into a list of tensors
                 if attention_mask is not None:
-                    text_embeds = [text_embeds[i][attention_mask[i]] for i in range(text_embeds.shape[0])]
+                    text_embeds = [text_embeds[i][attention_mask[i].bool()] for i in range(text_embeds.shape[0])]
                 else:
                     text_embeds = list(text_embeds.unbind(dim=0))
         elif isinstance(text_embeds, list):
@@ -504,9 +504,12 @@ class ZImageModel(BaseModel):
                                 mask = attention_mask[i] if attention_mask.dim() == 3 else attention_mask
                             
                             if isinstance(mask, torch.Tensor) and mask.dim() == 2:
-                                new_text_embeds += [t[j][mask[j]] for j in range(t.shape[0])]
+                                new_text_embeds += [t[j][mask[j].bool()] for j in range(t.shape[0])]
                             else:
-                                new_text_embeds += [t[j][mask] for j in range(t.shape[0])]
+                                if isinstance(mask, torch.Tensor):
+                                    new_text_embeds += [t[j][mask.bool()] for j in range(t.shape[0])]
+                                else:
+                                    new_text_embeds += [t[j][mask] for j in range(t.shape[0])]
                         else:
                             new_text_embeds += list(t.unbind(dim=0))
                 text_embeds = new_text_embeds

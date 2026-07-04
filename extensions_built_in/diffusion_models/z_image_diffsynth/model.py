@@ -376,7 +376,7 @@ class ZImageDiffSynthModel(BaseModel):
         attention_mask = text_embeddings.attention_mask
         if isinstance(text_embeds, torch.Tensor) and len(text_embeds.shape) == 3:
             if attention_mask is not None:
-                text_embeds = [text_embeds[i][attention_mask[i]] for i in range(text_embeds.shape[0])]
+                text_embeds = [text_embeds[i][attention_mask[i].bool()] for i in range(text_embeds.shape[0])]
             else:
                 text_embeds = [text_embeds[i] for i in range(text_embeds.shape[0])]
         # Cast embeddings to model dtype at DiT boundary
@@ -486,12 +486,12 @@ class ZImageDiffSynthModel(BaseModel):
             uncond_mask = unconditional_embeds.attention_mask
             if isinstance(cond, torch.Tensor) and len(cond.shape) == 3:
                 if cond_mask is not None:
-                    cond = [cond[i][cond_mask[i]] for i in range(cond.shape[0])]
+                    cond = [cond[i][cond_mask[i].bool()] for i in range(cond.shape[0])]
                 else:
                     cond = [cond[i] for i in range(cond.shape[0])]
             if isinstance(uncond, torch.Tensor) and len(uncond.shape) == 3:
                 if uncond_mask is not None:
-                    uncond = [uncond[i][uncond_mask[i]] for i in range(uncond.shape[0])]
+                    uncond = [uncond[i][uncond_mask[i].bool()] for i in range(uncond.shape[0])]
                 else:
                     uncond = [uncond[i] for i in range(uncond.shape[0])]
             return pipeline(

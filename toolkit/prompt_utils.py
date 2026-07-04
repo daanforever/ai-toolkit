@@ -44,10 +44,27 @@ class PromptEmbeds:
         if self.pooled_embeds is not None:
             self.pooled_embeds = self.pooled_embeds.to(*args, **kwargs)
         if self.attention_mask is not None:
+            # Extract device and non_blocking from args/kwargs, but NOT dtype, to keep attention_mask as bool/integer
+            mask_kwargs = {}
+            if "device" in kwargs:
+                mask_kwargs["device"] = kwargs["device"]
+            if "non_blocking" in kwargs:
+                mask_kwargs["non_blocking"] = kwargs["non_blocking"]
+            
+            mask_args = []
+            for arg in args:
+                if isinstance(arg, (torch.device, str)):
+                    mask_args.append(arg)
+                elif isinstance(arg, torch.dtype):
+                    # Skip dtype for attention_mask
+                    pass
+                elif isinstance(arg, bool): # non_blocking
+                    mask_args.append(arg)
+
             if isinstance(self.attention_mask, list) or isinstance(self.attention_mask, tuple):
-                self.attention_mask = [t.to(*args, **kwargs) for t in self.attention_mask]
+                self.attention_mask = [t.to(*mask_args, **mask_kwargs) for t in self.attention_mask]
             else:
-                self.attention_mask = self.attention_mask.to(*args, **kwargs)
+                self.attention_mask = self.attention_mask.to(*mask_args, **mask_kwargs)
         return self
 
     def detach(self):
