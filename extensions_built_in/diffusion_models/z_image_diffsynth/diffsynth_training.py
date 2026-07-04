@@ -75,13 +75,19 @@ def encode_prompt_diffsynth_literal_t2i(
     max_len = max(t.shape[0] for t in embeddings_list)
     dim = embeddings_list[0].shape[1]
     padded: List[torch.Tensor] = []
+    attention_masks: List[torch.Tensor] = []
     for t in embeddings_list:
-        if t.shape[0] < max_len:
-            pad = torch.zeros((max_len - t.shape[0], dim), dtype=dtype, device=t.device)
+        real_len = t.shape[0]
+        mask = torch.ones(max_len, dtype=torch.bool, device=t.device)
+        if real_len < max_len:
+            pad = torch.zeros((max_len - real_len, dim), dtype=dtype, device=t.device)
             t = torch.cat([t, pad], dim=0)
+            mask[real_len:] = False
         padded.append(t.to(dtype))
+        attention_masks.append(mask)
     text_embeds = torch.stack(padded, dim=0)
-    return PromptEmbeds([text_embeds, None])
+    attention_mask = torch.stack(attention_masks, dim=0)
+    return PromptEmbeds([text_embeds, None], attention_mask=attention_mask)
 
 
 def aggregate_flow_matching_mse_diffsynth(

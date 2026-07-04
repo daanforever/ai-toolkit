@@ -373,8 +373,12 @@ class ZImageDiffSynthModel(BaseModel):
             self, "gradient_checkpointing", False
         )
         text_embeds = text_embeddings.text_embeds
+        attention_mask = text_embeddings.attention_mask
         if isinstance(text_embeds, torch.Tensor) and len(text_embeds.shape) == 3:
-            text_embeds = [text_embeds[i] for i in range(text_embeds.shape[0])]
+            if attention_mask is not None:
+                text_embeds = [text_embeds[i][attention_mask[i]] for i in range(text_embeds.shape[0])]
+            else:
+                text_embeds = [text_embeds[i] for i in range(text_embeds.shape[0])]
         # Cast embeddings to model dtype at DiT boundary
         if isinstance(text_embeds, list):
             text_embeds = [t.to(self.torch_dtype) for t in text_embeds]
@@ -477,11 +481,19 @@ class ZImageDiffSynthModel(BaseModel):
             gen_config.width = int(gen_config.width // sc * sc)
             gen_config.height = int(gen_config.height // sc * sc)
             cond = conditional_embeds.text_embeds
+            cond_mask = conditional_embeds.attention_mask
             uncond = unconditional_embeds.text_embeds
+            uncond_mask = unconditional_embeds.attention_mask
             if isinstance(cond, torch.Tensor) and len(cond.shape) == 3:
-                cond = [cond[i] for i in range(cond.shape[0])]
+                if cond_mask is not None:
+                    cond = [cond[i][cond_mask[i]] for i in range(cond.shape[0])]
+                else:
+                    cond = [cond[i] for i in range(cond.shape[0])]
             if isinstance(uncond, torch.Tensor) and len(uncond.shape) == 3:
-                uncond = [uncond[i] for i in range(uncond.shape[0])]
+                if uncond_mask is not None:
+                    uncond = [uncond[i][uncond_mask[i]] for i in range(uncond.shape[0])]
+                else:
+                    uncond = [uncond[i] for i in range(uncond.shape[0])]
             return pipeline(
                 prompt_embeds=cond,
                 negative_prompt_embeds=uncond,

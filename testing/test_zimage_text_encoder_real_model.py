@@ -304,8 +304,8 @@ def test_caption_changes_embeddings_in_workflow_and_diffsynth_paths(text_encoder
     workflow_delta = (workflow[0] - workflow[1]).abs().max().item()
     ds_delta = (ds_stacked[0] - ds_stacked[1]).abs().max().item()
 
-    assert workflow_delta > 1e-6
-    assert ds_delta > 1e-6
+    assert workflow_delta > 1.0
+    assert ds_delta > 1.0
 
 
 def test_literal_and_chat_paths_are_equivalent_for_zimage(text_encoder_bundle):
@@ -465,8 +465,8 @@ def test_get_prompt_embeds_production_output_dtypes(text_encoder_bundle):
 
     assert literal_embeds.dtype == torch.float32
     assert literal_direct.dtype == torch.float32
-    assert chat_embeds.dtype == torch.bfloat16
-    assert chat_direct.dtype == torch.bfloat16
+    assert chat_embeds.dtype == torch.float32
+    assert chat_direct.dtype == torch.float32
 
 
 def test_literal_caption_changes_embeddings(text_encoder_bundle):
@@ -482,7 +482,7 @@ def test_literal_caption_changes_embeddings(text_encoder_bundle):
     with torch.inference_mode():
         embeds = _encode_literal(tokenizer, text_encoder, device, prompts)
 
-    assert (embeds[0] - embeds[1]).abs().max().item() > 1e-6
+    assert (embeds[0] - embeds[1]).abs().max().item() > 1.0
 
 
 def test_long_prompt_truncation_finite(text_encoder_bundle):
@@ -646,9 +646,13 @@ def test_get_prompt_embeds_with_list_input(text_encoder_bundle):
         expected_1 = torch.cat([expected_1, pad], dim=0)
 
     # Since the text encoder computes in bfloat16/qfloat8 and uses transformers SDPA under different batch sizes,
-    # batch size 1 vs batch size 2 has slight numerical divergence. We use rtol=0.03 / atol=3.5 to verify parity.
-    assert torch.allclose(via_model_batch[0], expected_1, rtol=0.03, atol=3.5)
-    assert torch.allclose(via_model_batch[1], single_2[0], rtol=0.03, atol=3.5)
+    # batch size 1 vs batch size 2 has slight numerical divergence. We use cosine similarity to verify parity.
+    len_1 = single_1.shape[1]
+    cos_1 = torch.nn.functional.cosine_similarity(via_model_batch[0, :len_1], single_1[0], dim=-1)
+    assert cos_1.min().item() > 0.99
+
+    cos_2 = torch.nn.functional.cosine_similarity(via_model_batch[1], single_2[0], dim=-1)
+    assert cos_2.min().item() > 0.99
 
 
 @pytest.mark.parametrize("max_len", [32, 64])

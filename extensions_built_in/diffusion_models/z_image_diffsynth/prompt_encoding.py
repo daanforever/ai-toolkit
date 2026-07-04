@@ -54,12 +54,18 @@ def encode_prompt(
     max_len = max(t.shape[0] for t in embeddings_list)
     dim = embeddings_list[0].shape[1]
     if dtype is None:
-        dtype = torch.float32
+        dtype = embeddings_list[0].dtype
     padded = []
+    attention_masks = []
     for t in embeddings_list:
-        if t.shape[0] < max_len:
-            pad = torch.zeros((max_len - t.shape[0], dim), dtype=dtype, device=t.device)
+        real_len = t.shape[0]
+        mask = torch.ones(max_len, dtype=torch.bool, device=t.device)
+        if real_len < max_len:
+            pad = torch.zeros((max_len - real_len, dim), dtype=dtype, device=t.device)
             t = torch.cat([t, pad], dim=0)
-        padded.append(t)
+            mask[real_len:] = False
+        padded.append(t.to(dtype))
+        attention_masks.append(mask)
     text_embeds = torch.stack(padded, dim=0)
-    return PromptEmbeds([text_embeds, None])
+    attention_mask = torch.stack(attention_masks, dim=0)
+    return PromptEmbeds([text_embeds, None], attention_mask=attention_mask)

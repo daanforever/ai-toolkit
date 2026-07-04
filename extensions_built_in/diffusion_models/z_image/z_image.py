@@ -482,18 +482,33 @@ class ZImageModel(BaseModel):
         timestep_model_input = (1000 - timestep) / 1000
 
         text_embeds = text_embeddings.text_embeds
+        attention_mask = text_embeddings.attention_mask
         if isinstance(text_embeds, torch.Tensor):
             if len(text_embeds.shape) == 3:
                 # if it is a single batch tensor, unbind it into a list of tensors
-                text_embeds = list(text_embeds.unbind(dim=0))
+                if attention_mask is not None:
+                    text_embeds = [text_embeds[i][attention_mask[i]] for i in range(text_embeds.shape[0])]
+                else:
+                    text_embeds = list(text_embeds.unbind(dim=0))
         elif isinstance(text_embeds, list):
             # check if items are rank 3 (batch, length, dim)
             if len(text_embeds[0].shape) == 3:
                 # flatten the list of batches into a single list of tensors
                 new_text_embeds = []
-                for t in text_embeds:
+                for i, t in enumerate(text_embeds):
                     if t is not None:
-                        new_text_embeds += list(t.unbind(dim=0))
+                        if attention_mask is not None:
+                            if isinstance(attention_mask, (list, tuple)):
+                                mask = attention_mask[i]
+                            else:
+                                mask = attention_mask[i] if attention_mask.dim() == 3 else attention_mask
+                            
+                            if isinstance(mask, torch.Tensor) and mask.dim() == 2:
+                                new_text_embeds += [t[j][mask[j]] for j in range(t.shape[0])]
+                            else:
+                                new_text_embeds += [t[j][mask] for j in range(t.shape[0])]
+                        else:
+                            new_text_embeds += list(t.unbind(dim=0))
                 text_embeds = new_text_embeds
 
         model_out_list = self.transformer(
@@ -521,12 +536,16 @@ class ZImageModel(BaseModel):
         # encode_prompt returns list of rank-2 tensors [seq_len, dim]
         # Pad to same length and stack into rank-3 tensor [batch, seq_len, dim]
         # for compatibility with concat_prompt_embeds and predict_noise
+        attention_mask = None
         if isinstance(prompt_embeds, list):
             # Find max sequence length, TODO: Or just use 512?
             max_seq_len = max(t.shape[0] for t in prompt_embeds)
             # Pad each tensor to max length
             padded = []
+            attention_masks = []
             for t in prompt_embeds:
+                real_len = t.shape[0]
+                mask = torch.ones(max_seq_len, dtype=torch.bool, device=t.device)
                 if t.shape[0] < max_seq_len:
                     pad = torch.zeros(
                         (max_seq_len - t.shape[0], t.shape[1]),
@@ -534,9 +553,12 @@ class ZImageModel(BaseModel):
                         device=t.device,
                     )
                     t = torch.cat([t, pad], dim=0)
+                    mask[real_len:] = False
                 padded.append(t)
+                attention_masks.append(mask)
             prompt_embeds = torch.stack(padded, dim=0)
-        pe = PromptEmbeds([prompt_embeds, None])
+            attention_mask = torch.stack(attention_masks, dim=0)
+        pe = PromptEmbeds([prompt_embeds, None], attention_mask=attention_mask)
         return pe
 
     def get_model_has_grad(self):
