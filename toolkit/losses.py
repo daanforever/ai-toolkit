@@ -43,21 +43,19 @@ class ComparativeTotalVariation(torch.nn.Module):
 # Gradient penalty
 def get_gradient_penalty(critic, real, fake, device):
     with torch.autocast(device_type='cuda'):
-        real = real.float()
-        fake = fake.float()
-        alpha = torch.rand(real.size(0), 1, 1, 1).to(device).float()
+        alpha = torch.rand(real.size(0), 1, 1, 1, device=device, dtype=real.dtype)
         interpolates = (alpha * real + ((1 - alpha) * fake)).requires_grad_(True)
         if torch.isnan(interpolates).any():
             print('d_interpolates is nan')
         d_interpolates = critic(interpolates)
-        fake = torch.ones(real.size(0), 1, device=device)
+        fake_ones = torch.ones(real.size(0), 1, device=device, dtype=real.dtype)
             
         if torch.isnan(d_interpolates).any():
             print('fake is nan')
         gradients = torch.autograd.grad(
             outputs=d_interpolates,
             inputs=interpolates,
-            grad_outputs=fake,
+            grad_outputs=fake_ones,
             create_graph=True,
             retain_graph=True,
             only_inputs=True,
@@ -70,7 +68,7 @@ def get_gradient_penalty(critic, real, fake, device):
         gradients = gradients.view(gradients.size(0), -1)
         gradient_norm = gradients.norm(2, dim=1)
         gradient_penalty = ((gradient_norm - 1) ** 2).mean()
-        return gradient_penalty.float()
+        return gradient_penalty
 
 
 class PatternLoss(torch.nn.Module):

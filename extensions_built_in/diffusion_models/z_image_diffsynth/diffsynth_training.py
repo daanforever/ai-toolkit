@@ -103,7 +103,7 @@ def aggregate_flow_matching_mse_diffsynth(
     mean over (C,H,W) of squared error, then multiply by scalar training weight.
     Order: per batch element b: loss_b = w_b * mean_spatial((pred_b - target_b)^2 * mask_b).
     """
-    sq = F.mse_loss(pred.float(), target.float(), reduction="none")
+    sq = F.mse_loss(pred, target, reduction="none")
     mm = mask_multiplier
     if train_turbo:
         mm = mm[:, 3:, :, :]

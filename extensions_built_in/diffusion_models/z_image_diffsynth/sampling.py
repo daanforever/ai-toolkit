@@ -54,12 +54,10 @@ def _get_diffsynth_scheduler(
 
 def _step_scheduler(sigmas, timesteps, model_output, timestep, sample, device):
     """Euler step: prev_sample = sample + model_output * (sigma_next - sigma)."""
-    if isinstance(timestep, torch.Tensor):
-        timestep = timestep.cpu()
     timestep_id = torch.argmin((timesteps - timestep).abs())
     sigma = sigmas[timestep_id].to(device=device, dtype=sample.dtype)
     if timestep_id + 1 >= len(timesteps):
-        sigma_next = torch.tensor(0.0, device=sigmas.device, dtype=sigmas.dtype)
+        sigma_next = torch.tensor(0.0, device=device, dtype=sample.dtype)
     else:
         sigma_next = sigmas[timestep_id + 1].to(device=device, dtype=sample.dtype)
     prev_sample = sample + model_output * (sigma_next - sigma)
@@ -142,6 +140,7 @@ class ZImageDiffSynthPipelineWrapper:
             latent_h=h,
             latent_w=w,
         )
+        sigmas = sigmas.to(device)
         timesteps = timesteps.to(device)
 
         # When debug logging is enabled, wrap the full sampling loop in a
@@ -189,7 +188,7 @@ class ZImageDiffSynthPipelineWrapper:
         else:
             image = vae.decode(latents)
         image = (image / 2 + 0.5).clamp(0, 1)
-        image = image.cpu().float().numpy()
+        image = image.float().cpu().numpy()
         image = (image.transpose(0, 2, 3, 1) * 255).round().astype(np.uint8)
         images = [Image.fromarray(img) for img in image]
         return _ImagesOutput(images)

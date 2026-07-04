@@ -729,7 +729,7 @@ def apply_learnable_snr_gos(
     snr = (snr + offset_1) * scale + offset_2
 
     gamma_over_snr = torch.div(torch.ones_like(snr) * gamma, snr)
-    snr_weight = torch.abs(gamma_over_snr).float().to(loss.device)  # directly using gamma over snr
+    snr_weight = torch.abs(gamma_over_snr).to(device=loss.device, dtype=loss.dtype)  # keep loss dtype
     snr_adjusted_loss = loss * snr_weight
 
     return snr_adjusted_loss
@@ -799,7 +799,7 @@ def apply_snr_weight(
             snr_weight = torch.minimum(gamma_over_snr, torch.ones_like(snr_tensor))
 
     # Multiply loss by calculated weight
-    snr_adjusted_loss = loss * snr_weight
+    snr_adjusted_loss = loss * snr_weight.to(device=loss.device, dtype=loss.dtype)
 
     return snr_adjusted_loss
 

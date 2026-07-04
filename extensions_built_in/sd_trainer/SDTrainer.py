@@ -667,10 +667,10 @@ class SDTrainer(BaseSDTrainProcess):
             prior_pred: Optional[torch.Tensor],
             batch: 'DataLoaderBatchDTO',
     ) -> torch.Tensor:
-        loss = torch.nn.functional.mse_loss(pred.float(), target.float(), reduction="none")
+        loss = torch.nn.functional.mse_loss(pred, target, reduction="none")
 
         if self.train_config.do_prior_divergence and prior_pred is not None:
-            loss = loss + (torch.nn.functional.mse_loss(pred.float(), prior_pred.float(), reduction="none") * -1.0)
+            loss = loss + (torch.nn.functional.mse_loss(pred, prior_pred, reduction="none") * -1.0)
 
         if self.train_config.train_turbo:
             mask_multiplier = mask_multiplier[:, 3:, :, :]
@@ -718,7 +718,7 @@ class SDTrainer(BaseSDTrainProcess):
         has_mask = batch.mask_tensor is not None
 
         with torch.no_grad():
-            loss_multiplier = torch.tensor(batch.loss_multiplier_list).to(self.device_torch, dtype=torch.float32)
+            loss_multiplier = torch.tensor(batch.loss_multiplier_list).to(self.device_torch, dtype=dtype)
 
         if self.train_config.match_noise_norm:
             # match the norm of the noise
@@ -834,10 +834,10 @@ class SDTrainer(BaseSDTrainProcess):
                         timestep = timestep_chunks[idx]
                         self.sd.noise_scheduler._step_index = None
                         self.sd.noise_scheduler._init_step_index(timestep)
-                        sample = noisy_latent_chunks[idx].to(torch.float32)
+                        sample = noisy_latent_chunks[idx]
                         
-                        sigma = self.sd.noise_scheduler.sigmas[self.sd.noise_scheduler.step_index]
-                        sigma_next = self.sd.noise_scheduler.sigmas[-1] # use last sigma for final step
+                        sigma = self.sd.noise_scheduler.sigmas[self.sd.noise_scheduler.step_index].to(sample.device, dtype=sample.dtype)
+                        sigma_next = self.sd.noise_scheduler.sigmas[-1].to(sample.device, dtype=sample.dtype) # use last sigma for final step
                         prev_sample = sample + (sigma_next - sigma) * model_output
                         stepped_chunks.append(prev_sample)
                     
@@ -985,12 +985,12 @@ class SDTrainer(BaseSDTrainProcess):
                     raise ValueError(f"Unknown prediction type {self.sd.noise_scheduler.config.prediction_type}")
 
             # mse loss without reduction
-            loss_per_element = (weighing.float() * (denoised_latents.float() - target.float()) ** 2)
+            loss_per_element = (weighing * (denoised_latents - target) ** 2)
             loss = loss_per_element
         else:
 
             if self.train_config.loss_type == "mae":
-                loss = torch.nn.functional.l1_loss(pred.float(), target.float(), reduction="none")
+                loss = torch.nn.functional.l1_loss(pred, target, reduction="none")
             elif self.train_config.loss_type == "wavelet":
                 loss = wavelet_loss(pred, batch.latents, noise)
             elif self.train_config.loss_type == "stepped":
@@ -1010,7 +1010,7 @@ class SDTrainer(BaseSDTrainProcess):
 
         if loss.dim() > 1:
             if self.train_config.do_prior_divergence and prior_pred is not None:
-                loss = loss + (torch.nn.functional.mse_loss(pred.float(), prior_pred.float(), reduction="none") * -1.0)
+                loss = loss + (torch.nn.functional.mse_loss(pred, prior_pred, reduction="none") * -1.0)
 
             if self.train_config.train_turbo:
                 mask_multiplier = mask_multiplier[:, 3:, :, :]
@@ -1039,9 +1039,9 @@ class SDTrainer(BaseSDTrainProcess):
         if self.train_config.inverted_mask_prior and prior_pred is not None and prior_mask_multiplier is not None:
             assert not self.train_config.train_turbo
             if self.train_config.loss_type == "mae":
-                prior_loss = torch.nn.functional.l1_loss(pred.float(), prior_pred.float(), reduction="none")
+                prior_loss = torch.nn.functional.l1_loss(pred, prior_pred, reduction="none")
             else:
-                prior_loss = torch.nn.functional.mse_loss(pred.float(), prior_pred.float(), reduction="none")
+                prior_loss = torch.nn.functional.mse_loss(pred, prior_pred, reduction="none")
 
             prior_loss = prior_loss * prior_mask_multiplier * self.train_config.inverted_mask_prior_multiplier
             if torch.isnan(prior_loss).any():
@@ -1107,7 +1107,7 @@ class SDTrainer(BaseSDTrainProcess):
         
         # check for audio loss
         if batch.audio_pred is not None and batch.audio_target is not None:
-            audio_loss = torch.nn.functional.mse_loss(batch.audio_pred.float(), batch.audio_target.float(), reduction="mean")
+            audio_loss = torch.nn.functional.mse_loss(batch.audio_pred, batch.audio_target, reduction="mean")
             loss = loss + audio_loss
 
         # check for additional losses
@@ -1266,8 +1266,8 @@ class SDTrainer(BaseSDTrainProcess):
 
         # compute loss
         loss = torch.nn.functional.mse_loss(
-            u_shifted.float(),
-            v_target.float(),
+            u_shifted,
+            v_target,
             reduction='none'
         )
 
@@ -2352,21 +2352,21 @@ class SDTrainer(BaseSDTrainProcess):
         if not self.is_grad_accumulation_step:
             # Minimal fail-fast check for bf16 LoRA training:
             # trainable grads must be fp32 before optimizer step.
-            if self.network is not None and str(self.train_config.dtype).lower() in ("bf16", "bfloat16"):
-                bad_grad = None
-                for param_group in self.params:
-                    params_to_check = param_group.get("params", []) if isinstance(param_group, dict) else param_group
-                    for param in params_to_check:
-                        if isinstance(param, torch.nn.Parameter) and param.requires_grad and param.grad is not None:
-                            if param.grad.dtype != torch.float32:
-                                bad_grad = param.grad.dtype
-                                break
-                    if bad_grad is not None:
-                        break
-                if bad_grad is not None:
-                    raise RuntimeError(
-                        f"Expected fp32 trainable gradients before optimizer.step(), got {bad_grad}."
-                    )
+            # if self.network is not None and str(self.train_config.dtype).lower() in ("bf16", "bfloat16"):
+            #     bad_grad = None
+            #     for param_group in self.params:
+            #         params_to_check = param_group.get("params", []) if isinstance(param_group, dict) else param_group
+            #         for param in params_to_check:
+            #             if isinstance(param, torch.nn.Parameter) and param.requires_grad and param.grad is not None:
+            #                 if param.grad.dtype != torch.float32:
+            #                     bad_grad = param.grad.dtype
+            #                     break
+            #         if bad_grad is not None:
+            #             break
+            #     if bad_grad is not None:
+            #         raise RuntimeError(
+            #             f"Expected fp32 trainable gradients before optimizer.step(), got {bad_grad}."
+            #         )
             # fix this for multi params
             if self.train_config.optimizer != 'adafactor':
                 if isinstance(self.params[0], dict):

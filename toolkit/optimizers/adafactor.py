@@ -746,11 +746,11 @@ class Adafactor(torch.optim.Optimizer):
             if device is None:
                 device = v_t.device
             values.append(v_t.to(device))
-            weights.append(torch.tensor(p.numel(), device=device, dtype=torch.float32))
+            weights.append(p.numel())
         if not values:
             return default
         v_stacked = torch.stack(values)
-        w_stacked = torch.stack(weights)
+        w_stacked = torch.tensor(weights, device=device, dtype=torch.float32)
         if reduction == 'max':
             return v_stacked.max().item()
         weighted_sum = torch.sum(v_stacked * w_stacked)
@@ -774,11 +774,11 @@ class Adafactor(torch.optim.Optimizer):
                 if device is None:
                     device = v_t.device
                 values.append(v_t.to(device))
-                weights.append(torch.tensor(p.numel(), device=device, dtype=torch.float32))
+                weights.append(p.numel())
         if not values:
             return None
         v_stacked = torch.stack(values)
-        w_stacked = torch.stack(weights)
+        w_stacked = torch.tensor(weights, device=device, dtype=torch.float32)
         weighted_sum = torch.sum(v_stacked * w_stacked)
         total_weight = torch.sum(w_stacked)
         return (weighted_sum / (total_weight + 1e-12)).item()
@@ -885,11 +885,11 @@ class Adafactor(torch.optim.Optimizer):
             if device is None:
                 device = v_t.device
             ur_values.append(v_t.to(device))
-            ur_weights.append(torch.tensor(p.numel(), device=device, dtype=torch.float32))
+            ur_weights.append(p.numel())
         if not ur_values:
             return
         ur_stacked = torch.stack(ur_values)
-        w_stacked = torch.stack(ur_weights)
+        w_stacked = torch.tensor(ur_weights, device=device, dtype=torch.float32)
         avg_ur = (torch.sum(ur_stacked * w_stacked) / (torch.sum(w_stacked) + 1e-12)).item()
 
         sum_lr_weighted = sum(
@@ -906,7 +906,7 @@ class Adafactor(torch.optim.Optimizer):
             if device_g is None:
                 device_g = v_t.device
             gns_values.append(v_t.to(device_g))
-            gns_weights.append(torch.tensor(p.numel(), device=device_g, dtype=torch.float32))
+            gns_weights.append(p.numel())
 
         dr = float(group["rms_max_decay_rate"])
         if "rms_ema" not in group:
@@ -923,7 +923,7 @@ class Adafactor(torch.optim.Optimizer):
         group["grad_rms"] = torch.tensor(avg_gr, dtype=torch.float32, device=ref_device)
         if gns_values:
             gv = torch.stack(gns_values)
-            gw = torch.stack(gns_weights)
+            gw = torch.tensor(gns_weights, device=device_g, dtype=torch.float32)
             avg_gns = (torch.sum(gv * gw) / (torch.sum(gw) + 1e-12)).item()
             group["gns"] = torch.tensor(avg_gns, dtype=torch.float32, device=ref_device)
         else:

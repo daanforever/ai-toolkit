@@ -138,7 +138,7 @@ class ZImageDiffSynthModel(BaseModel):
             net = unwrap_model(net)
             try:
                 # LoRA trainable weights must stay fp32 for optimizer.step(); model may be bf16.
-                net.force_to(target, torch.float32)
+                net.force_to(target, self.torch_dtype)
                 if is_debug_enabled():
                     self.print_and_status_update(
                         f"\n[zimage_diffsynth] main network force_to {device}"
@@ -429,7 +429,7 @@ class ZImageDiffSynthModel(BaseModel):
     def get_loss_target(self, *args, **kwargs):
         noise = kwargs.get("noise")
         batch = kwargs.get("batch")
-        return (noise.float() - batch.latents.float()).detach()
+        return (noise - batch.latents).detach()
 
     def get_generation_pipeline(self):
         return sampling_mod.get_generation_pipeline(self)

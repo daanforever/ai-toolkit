@@ -969,7 +969,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
             sigma = sigma.unsqueeze(-1)
         return sigma
     
-    def get_optimal_noise(self, latents, dtype=torch.float32):
+    def get_optimal_noise(self, latents, dtype=None):
+        if dtype is None:
+            dtype = latents.dtype
         batch_num = latents.shape[0]
         chunks = torch.chunk(latents, batch_num, dim=0)
         noise_chunks = []
@@ -987,7 +989,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
         noise = torch.cat(noise_chunks, dim=0)
         return noise
     
-    def get_consistent_noise(self, latents, batch: 'DataLoaderBatchDTO', dtype=torch.float32):
+    def get_consistent_noise(self, latents, batch: 'DataLoaderBatchDTO', dtype=None):
+        if dtype is None:
+            dtype = latents.dtype
         batch_num = latents.shape[0]
         chunks = torch.chunk(latents, batch_num, dim=0)
         noise_chunks = []
@@ -1012,10 +1016,12 @@ class BaseSDTrainProcess(BaseTrainProcess):
         self, 
         latents, 
         batch_size, 
-        dtype=torch.float32, 
+        dtype=None, 
         batch: 'DataLoaderBatchDTO' = None,
         timestep=None,
     ):
+        if dtype is None:
+            dtype = latents.dtype
         if self.train_config.optimal_noise_pairing_samples > 1:
             noise = self.get_optimal_noise(latents, dtype=dtype)
         elif self.train_config.force_consistent_noise:
@@ -1412,7 +1418,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 )
 
                 # todo switch everything to proper mixed precision like this
-                self.network.force_to(self.device_torch, dtype=torch.float32)
+                self.network.force_to(self.device_torch, dtype=get_torch_dtype(self.train_config.dtype))
 
                 # give network to sd so it can use it
                 self.sd.network = self.network
@@ -1581,7 +1587,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 
                 # give it to the sd network
                 self.sd.decorator = self.decorator
-                self.decorator.to(self.device_torch, dtype=torch.float32)
+                self.decorator.to(self.device_torch, dtype=get_torch_dtype(self.train_config.dtype))
                 self.decorator.train()
 
                 flush()
