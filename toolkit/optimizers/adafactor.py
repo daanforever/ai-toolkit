@@ -1594,7 +1594,8 @@ class Adafactor(torch.optim.Optimizer):
         """Get beta2 (second-moment coefficient) for each parameter group."""
         out = []
         for group in self.param_groups:
-            out.append(float(group.get("beta2_effective", group.get("beta2", self._beta2))))
+            val = group.get("beta2_effective", group.get("beta2", self._beta2))
+            out.append(float(val if val is not None else self._beta2))
         return out
 
     def get_mean_beta2(self):

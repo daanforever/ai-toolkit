@@ -1997,67 +1997,69 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 effective_wd = 0.0  # Weighted mean effective weight decay per param (Adafactor)
                 precond_gain = 0.0  # Preconditioner+clip gain before lr/momentum (Adafactor)
                 momentum_gain = 0.0  # Momentum gain: final/scaled update (Adafactor)
+                def _safe_get(opt, method_name, default=0.0):
+                    if hasattr(opt, method_name):
+                        try:
+                            val = getattr(opt, method_name)()
+                            return float(val) if val is not None else default
+                        except Exception:
+                            return default
+                    return default
+
                 beta1 = 0.0  # Momentum coefficient (Adafactor)
                 beta2 = 0.0  # Second-moment coefficient (Adafactor)
-                if not did_oom and loss_dict is not None:
-                    if hasattr(optimizer, 'get_mean_learning_rate'):
-                        learning_rate = optimizer.get_mean_learning_rate()
-                    elif hasattr(optimizer, 'get_avg_learning_rate'):
-                        learning_rate = optimizer.get_avg_learning_rate()
-                    elif hasattr(optimizer, 'get_learning_rates'):
-                        learning_rate = optimizer.get_learning_rates()[0]
-                    elif self.train_config.optimizer.lower().startswith('dadaptation') or \
-                            self.train_config.optimizer.lower().startswith('prodigy'):
-                        learning_rate = (
-                                optimizer.param_groups[0]["d"] *
-                                optimizer.param_groups[0]["lr"]
-                        )
-                    else:
-                        learning_rate = optimizer.param_groups[0]['lr']
-                    if hasattr(optimizer, 'get_weight_decay'):
-                        weight_decay = optimizer.get_weight_decay()
-                    else:
-                        weight_decay = optimizer.param_groups[0].get('weight_decay', 0.0)
+                if not did_oom and loss_dict is not None and not getattr(self, "is_grad_accumulation_step", False):
+                    learning_rate = _safe_get(optimizer, 'get_mean_learning_rate', 0.0)
+                    if learning_rate == 0.0:
+                        learning_rate = _safe_get(optimizer, 'get_avg_learning_rate', 0.0)
+                    if learning_rate == 0.0:
+                        try:
+                            learning_rate = optimizer.get_learning_rates()[0] if hasattr(optimizer, 'get_learning_rates') else 0.0
+                        except Exception:
+                            learning_rate = 0.0
+                    if learning_rate == 0.0:
+                        if self.train_config.optimizer.lower().startswith('dadaptation') or \
+                                self.train_config.optimizer.lower().startswith('prodigy'):
+                            try:
+                                learning_rate = (
+                                        optimizer.param_groups[0]["d"] *
+                                        optimizer.param_groups[0]["lr"]
+                                )
+                            except Exception:
+                                learning_rate = 0.0
+                        else:
+                            try:
+                                learning_rate = optimizer.param_groups[0]['lr']
+                            except Exception:
+                                learning_rate = 0.0
+
+                    weight_decay = _safe_get(optimizer, 'get_weight_decay', 0.0)
+                    if weight_decay == 0.0:
+                        try:
+                            weight_decay = optimizer.param_groups[0].get('weight_decay', 0.0)
+                        except Exception:
+                            weight_decay = 0.0
                     
                     # Get average weight update RMS if optimizer supports it (e.g., Adafactor)
-                    if hasattr(optimizer, 'get_mean_update_rms'):
-                        update_rms = optimizer.get_mean_update_rms()
-                    if hasattr(optimizer, 'get_mean_update_rms_max'):
-                        update_rms_max = optimizer.get_mean_update_rms_max()
-                    if hasattr(optimizer, 'get_mean_rms'):
-                        param_rms = optimizer.get_mean_rms()
-                    if hasattr(optimizer, 'get_max_rms'):
-                        param_rms_max = optimizer.get_max_rms()
-                    if hasattr(optimizer, 'get_min_rms'):
-                        param_rms_min = optimizer.get_min_rms()
-                    if hasattr(optimizer, 'get_mean_grad_rms'):
-                        grad_rms = optimizer.get_mean_grad_rms()
-                    if hasattr(optimizer, 'get_mean_grad_rms_max'):
-                        grad_rms_max = optimizer.get_mean_grad_rms_max()
-                    if hasattr(optimizer, 'get_mean_gns'):
-                        gns = optimizer.get_mean_gns()
-                    if hasattr(optimizer, 'get_mean_dir_consistency'):
-                        dir_consistency_mean = optimizer.get_mean_dir_consistency()
-                    if hasattr(optimizer, 'get_mean_instability_score'):
-                        instability_score = optimizer.get_mean_instability_score()
-                    if hasattr(optimizer, 'get_mean_saddle_point_boost'):
-                        saddle_point_boost = optimizer.get_mean_saddle_point_boost()
-                    if hasattr(optimizer, 'get_mean_step_efficiency'):
-                        step_efficiency = optimizer.get_mean_step_efficiency()
-                    if hasattr(optimizer, 'get_mean_dynamic_gain'):
-                        dynamic_gain = optimizer.get_mean_dynamic_gain()
-                    if hasattr(optimizer, 'get_mean_effective_lr'):
-                        effective_lr = optimizer.get_mean_effective_lr()
-                    if hasattr(optimizer, 'get_mean_effective_wd'):
-                        effective_wd = optimizer.get_mean_effective_wd()
-                    if hasattr(optimizer, 'get_mean_precond_gain'):
-                        precond_gain = optimizer.get_mean_precond_gain()
-                    if hasattr(optimizer, 'get_mean_momentum_gain'):
-                        momentum_gain = optimizer.get_mean_momentum_gain()
-                    if hasattr(optimizer, 'get_mean_beta1'):
-                        beta1 = optimizer.get_mean_beta1()
-                    if hasattr(optimizer, 'get_mean_beta2'):
-                        beta2 = optimizer.get_mean_beta2()
+                    update_rms = _safe_get(optimizer, 'get_mean_update_rms', 0.0)
+                    update_rms_max = _safe_get(optimizer, 'get_mean_update_rms_max', 0.0)
+                    param_rms = _safe_get(optimizer, 'get_mean_rms', 0.0)
+                    param_rms_max = _safe_get(optimizer, 'get_max_rms', 0.0)
+                    param_rms_min = _safe_get(optimizer, 'get_min_rms', 0.0)
+                    grad_rms = _safe_get(optimizer, 'get_mean_grad_rms', 0.0)
+                    grad_rms_max = _safe_get(optimizer, 'get_mean_grad_rms_max', 0.0)
+                    gns = _safe_get(optimizer, 'get_mean_gns', 0.0)
+                    dir_consistency_mean = _safe_get(optimizer, 'get_mean_dir_consistency', 0.0)
+                    instability_score = _safe_get(optimizer, 'get_mean_instability_score', 0.0)
+                    saddle_point_boost = _safe_get(optimizer, 'get_mean_saddle_point_boost', 1.0)
+                    step_efficiency = _safe_get(optimizer, 'get_mean_step_efficiency', 0.0)
+                    dynamic_gain = _safe_get(optimizer, 'get_mean_dynamic_gain', 0.0)
+                    effective_lr = _safe_get(optimizer, 'get_mean_effective_lr', 0.0)
+                    effective_wd = _safe_get(optimizer, 'get_mean_effective_wd', 0.0)
+                    precond_gain = _safe_get(optimizer, 'get_mean_precond_gain', 0.0)
+                    momentum_gain = _safe_get(optimizer, 'get_mean_momentum_gain', 0.0)
+                    beta1 = _safe_get(optimizer, 'get_mean_beta1', 0.0)
+                    beta2 = _safe_get(optimizer, 'get_mean_beta2', 0.0)
 
                     prog_bar_string = f"lr: {learning_rate:.1e}"
                     if weight_decay > 0:
@@ -2258,10 +2260,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                 'train/beta2': beta2,
                             })
 
-                            for key, value in loss_dict.items():
-                                self.logger.log({
-                                    f'loss/{key}': value,
-                                })
+                            if loss_dict is not None:
+                                for key, value in loss_dict.items():
+                                    self.logger.log({
+                                        f'loss/{key}': value,
+                                    })
                     elif self.logging_config.log_every is None:
                         if self.accelerator.is_main_process:
                             # log every step
@@ -2349,10 +2352,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                 'train/beta2': beta2,
                             })
 
-                            for key, value in loss_dict.items():
-                                self.logger.log({
-                                    f'loss/{key}': value,
-                                })
+                            if loss_dict is not None:
+                                for key, value in loss_dict.items():
+                                    self.logger.log({
+                                        f'loss/{key}': value,
+                                    })
 
                     if self.performance_log_every > 0 and self.step_num % self.performance_log_every == 0:
                         if self.progress_bar is not None:

@@ -103,7 +103,10 @@ export default function useJobLossLog(
 
         for (const r of results) {
           const k = r.key;
-          const newPoints = (r.points ?? []).filter(p => p.value !== null);
+          const newPoints = (r.points ?? []).map(p => ({
+            ...p,
+            value: p.value !== null ? p.value : 0.0
+          }));
 
           if (!didInitialLoadRef.current) {
             // initial: replace

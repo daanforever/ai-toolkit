@@ -120,8 +120,10 @@ export default function JobLossGraph({ job }: Props) {
       const pts: LossPoint[] = series[key] ?? [];
 
       let raw = pts
-        .filter(p => p.value !== null && Number.isFinite(p.value as number))
-        .map(p => ({ step: p.step, value: p.value as number }))
+        .map(p => ({
+          step: p.step,
+          value: p.value !== null && Number.isFinite(p.value as number) ? (p.value as number) : 0.0
+        }))
         .filter(p => (useLogScale ? p.value > 0 : true))
         .filter((_, idx) => idx % stride === 0);
 
