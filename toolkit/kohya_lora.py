@@ -1017,16 +1017,31 @@ class LoRANetwork(torch.nn.Module):
         all_params = []
 
         def enumerate_params(loras):
-            params = []
+            lora_params = []
+            magnitude_params = []
             for lora in loras:
-                params.extend(lora.parameters())
-            return params
+                for name, param in lora.named_parameters():
+                    if "magnitude" in name:
+                        magnitude_params.append(param)
+                    else:
+                        lora_params.append(param)
+            return lora_params, magnitude_params
 
         if self.text_encoder_loras:
-            param_data = {"params": enumerate_params(self.text_encoder_loras)}
+            lora_params, magnitude_params = enumerate_params(self.text_encoder_loras)
+            param_data = {"params": lora_params}
             if text_encoder_lr is not None:
                 param_data["lr"] = text_encoder_lr
             all_params.append(param_data)
+
+            if magnitude_params:
+                mag_param_data = {
+                    "params": magnitude_params,
+                    "scale_parameter": False,
+                }
+                if text_encoder_lr is not None:
+                    mag_param_data["lr"] = text_encoder_lr
+                all_params.append(mag_param_data)
 
         if self.unet_loras:
             if self.block_lr:
@@ -1040,7 +1055,8 @@ class LoRANetwork(torch.nn.Module):
 
                 # blockごとにパラメータを設定する
                 for idx, block_loras in block_idx_to_lora.items():
-                    param_data = {"params": enumerate_params(block_loras)}
+                    lora_params, magnitude_params = enumerate_params(block_loras)
+                    param_data = {"params": lora_params}
 
                     if unet_lr is not None:
                         param_data["lr"] = unet_lr * self.get_lr_weight(block_loras[0])
@@ -1050,11 +1066,32 @@ class LoRANetwork(torch.nn.Module):
                         continue
                     all_params.append(param_data)
 
+                    if magnitude_params:
+                        mag_param_data = {
+                            "params": magnitude_params,
+                            "scale_parameter": False,
+                        }
+                        if unet_lr is not None:
+                            mag_param_data["lr"] = unet_lr * self.get_lr_weight(block_loras[0])
+                        elif default_lr is not None:
+                            mag_param_data["lr"] = default_lr * self.get_lr_weight(block_loras[0])
+                        all_params.append(mag_param_data)
+
             else:
-                param_data = {"params": enumerate_params(self.unet_loras)}
+                lora_params, magnitude_params = enumerate_params(self.unet_loras)
+                param_data = {"params": lora_params}
                 if unet_lr is not None:
                     param_data["lr"] = unet_lr
                 all_params.append(param_data)
+
+                if magnitude_params:
+                    mag_param_data = {
+                        "params": magnitude_params,
+                        "scale_parameter": False,
+                    }
+                    if unet_lr is not None:
+                        mag_param_data["lr"] = unet_lr
+                    all_params.append(mag_param_data)
 
         return all_params
 

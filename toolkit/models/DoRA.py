@@ -87,7 +87,7 @@ class DoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
         # self.lora_B[adapter_name] = nn.Linear(r, self.out_features, bias=False)
         self.lora_down = nn.Linear(d_in, self.lora_dim, bias=False)  # lora_A
         # self.lora_down.weight.data = torch.zeros_like(self.lora_down.weight.data)
-        self.lora_down.weight.data = torch.randn_like(self.lora_down.weight.data) * std_dev
+        torch.nn.init.kaiming_uniform_(self.lora_down.weight, a=math.sqrt(5))
 
         # m = Magnitude column-wise across output dimension
         weight = self.get_orig_weight()
