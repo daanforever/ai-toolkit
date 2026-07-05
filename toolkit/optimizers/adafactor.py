@@ -1266,7 +1266,7 @@ class Adafactor(torch.optim.Optimizer):
                     state.pop("precond_gain", None)
                     state.pop("momentum_gain", None)
 
-                if group["weight_decay"] != 0:
+                if group["weight_decay"] != 0 and not group.get("is_magnitude", False):
                     wd = group["weight_decay"]
                     weight_decay_mode = self._validate_weight_decay_mode(
                         group.get("weight_decay_mode", "absolute")

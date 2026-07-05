@@ -1037,7 +1037,7 @@ class LoRANetwork(torch.nn.Module):
             if magnitude_params:
                 mag_param_data = {
                     "params": magnitude_params,
-                    "scale_parameter": False,
+                    "is_magnitude": True,
                 }
                 if text_encoder_lr is not None:
                     mag_param_data["lr"] = text_encoder_lr
@@ -1069,7 +1069,7 @@ class LoRANetwork(torch.nn.Module):
                     if magnitude_params:
                         mag_param_data = {
                             "params": magnitude_params,
-                            "scale_parameter": False,
+                            "is_magnitude": True,
                         }
                         if unet_lr is not None:
                             mag_param_data["lr"] = unet_lr * self.get_lr_weight(block_loras[0])
@@ -1087,7 +1087,7 @@ class LoRANetwork(torch.nn.Module):
                 if magnitude_params:
                     mag_param_data = {
                         "params": magnitude_params,
-                        "scale_parameter": False,
+                        "is_magnitude": True,
                     }
                     if unet_lr is not None:
                         mag_param_data["lr"] = unet_lr
