@@ -614,6 +614,8 @@ class Adafactor(torch.optim.Optimizer):
         eps0       = param_group["eps"][0]          # Small constant for numerical stability (division guard)
         eps1       = param_group["eps"][1]          # Parameter scale regularization constant
         param_rms  = param_state["RMS"].item()      # Current parameter RMS magnitude
+        if not math.isfinite(param_rms):
+            param_rms = eps1
         scale      = 1.0                            # Default scale for LR
         relative   = 1.0                            # Default relative for LR
 
@@ -624,8 +626,12 @@ class Adafactor(torch.optim.Optimizer):
         if param_group["relative_step"]:
             # Adaptive LR mode: compute LR from gradient and parameter statistics
             grad_rms      = param_state["grad_rms"].item()        # Current gradient RMS
+            if not math.isfinite(grad_rms):
+                grad_rms = eps0
             # Running max of parameter RMS over the group (decayed each step, then max with each p).
             group_param_rms_max = param_group.get("rms_max", torch.tensor(eps1)).item()
+            if not math.isfinite(group_param_rms_max):
+                group_param_rms_max = eps1
 
             brake = 1.0
             soft_brake = 1.0
@@ -718,6 +724,42 @@ class Adafactor(torch.optim.Optimizer):
     @staticmethod
     def _rms(tensor):
         return tensor.norm(2) / (tensor.numel() ** 0.5)
+
+    @staticmethod
+    def _finite_or_zero(tensor: torch.Tensor) -> torch.Tensor:
+        if torch.isfinite(tensor).all():
+            return tensor
+        return torch.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0)
+
+    @staticmethod
+    def _maybe_finite_or_zero_inplace(tensor: torch.Tensor) -> None:
+        if not torch.isfinite(tensor).all():
+            tensor.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
+
+    @staticmethod
+    def _clamp_effective_wd(effective_wd):
+        max_wd = 1.0 - 1e-6
+        if isinstance(effective_wd, torch.Tensor):
+            if not torch.isfinite(effective_wd).all():
+                return 0.0
+            return torch.clamp(effective_wd, min=0.0, max=max_wd)
+        if not math.isfinite(effective_wd):
+            return 0.0
+        return max(0.0, min(float(effective_wd), max_wd))
+
+    @staticmethod
+    def _maybe_group_running_max_update(group, key: str, candidate: torch.Tensor) -> None:
+        c = candidate.detach().item()
+        if not math.isfinite(c):
+            return
+        Adafactor._group_running_max_update(group, key, candidate)
+
+    @staticmethod
+    def _maybe_group_running_min_update(group, key: str, candidate: torch.Tensor) -> None:
+        c = candidate.detach().item()
+        if not math.isfinite(c):
+            return
+        Adafactor._group_running_min_update(group, key, candidate)
 
     def _get_group_scalars(
         self,
@@ -849,10 +891,12 @@ class Adafactor(torch.optim.Optimizer):
         if grad_rms_max is None:
             return beta2
         max_val = grad_rms_max.item() if isinstance(grad_rms_max, torch.Tensor) else float(grad_rms_max)
-        if max_val <= eps0:
+        if not math.isfinite(max_val) or max_val <= eps0:
             return beta2_min
 
         grad_val = grad_rms.item() if isinstance(grad_rms, torch.Tensor) else float(grad_rms)
+        if not math.isfinite(grad_val):
+            return beta2_min
         activity = max(0.0, min(1.0, grad_val / (max_val + eps0)))
         return beta2_min + (beta2 - beta2_min) * activity
 
@@ -934,8 +978,10 @@ class Adafactor(torch.optim.Optimizer):
         eps0 = group["eps"][0]
         eps_t = torch.tensor(float(eps0), dtype=torch.float32, device=ref_device)
         u_rms_t = group["update_rms"]
-        u_max = group["update_rms_max"]
-        if isinstance(u_max, torch.Tensor):
+        u_max = group.get("update_rms_max")
+        if u_max is None:
+            u_max = u_rms_t
+        elif isinstance(u_max, torch.Tensor):
             u_max = u_max.to(ref_device)
         else:
             u_max = torch.tensor(float(u_max), dtype=torch.float32, device=ref_device)
@@ -1063,8 +1109,7 @@ class Adafactor(torch.optim.Optimizer):
                 if grad.is_sparse:
                     raise RuntimeError(
                         "Adafactor does not support sparse gradients.")
-                if not torch.isfinite(grad).all():
-                    grad = torch.nan_to_num(grad, nan=0.0, posinf=0.0, neginf=0.0)
+                grad = self._finite_or_zero(grad)
                 
                 # if p has atts _scale then it is quantized. We need to divide the grad by the scale
                 # if hasattr(p, "_scale"):
@@ -1120,12 +1165,16 @@ class Adafactor(torch.optim.Optimizer):
 
                 state["RMS"] = self._rms(p_data_fp32)
                 rms_t = state["RMS"]
-                self._group_running_max_update(group, "rms_max", rms_t)
-                self._group_running_min_update(group, "rms_min", rms_t)
+                if not math.isfinite(rms_t.item()):
+                    p_data_fp32.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
+                    state["RMS"] = self._rms(p_data_fp32)
+                    rms_t = state["RMS"]
+                self._maybe_group_running_max_update(group, "rms_max", rms_t)
+                self._maybe_group_running_min_update(group, "rms_min", rms_t)
 
                 state["grad_rms"] = self._rms(grad)
                 gr = state["grad_rms"]
-                self._group_running_max_update(group, "grad_rms_max", gr)
+                self._maybe_group_running_max_update(group, "grad_rms_max", gr)
 
                 eps0 = group["eps"][0]
                 beta2 = self._effective_beta2(group, gr, eps0, state["step"])
@@ -1138,6 +1187,8 @@ class Adafactor(torch.optim.Optimizer):
                         update.mean(dim=-1), alpha=(1.0 - beta2))
                     exp_avg_sq_col.mul_(beta2).add_(
                         update.mean(dim=-2), alpha=(1.0 - beta2))
+                    self._maybe_finite_or_zero_inplace(exp_avg_sq_row)
+                    self._maybe_finite_or_zero_inplace(exp_avg_sq_col)
 
                     # Approximation of exponential moving average of square of gradient
                     update = self._approx_sq_grad(
@@ -1147,11 +1198,13 @@ class Adafactor(torch.optim.Optimizer):
                     exp_avg_sq = state["exp_avg_sq"]
 
                     exp_avg_sq.mul_(beta2).add_(update, alpha=(1.0 - beta2))
-                    update = exp_avg_sq.rsqrt().mul_(grad)
+                    self._maybe_finite_or_zero_inplace(exp_avg_sq)
+                    update = exp_avg_sq.clamp(min=eps0).rsqrt().mul_(grad)
 
                 # Preconditioned + clipped direction (before LR) for fresh brake signal
                 update_hat = update.div_(
                     (self._rms(update) / group["clip_threshold"]).clamp_(min=1.0))
+                update_hat = self._finite_or_zero(update_hat)
 
                 if (
                     "beta2_direction_ema" not in state
@@ -1189,14 +1242,14 @@ class Adafactor(torch.optim.Optimizer):
 
                     # Momentum on clipped+lr-scaled direction (transformers / pre-16acf685)
                     exp_avg.mul_(beta1_for_ema).add_(scaled_update, alpha=(1 - beta1_for_ema))
+                    self._maybe_finite_or_zero_inplace(exp_avg)
 
                     update = exp_avg
 
                 else:
                     update = scaled_update
 
-                if not torch.isfinite(update).all():
-                    update = torch.nan_to_num(update, nan=0.0, posinf=0.0, neginf=0.0)
+                update = self._finite_or_zero(update)
 
                 update_rms = self._rms(update)
 
@@ -1222,15 +1275,15 @@ class Adafactor(torch.optim.Optimizer):
                         # Intentionally no `lr` here: this mode is RMS-conditioned shrinkage by design.
                         # With typical defaults (lr=1e-4, update_rms~5e-5..1e-4, weight_decay=1e-4),
                         # multiplier (1 - wd * update_rms) stays ~0.99999999 and cannot flip sign.
-                        effective_wd = wd * update_rms
+                        effective_wd = self._clamp_effective_wd(wd * update_rms)
                         p_data_fp32.mul_(1.0 - effective_wd)
                     elif weight_decay_mode == "param_rms":
                         # Intentionally no `lr` here: this mode is RMS-conditioned shrinkage by design.
                         # For param_rms mode under the same defaults and RMS~1, (1 - wd * rms) ~= 0.9999 (>0).
-                        effective_wd = wd * rms_t
+                        effective_wd = self._clamp_effective_wd(wd * rms_t)
                         p_data_fp32.mul_(1.0 - effective_wd)
                     else:
-                        effective_wd = wd * lr
+                        effective_wd = self._clamp_effective_wd(wd * lr)
                         p_data_fp32.mul_(1.0 - effective_wd)
                     if isinstance(effective_wd, torch.Tensor):
                         state["effective_wd"] = effective_wd.detach().item()
@@ -1241,7 +1294,7 @@ class Adafactor(torch.optim.Optimizer):
 
                 p_data_fp32.add_(-update)
 
-                self._group_running_max_update(group, "update_rms_max", update_rms)
+                self._maybe_group_running_max_update(group, "update_rms_max", update_rms)
 
                 if p.dtype != torch.float32 or is_quantized:
                     if self.stochastic_rounding:
