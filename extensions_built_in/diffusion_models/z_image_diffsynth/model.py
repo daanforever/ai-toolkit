@@ -643,15 +643,29 @@ class ZImageDiffSynthModel(BaseModel):
         lr_value = unet_lr if unet_lr is not None else default_lr
         param_groups = []
         for _, block_loras in grouped_loras.items():
-            block_params = []
+            lora_params = []
+            magnitude_params = []
             for lora in block_loras:
-                block_params.extend(lora.parameters())
-            if not block_params:
-                continue
-            group = {"params": block_params}
-            if lr_value is not None:
-                group["lr"] = lr_value
-            param_groups.append(group)
+                for name, param in lora.named_parameters():
+                    if "magnitude" in name:
+                        magnitude_params.append(param)
+                    else:
+                        lora_params.append(param)
+
+            if lora_params:
+                group = {"params": lora_params}
+                if lr_value is not None:
+                    group["lr"] = lr_value
+                param_groups.append(group)
+
+            if magnitude_params:
+                mag_group = {
+                    "params": magnitude_params,
+                    "is_magnitude": True,
+                }
+                if lr_value is not None:
+                    mag_group["lr"] = lr_value
+                param_groups.append(mag_group)
 
         return param_groups or None
 

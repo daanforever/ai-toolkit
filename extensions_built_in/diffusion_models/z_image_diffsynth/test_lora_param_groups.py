@@ -21,6 +21,15 @@ class DummyLoRA(torch.nn.Module):
         self.weight = torch.nn.Parameter(torch.randn(1))
 
 
+class DummyDoRALoRA(torch.nn.Module):
+    def __init__(self, lora_name: str, has_magnitude: bool = False):
+        super().__init__()
+        self.lora_name = lora_name
+        self.weight = torch.nn.Parameter(torch.randn(1))
+        if has_magnitude:
+            self.magnitude = torch.nn.Parameter(torch.randn(1))
+
+
 def _make_model_stub() -> ZImageDiffSynthModel:
     model = ZImageDiffSynthModel.__new__(ZImageDiffSynthModel)
     model.print_and_status_update = lambda *_args, **_kwargs: None
@@ -133,6 +142,47 @@ def test_adafactor_accepts_30_block_groups():
         weight_decay=0.0,
     )
     assert len(optimizer.param_groups) == 30
+
+
+def test_model_optimizer_groups_dora_magnitude():
+    loras = [
+        DummyDoRALoRA("transformer$$_inner_dit$$layers$$0$$attention$$to_q", has_magnitude=True),
+        DummyDoRALoRA("transformer$$_inner_dit$$layers$$0$$attention$$to_k", has_magnitude=True),
+        DummyDoRALoRA("transformer$$_inner_dit$$layers$$1$$feed_forward$$w1", has_magnitude=False),
+    ]
+    model = _make_model_stub()
+    network = SimpleNamespace(unet_loras=loras)
+
+    param_groups = model.get_lora_optimizer_param_groups(
+        network=network,
+        unet_lr=1e-4,
+        default_lr=1e-5,
+    )
+
+    print("PARAM GROUPS:", param_groups)
+
+    assert param_groups is not None
+    # We expect:
+    # 1. layers_0 non-magnitude group
+    # 2. layers_0 magnitude group
+    # 3. layers_1 non-magnitude group
+    # Total of 3 groups.
+    assert len(param_groups) == 3
+
+    # Check that magnitude group has is_magnitude=True and others do not.
+    mag_groups = [group for group in param_groups if group.get("is_magnitude") is True]
+    non_mag_groups = [group for group in param_groups if not group.get("is_magnitude")]
+
+    assert len(mag_groups) == 1
+    assert len(non_mag_groups) == 2
+
+    # Verify parameters in magnitude group are indeed named "magnitude"
+    mag_params = mag_groups[0]["params"]
+    assert len(mag_params) == 2  # from layers_0 to_q and to_k
+
+    # Verify non-magnitude groups contain the weights
+    total_non_mag_params = sum(len(g["params"]) for g in non_mag_groups)
+    assert total_non_mag_params == 3  # weight from to_q, to_k, and layers_1 w1
 
 
 if __name__ == "__main__":
