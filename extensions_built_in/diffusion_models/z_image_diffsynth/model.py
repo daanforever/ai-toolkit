@@ -60,9 +60,9 @@ class _DiTUnetWrapper(torch.nn.Module):
         return self._modules["_inner_dit"](*args, **kwargs)
 
     def __getattr__(self, name):
-        if name == "dit":
+        if name in ("dit", "_inner_dit"):
             return self._modules["_inner_dit"]
-        if name in ("_inner_dit", "config"):
+        if name == "config":
             return object.__getattribute__(self, name)
         # base_model.save_device_state() and predict_noise expect unet.device / unet.training / unet.dtype;
         # inner DiT may not expose these directly.
