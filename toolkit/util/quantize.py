@@ -10,8 +10,7 @@ from optimum.quanto.tensor import Optimizer, qtype, qtypes
 #     UIntxWeightOnlyConfig,
 # )
 
-from torchao.quantization import Float8WeightOnlyConfig, quantize_ as torchao_quantize_
-from torchao.prototype.quantization import UIntxWeightOnlyConfig
+from torchao.quantization import Float8WeightOnlyConfig, quantize_ as torchao_quantize_, IntxWeightOnlyConfig, MappingType
 
 from optimum.quanto import freeze
 from tqdm import tqdm
@@ -38,13 +37,13 @@ Q_MODULES = [
 
 torchao_qtypes = {
     # "int4": Int4WeightOnlyConfig(),
-    "uint2": UIntxWeightOnlyConfig(torch.uint2),
-    "uint3": UIntxWeightOnlyConfig(torch.uint3),
-    "uint4": UIntxWeightOnlyConfig(torch.uint4),
-    "uint5": UIntxWeightOnlyConfig(torch.uint5),
-    "uint6": UIntxWeightOnlyConfig(torch.uint6),
-    "uint7": UIntxWeightOnlyConfig(torch.uint7),
-    "uint8": UIntxWeightOnlyConfig(torch.uint8),
+    "uint2": IntxWeightOnlyConfig(torch.int2, mapping_type=MappingType.ASYMMETRIC),
+    "uint3": IntxWeightOnlyConfig(torch.int3, mapping_type=MappingType.ASYMMETRIC),
+    "uint4": IntxWeightOnlyConfig(torch.int4, mapping_type=MappingType.ASYMMETRIC),
+    "uint5": IntxWeightOnlyConfig(torch.int5, mapping_type=MappingType.ASYMMETRIC),
+    "uint6": IntxWeightOnlyConfig(torch.int6, mapping_type=MappingType.ASYMMETRIC),
+    "uint7": IntxWeightOnlyConfig(torch.int7, mapping_type=MappingType.ASYMMETRIC),
+    "uint8": IntxWeightOnlyConfig(torch.int8, mapping_type=MappingType.ASYMMETRIC),
     "float8": Float8WeightOnlyConfig(),
 }
 
