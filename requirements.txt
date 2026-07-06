@@ -1,7 +1,7 @@
-torchao==0.10.0
+torchao
 safetensors
 git+https://github.com/huggingface/diffusers@8600b4c10d67b0ce200f664204358747bd53c775
-transformers==4.57.3
+transformers
 lycoris-lora==1.8.3
 flatten_json
 pyyaml
@@ -27,7 +27,7 @@ bitsandbytes
 hf_transfer
 lpips
 pytorch_fid
-optimum-quanto==0.2.4
+optimum-quanto
 sentencepiece
 huggingface_hub
 modelscope
