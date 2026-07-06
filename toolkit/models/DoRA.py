@@ -53,7 +53,7 @@ class DoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
         ToolkitModuleMixin.__init__(self, network=network)
         torch.nn.Module.__init__(self)
         self.lora_name = lora_name
-        self.scalar = torch.tensor(1.0)
+        self.register_buffer("scalar", torch.tensor(1.0, device=org_module.weight.device), persistent=False)
 
         self.lora_dim = lora_dim
 

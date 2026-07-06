@@ -338,5 +338,10 @@ def quantize_model(
         # device without having to move the transformer blocks to the device first
         base_model.print_and_status_update(" - quantizing extras")
         # model_to_quantize.to(base_model.device_torch, dtype=base_model.torch_dtype)
-        quantize(model_to_quantize, weights=quantization_type)
+        exclude_blocks = []
+        if transformer_block_names:
+            for name in transformer_block_names:
+                exclude_blocks.append(name)
+                exclude_blocks.append(f"{name}.*")
+        quantize(model_to_quantize, weights=quantization_type, exclude=exclude_blocks)
         freeze(model_to_quantize)

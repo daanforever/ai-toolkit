@@ -74,7 +74,7 @@ class LoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
         torch.nn.Module.__init__(self)
         self.lora_name = lora_name
         self.orig_module_ref = weakref.ref(org_module)
-        self.scalar = torch.tensor(1.0, device=org_module.weight.device)
+        self.register_buffer("scalar", torch.tensor(1.0, device=org_module.weight.device), persistent=False)
         
         # if is ara lora module, mark it on the layer so memory manager can handle it
         if is_ara:
