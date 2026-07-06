@@ -1,4 +1,4 @@
-pytorch-cuda=12.4
+pytorch-cuda==12.4
 torchao
 safetensors
 git+https://github.com/huggingface/diffusers@8600b4c10d67b0ce200f664204358747bd53c775
