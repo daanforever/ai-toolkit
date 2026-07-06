@@ -1524,6 +1524,13 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 if hasattr(self.sd, '_sampling_transformer') and self.sd._sampling_transformer is not None:
                     with memory_debug(print_acc, "Creating sampling network"):
                         print_acc("Creating sampling network for _sampling_transformer")
+                        
+                        # Move sampling transformer to GPU for fast network creation on CUDA
+                        if hasattr(self.sd, "_move_sampling_transformer"):
+                            self.sd._move_sampling_transformer(self.device_torch)
+                        else:
+                            self.sd._sampling_transformer.to(self.device_torch)
+                        
                         sampling_network = NetworkClass(
                             text_encoder=text_encoder,
                             unet=self.sd._sampling_transformer,
@@ -1575,6 +1582,12 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         # Set can_merge_in same as main network (False if quantized/layer_offloading)
                         if self.model_config.quantize or self.model_config.layer_offloading:
                             sampling_network.can_merge_in = False
+                        
+                        # Move sampling transformer back to CPU to save VRAM during training
+                        if hasattr(self.sd, "_move_sampling_transformer"):
+                            self.sd._move_sampling_transformer("cpu")
+                        else:
+                            self.sd._sampling_transformer.to("cpu")
                         
                         # Store sampling network on model for use during generation
                         self.sd._sampling_network = sampling_network
