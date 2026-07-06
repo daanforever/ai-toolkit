@@ -252,15 +252,29 @@ class PeftNetwork(ToolkitNetworkMixin, nn.Module):
         )
 
         # Apply in-place. get_peft_model wraps the base module and freezes it.
-        # We pass get_apply_tensor_subclass=lambda: weights.config if we have a quantized model to satisfy PEFT's TorchaoLoraLinear
-        kwargs_peft = {}
+        # To satisfy PEFT's TorchaoLoraLinear, we set a dummy hf_quantizer on the models
+        # containing the get_apply_tensor_subclass lambda.
         if base_model is not None and hasattr(base_model, "model_config") and base_model.model_config.qtype is not None:
             from toolkit.util.quantize import get_qtype, aotype
             qtype_obj = get_qtype(base_model.model_config.qtype)
             if isinstance(qtype_obj, aotype):
-                kwargs_peft["get_apply_tensor_subclass"] = lambda: qtype_obj.config
+                get_apply_tensor_subclass_fn = lambda: qtype_obj.config
+                class DummyConfig:
+                    get_apply_tensor_subclass = get_apply_tensor_subclass_fn
+                class DummyQuantizer:
+                    quantization_config = DummyConfig()
+                
+                def set_dummy_quantizer(m):
+                    if isinstance(m, (list, tuple)):
+                        for item in m:
+                            set_dummy_quantizer(item)
+                    elif m is not None:
+                        m.hf_quantizer = DummyQuantizer()
 
-        peft_model = get_peft_model(unet, lora_config, **kwargs_peft)
+                set_dummy_quantizer(unet)
+                set_dummy_quantizer(text_encoder)
+
+        peft_model = get_peft_model(unet, lora_config)
         self.peft_model = peft_model
         # Keep a handle on the wrapped base for force_to / device moves.
         self._unet = unet
@@ -277,7 +291,7 @@ class PeftNetwork(ToolkitNetworkMixin, nn.Module):
                 bias="none",
                 use_dora=self.is_dora,
             )
-            self.te_peft_model = get_peft_model(text_encoder, te_config, **kwargs_peft)
+            self.te_peft_model = get_peft_model(text_encoder, te_config)
 
         # Build unet_loras / text_encoder_loras as wrapper lists so the existing
         # trainer helpers (group_loras_by_block, get_lora_optimizer_param_groups)

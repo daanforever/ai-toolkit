@@ -20,6 +20,15 @@ def test_torchao_quantization_types():
         # Quantize the model
         quantize(model, weights=weights_qtype)
         
+        # Run a forward pass to ensure dispatch works
+        x = torch.randn(2, 32)
+        try:
+            out = model(x)
+            print(f"Forward pass for {qtype_name} succeeded, out shape: {out.shape}")
+        except Exception as e:
+            print(f"Forward pass for {qtype_name} failed: {e}")
+            raise e
+        
         # Verify that the weight has been quantized and is no longer a standard FloatTensor
         weight_class_name = type(model.weight).__name__
         assert "Tensor" in weight_class_name, f"Expected quantized weight tensor, got {weight_class_name}"
