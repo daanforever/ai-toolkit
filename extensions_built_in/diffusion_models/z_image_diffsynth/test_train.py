@@ -464,7 +464,7 @@ def _generate_images_batch(
         sd.sample_prompts_cache = None
     per = elapsed / max(n, 1)
     max_allowed_time = max_sec_per_image
-    if network_type == "dora":
+    if network_type in ("dora", "peft_dora"):
         # DoRA requires significantly more computation per step during inference (it has to calculate magnitude-based norm modifications),
         # especially on quantized models. Increase the timeout.
         max_allowed_time = max_sec_per_image * 8
@@ -529,10 +529,17 @@ def _attach_lora_for_inference(sd, lora_path: str) -> None:
     )
 
     with memory_debug(_log, "test_train attach_lora main_network", kind="cuda"):
-        main_network = LoRASpecialNetwork(
-            unet=sd.get_model_to_train(),
-            **common,
-        )
+        if network_type in ("peft", "peft_dora"):
+            from toolkit.peft_network import PeftNetwork
+            main_network = PeftNetwork(
+                unet=sd.get_model_to_train(),
+                **common,
+            )
+        else:
+            main_network = LoRASpecialNetwork(
+                unet=sd.get_model_to_train(),
+                **common,
+            )
         main_network.force_to(sd.device_torch, dtype=torch.float32)
         main_network.apply_to(
             sd.text_encoder,
@@ -547,10 +554,16 @@ def _attach_lora_for_inference(sd, lora_path: str) -> None:
 
     if getattr(sd, "_sampling_transformer", None) is not None:
         with memory_debug(_log, "test_train attach_lora sampling_network", kind="cuda"):
-            sampling_network = LoRASpecialNetwork(
-                unet=sd._sampling_transformer,
-                **common,
-            )
+            if network_type in ("peft", "peft_dora"):
+                sampling_network = PeftNetwork(
+                    unet=sd._sampling_transformer,
+                    **common,
+                )
+            else:
+                sampling_network = LoRASpecialNetwork(
+                    unet=sd._sampling_transformer,
+                    **common,
+                )
             sampling_network.share_parameters_with(main_network)
             sampling_network.apply_to(
                 sd.text_encoder,

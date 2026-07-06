@@ -1421,9 +1421,13 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 network_kwargs = self.network_config.network_kwargs
                 is_lycoris = False
                 is_lorm = self.network_config.type.lower() == 'lorm'
+                is_peft = self.network_config.type.lower() in ('peft', 'peft_dora')
                 # default to LoCON if there are any conv layers or if it is named
                 NetworkClass = LoRASpecialNetwork
-                if self.network_config.type.lower() == 'locon' or self.network_config.type.lower() == 'lycoris':
+                if is_peft:
+                    from toolkit.peft_network import PeftNetwork
+                    NetworkClass = PeftNetwork
+                elif self.network_config.type.lower() == 'locon' or self.network_config.type.lower() == 'lycoris':
                     NetworkClass = LycorisSpecialNetwork
                     is_lycoris = True
 
