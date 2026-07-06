@@ -4,11 +4,15 @@ import torch
 
 from optimum.quanto.quantize import _quantize_submodule
 from optimum.quanto.tensor import Optimizer, qtype, qtypes
-from torchao.quantization.quant_api import (
-    quantize_ as torchao_quantize_,
-    Float8WeightOnlyConfig,
-    UIntxWeightOnlyConfig,
-)
+# from torchao.quantization.quant_api import (
+#     quantize_ as torchao_quantize_,
+#     Float8WeightOnlyConfig,
+#     UIntxWeightOnlyConfig,
+# )
+
+from torchao.quantization import Float8WeightOnlyConfig, quantize_ as torchao_quantize_
+from torchao.prototype.quantization import UIntxWeightOnlyConfig
+
 from optimum.quanto import freeze
 from tqdm import tqdm
 from safetensors.torch import load_file
