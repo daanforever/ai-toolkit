@@ -75,8 +75,8 @@ class DoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
         self.is_checkpointing = False
         self._cached_base_weight_cpu = None
         self._cached_base_bias_cpu = None
-        self._use_cpu_cached_base_norm = bool(kwargs.get("dora_cpu_cached_base_norm", True))
-        self._cache_quantized_bias = bool(kwargs.get("dora_cache_quantized_bias", True))
+        self._use_cpu_cached_base_norm = bool(kwargs.get("dora_cpu_cached_base_norm", False))
+        self._cache_quantized_bias = bool(kwargs.get("dora_cache_quantized_bias", False))
 
         d_out = org_module.out_features
         d_in = org_module.in_features
