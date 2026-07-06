@@ -7,7 +7,7 @@ from optimum.quanto.tensor import Optimizer, qtype, qtypes
 from torchao.quantization.quant_api import (
     quantize_ as torchao_quantize_,
     Float8WeightOnlyConfig,
-    UIntXWeightOnlyConfig,
+    UIntxWeightOnlyConfig,
 )
 from optimum.quanto import freeze
 from tqdm import tqdm
@@ -34,13 +34,13 @@ Q_MODULES = [
 
 torchao_qtypes = {
     # "int4": Int4WeightOnlyConfig(),
-    "uint2": UIntXWeightOnlyConfig(torch.uint2),
-    "uint3": UIntXWeightOnlyConfig(torch.uint3),
-    "uint4": UIntXWeightOnlyConfig(torch.uint4),
-    "uint5": UIntXWeightOnlyConfig(torch.uint5),
-    "uint6": UIntXWeightOnlyConfig(torch.uint6),
-    "uint7": UIntXWeightOnlyConfig(torch.uint7),
-    "uint8": UIntXWeightOnlyConfig(torch.uint8),
+    "uint2": UIntxWeightOnlyConfig(torch.uint2),
+    "uint3": UIntxWeightOnlyConfig(torch.uint3),
+    "uint4": UIntxWeightOnlyConfig(torch.uint4),
+    "uint5": UIntxWeightOnlyConfig(torch.uint5),
+    "uint6": UIntxWeightOnlyConfig(torch.uint6),
+    "uint7": UIntxWeightOnlyConfig(torch.uint7),
+    "uint8": UIntxWeightOnlyConfig(torch.uint8),
     "float8": Float8WeightOnlyConfig(),
 }
 
