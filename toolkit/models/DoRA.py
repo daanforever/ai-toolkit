@@ -73,6 +73,10 @@ class DoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
         self.rank_dropout = rank_dropout
         self.module_dropout = module_dropout
         self.is_checkpointing = False
+        self._cached_base_weight_cpu = None
+        self._cached_base_bias_cpu = None
+        self._use_cpu_cached_base_norm = bool(kwargs.get("dora_cpu_cached_base_norm", True))
+        self._cache_quantized_bias = bool(kwargs.get("dora_cache_quantized_bias", True))
 
         d_out = org_module.out_features
         d_in = org_module.in_features
@@ -89,11 +93,29 @@ class DoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
         # self.lora_down.weight.data = torch.zeros_like(self.lora_down.weight.data)
         torch.nn.init.kaiming_uniform_(self.lora_down.weight, a=math.sqrt(5))
 
+        base_weight_ref = self.org_module[0].weight
+        if (
+            self._use_cpu_cached_base_norm
+            and self._is_quantized_tensor(base_weight_ref)
+            and not getattr(base_weight_ref, "requires_grad", False)
+        ):
+            self._cached_base_weight_cpu = self._materialize_weight_cpu(base_weight_ref)
+            base_bias_ref = getattr(self.org_module[0], "bias", None)
+            if (
+                self._cache_quantized_bias
+                and base_bias_ref is not None
+                and self._is_quantized_tensor(base_bias_ref)
+            ):
+                self._cached_base_bias_cpu = self._materialize_bias_cpu(base_bias_ref)
+
         # m = Magnitude column-wise across output dimension
-        weight = self.get_orig_weight()
-        weight = weight.to(self.lora_up.weight.device, dtype=self.lora_up.weight.dtype)
         lora_weight  = self.lora_up.weight @ self.lora_down.weight
-        weight_norm = self._get_weight_norm(weight, lora_weight)
+        if self._cached_base_weight_cpu is not None:
+            weight_norm = self._get_weight_norm_cpu(self._cached_base_weight_cpu, lora_weight)
+        else:
+            weight = self.get_orig_weight()
+            weight = weight.to(self.lora_up.weight.device, dtype=self.lora_up.weight.dtype)
+            weight_norm = self._get_weight_norm(weight, lora_weight)
         self.magnitude = nn.Parameter(weight_norm.detach().clone(), requires_grad=True)
         self.register_buffer("train_base_weight_norm", weight_norm.detach().clone())
         self.initial_base_weight_norm = weight_norm.detach().clone()
@@ -123,6 +145,29 @@ class DoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
                 return bias.data.detach()
         return None
 
+    def _is_quantized_tensor(self, tensor: torch.Tensor) -> bool:
+        return (
+            isinstance(tensor, QTensor)
+            or isinstance(tensor, QBytesTensor)
+            or tensor.__class__.__name__ == "AffineQuantizedTensor"
+        )
+
+    def _materialize_weight_cpu(self, weight: torch.Tensor) -> torch.Tensor:
+        if self._is_quantized_tensor(weight):
+            try:
+                return weight.to("cpu").dequantize().detach().to(dtype=torch.float32)
+            except Exception:
+                return weight.dequantize().detach().to("cpu", dtype=torch.float32)
+        return weight.data.detach().to("cpu", dtype=torch.float32)
+
+    def _materialize_bias_cpu(self, bias: torch.Tensor) -> torch.Tensor:
+        if self._is_quantized_tensor(bias):
+            try:
+                return bias.to("cpu").dequantize().detach().to(dtype=torch.float32)
+            except Exception:
+                return bias.dequantize().detach().to("cpu", dtype=torch.float32)
+        return bias.data.detach().to("cpu", dtype=torch.float32)
+
     # def dora_forward(self, x, *args, **kwargs):
     #     lora = torch.matmul(self.lora_A, self.lora_B)
     #     adapted = self.get_orig_weight() + lora
@@ -137,14 +182,26 @@ class DoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
         weight_norm = torch.linalg.norm(weight, dim=1)
         return weight_norm
 
+    def _get_weight_norm_cpu(self, base_weight_cpu, scaled_lora_weight) -> torch.Tensor:
+        with torch.no_grad():
+            scaled_lora_weight_cpu = scaled_lora_weight.detach().to("cpu", dtype=torch.float32)
+            combined = base_weight_cpu + scaled_lora_weight_cpu
+            return torch.linalg.norm(combined, dim=1)
+
     def apply_dora(self, org_forwarded, scaled_lora_output, scaled_lora_weight):
         # ref https://github.com/huggingface/peft/blob/1e6d1d73a0850223b0916052fd8d2382a90eae5a/src/peft/tuners/lora/layer.py#L192
         # lora weight is already scaled
 
         # magnitude = self.lora_magnitude_vector[active_adapter]
-        weight = self.get_orig_weight()
-        weight = weight.to(scaled_lora_weight.device, dtype=scaled_lora_weight.dtype)
-        weight_norm = self._get_weight_norm(weight, scaled_lora_weight)
+        if self._cached_base_weight_cpu is not None:
+            weight_norm = self._get_weight_norm_cpu(
+                self._cached_base_weight_cpu,
+                scaled_lora_weight,
+            ).to(scaled_lora_weight.device, dtype=scaled_lora_weight.dtype)
+        else:
+            weight = self.get_orig_weight()
+            weight = weight.to(scaled_lora_weight.device, dtype=scaled_lora_weight.dtype)
+            weight_norm = self._get_weight_norm(weight, scaled_lora_weight)
         # see section 4.3 of DoRA (https://arxiv.org/abs/2402.09353)
         # "[...] we suggest treating ||V +∆V ||_c in
         # Eq. (5) as a constant, thereby detaching it from the gradient
@@ -158,9 +215,16 @@ class DoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
         weight_norm_fp32 = torch.clamp(weight_norm_fp32, min=1e-6)
         weight_norm = weight_norm_fp32.to(weight_norm.dtype)
 
-        bias = self.get_orig_bias()
+        bias = None
+        if self._cached_base_bias_cpu is not None:
+            bias = self._cached_base_bias_cpu.to(
+                scaled_lora_output.device, dtype=scaled_lora_output.dtype
+            )
+        else:
+            bias = self.get_orig_bias()
+            if bias is not None:
+                bias = bias.to(scaled_lora_output.device, dtype=scaled_lora_output.dtype)
         if bias is not None:
-            bias = bias.to(scaled_lora_output.device, dtype=scaled_lora_output.dtype)
             direction_output = org_forwarded - bias
         else:
             direction_output = org_forwarded

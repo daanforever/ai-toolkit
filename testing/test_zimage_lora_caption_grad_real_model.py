@@ -36,9 +36,9 @@ def _resolve_model_path() -> str:
     return os.environ.get("ZIMAGE_DIFFSYNTH_MODEL_PATH", "").strip() or DEFAULT_ZIMAGE_MODEL_PATH
 
 
-def _build_lora_network(sd) -> LoRASpecialNetwork:
+def _build_lora_network(sd, *, network_type: str = "lora") -> LoRASpecialNetwork:
     network_config = NetworkConfig(
-        type="lora",
+        type=network_type,
         linear=8,
         linear_alpha=8,
         transformer_only=True,
@@ -90,8 +90,25 @@ def _build_lora_network(sd) -> LoRASpecialNetwork:
     return network
 
 
-@pytest.fixture(scope="module")
-def zimage_with_lora():
+def _assert_only_network_trainable(sd, network: LoRASpecialNetwork) -> None:
+    network_param_ids = {id(p) for p in network.parameters()}
+    backbone_modules = [("unet", sd.get_model_to_train())]
+    if isinstance(sd.text_encoder, list):
+        backbone_modules.extend((f"text_encoder[{idx}]", te) for idx, te in enumerate(sd.text_encoder))
+    else:
+        backbone_modules.append(("text_encoder", sd.text_encoder))
+    backbone_modules.append(("vae", sd.vae))
+    unexpected = []
+    for module_name, module in backbone_modules:
+        if module is None:
+            continue
+        for param_name, param in module.named_parameters(recurse=True):
+            if param.requires_grad and id(param) not in network_param_ids:
+                unexpected.append(f"{module_name}.{param_name}")
+    assert not unexpected, f"unexpected trainable base params: {unexpected[:10]}"
+
+
+def _load_zimage_with_network(network_type: str):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for this real-model test")
 
@@ -129,7 +146,8 @@ def zimage_with_lora():
     sd.vae.requires_grad_(False)
     sd.vae.eval()
 
-    network = _build_lora_network(sd)
+    network = _build_lora_network(sd, network_type=network_type)
+    _assert_only_network_trainable(sd, network)
 
     with torch.inference_mode():
         cached_embeds = {
@@ -149,6 +167,16 @@ def zimage_with_lora():
         del network
         del sd
         torch.cuda.empty_cache()
+
+
+@pytest.fixture(scope="module")
+def zimage_with_lora():
+    yield from _load_zimage_with_network("lora")
+
+
+@pytest.fixture(scope="module")
+def zimage_with_dora():
+    yield from _load_zimage_with_network("dora")
 
 
 def _collect_lora_grad_vector(
@@ -205,3 +233,22 @@ def test_lora_gradients_change_when_caption_changes(zimage_with_lora):
     # We expect small drift for same prompt and a significantly larger shift for different prompts.
     assert same_delta_rel < 0.05
     assert diff_delta_rel > same_delta_rel * 2.0
+
+
+def test_dora_uses_cached_quantized_base_weight_norm(zimage_with_dora):
+    sd, network, cached_embeds = zimage_with_dora
+    dora_modules = [m for m in network.modules() if m.__class__.__name__ == "DoRAModule"]
+    assert dora_modules, "expected DoRA modules when network type is dora"
+    assert any(
+        getattr(m, "_cached_base_weight_cpu", None) is not None for m in dora_modules
+    ), "expected cached CPU base weights for DoRA quantized norm path"
+
+    torch.manual_seed(778)
+    latent = torch.randn(1, 16, 64, 64, device=sd.device_torch, dtype=sd.torch_dtype)
+    target = torch.randn(1, 16, 64, 64, device=sd.device_torch, dtype=sd.torch_dtype)
+    timestep = torch.tensor([500.0], device=sd.device_torch, dtype=torch.float32)
+
+    grad = _collect_lora_grad_vector(
+        sd, network, cached_embeds["a red cube on white table"], latent, timestep, target
+    )
+    assert torch.norm(grad).item() > 0.0

@@ -17,8 +17,13 @@ Env: ZIMAGE_DIFFSYNTH_MODEL_PATH, ZIMAGE_DIFFSYNTH_SAMPLING_PATH (same as test_s
 from __future__ import annotations
 
 import importlib
+import json
 import os
+import gc
+import subprocess
 import sys
+import uuid
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -37,6 +42,10 @@ from toolkit.job import run_job  # noqa: E402
 from toolkit.timestep_sampler import TimestepSampler, TimestepSamplerResult  # noqa: E402
 
 SNR_REAL_MODEL_PROBES: list[tuple[int, float]] = [(1, 1.0), (999, 1.0)]
+_BASELINE_SUBPROCESS_ENV = "ZIMAGE_FLOWMATCH_BASELINE_SUBPROCESS"
+_BASELINE_BATCH_SIZE_ENV = "ZIMAGE_FLOWMATCH_BASELINE_BATCH_SIZE"
+_BASELINE_WORK_ROOT_ENV = "ZIMAGE_FLOWMATCH_BASELINE_WORK_ROOT"
+_BASELINE_OUTPUT_JSON_ENV = "ZIMAGE_FLOWMATCH_BASELINE_OUTPUT_JSON"
 
 
 def _resolve_model_paths() -> tuple[str, str | None]:
@@ -62,6 +71,8 @@ def _user_flowmatch_job_config(
     *,
     min_snr_gamma: float,
     steps: int = 1,
+    batch_size: int = 1,
+    debug: bool = False,
 ) -> dict:
     output_root = work_root / "output"
     output_root.mkdir(parents=True, exist_ok=True)
@@ -88,7 +99,7 @@ def _user_flowmatch_job_config(
             "push_to_hub": False,
         },
         "train": {
-            "batch_size": 1,
+            "batch_size": batch_size,
             "gradient_accumulation": 1,
             "steps": steps,
             "train_unet": True,
@@ -118,7 +129,7 @@ def _user_flowmatch_job_config(
             "disable_sampling": True,
             "dtype": "bf16",
         },
-        "logging": {"log_every": 0, "use_ui_logger": False, "debug": False},
+        "logging": {"log_every": 0, "use_ui_logger": False, "debug": debug},
         "model": {
             "name_or_path": model_path,
             "quantize": True,
@@ -170,11 +181,21 @@ class LossProbeState:
     pre_backward_scalar: float | None = None
     last_timestep_value: float | None = None
     last_slot_index: int | None = None
+    stage_peak_alloc_mb: dict[str, list[float]] = field(
+        default_factory=lambda: defaultdict(list)
+    )
+    stage_peak_reserved_mb: dict[str, list[float]] = field(
+        default_factory=lambda: defaultdict(list)
+    )
 
 
 @dataclass
 class ProbeRunResult:
     by_slot: dict[int, LossProbeRecord]
+    peak_allocated_mb: float
+    peak_reserved_mb: float
+    stage_peak_allocated_mb: dict[str, float]
+    stage_peak_reserved_mb: dict[str, float]
 
 
 def _install_probes(monkeypatch: pytest.MonkeyPatch, state: LossProbeState) -> None:
@@ -185,7 +206,18 @@ def _install_probes(monkeypatch: pytest.MonkeyPatch, state: LossProbeState) -> N
     orig_apply_snr = sdtrainer_module.apply_snr_weight
     orig_calculate_loss = sdtrainer_module.SDTrainer.calculate_loss
     orig_train_single = sdtrainer_module.SDTrainer.train_single_accumulation
+    orig_predict_noise = sdtrainer_module.SDTrainer.predict_noise
     orig_process_batch = base_process_module.BaseSDTrainProcess.process_general_training_batch
+
+    def _record_cuda_peak(stage: str):
+        if not torch.cuda.is_available():
+            return
+        state.stage_peak_alloc_mb[stage].append(
+            torch.cuda.max_memory_allocated() / 2**20
+        )
+        state.stage_peak_reserved_mb[stage].append(
+            torch.cuda.max_memory_reserved() / 2**20
+        )
 
     def _forced_sample(
         self,
@@ -218,7 +250,10 @@ def _install_probes(monkeypatch: pytest.MonkeyPatch, state: LossProbeState) -> N
         return TimestepSamplerResult(timesteps=timesteps, timestep_indices=indices)
 
     def _wrapped_process_batch(self, batch):
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
         out = orig_process_batch(self, batch)
+        _record_cuda_peak("prepare_batch")
         try:
             _, _, timesteps, _, _ = out
             ts = timesteps.detach().float().view(-1)
@@ -228,6 +263,15 @@ def _install_probes(monkeypatch: pytest.MonkeyPatch, state: LossProbeState) -> N
         except Exception:
             state.last_timestep_value = None
             state.last_slot_index = None
+        return out
+
+    def _wrapped_predict_noise(self, *args, **kwargs):
+        is_primary = bool(kwargs.get("is_primary_pred", False))
+        if is_primary and torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+        out = orig_predict_noise(self, *args, **kwargs)
+        if is_primary:
+            _record_cuda_peak("forward")
         return out
 
     def _wrapped_apply_snr_weight(
@@ -292,7 +336,10 @@ def _install_probes(monkeypatch: pytest.MonkeyPatch, state: LossProbeState) -> N
         return out
 
     def _wrapped_calculate_loss(self, *args, **kwargs):
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
         out = orig_calculate_loss(self, *args, **kwargs)
+        _record_cuda_peak("loss")
         state.calculate_loss_scalar = float(out.detach().float().item())
         if state.records:
             state.records[-1].calculate_loss_scalar = state.calculate_loss_scalar
@@ -305,8 +352,12 @@ def _install_probes(monkeypatch: pytest.MonkeyPatch, state: LossProbeState) -> N
         captured: dict[str, float] = {}
 
         def _capture_backward(loss_tensor, *bargs, **bkwargs):
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
             captured["pre_backward"] = float(loss_tensor.detach().float().item())
-            return orig_backward(loss_tensor, *bargs, **bkwargs)
+            out = orig_backward(loss_tensor, *bargs, **bkwargs)
+            _record_cuda_peak("backward")
+            return out
 
         self.accelerator.backward = _capture_backward
         try:
@@ -323,6 +374,7 @@ def _install_probes(monkeypatch: pytest.MonkeyPatch, state: LossProbeState) -> N
     monkeypatch.setattr(sdtrainer_module, "apply_snr_weight", _wrapped_apply_snr_weight)
     monkeypatch.setattr(sdtrainer_module.SDTrainer, "calculate_loss", _wrapped_calculate_loss)
     monkeypatch.setattr(sdtrainer_module.SDTrainer, "train_single_accumulation", _wrapped_train_single)
+    monkeypatch.setattr(sdtrainer_module.SDTrainer, "predict_noise", _wrapped_predict_noise)
     monkeypatch.setattr(
         base_process_module.BaseSDTrainProcess,
         "process_general_training_batch",
@@ -333,6 +385,9 @@ def _install_probes(monkeypatch: pytest.MonkeyPatch, state: LossProbeState) -> N
 def _run_probes_in_one_job(
     work_root: Path,
     probes: list[tuple[int, float]],
+    *,
+    batch_size: int = 1,
+    enable_debug: bool = False,
 ) -> ProbeRunResult:
     model_path, sampling_path = _resolve_model_paths()
     dataset_dir = REPO_ROOT / "temp" / "test_train"
@@ -348,12 +403,16 @@ def _run_probes_in_one_job(
         sampling_path,
         min_snr_gamma=min_snr_gamma,
         steps=len(probes),
+        batch_size=batch_size,
+        debug=enable_debug,
     )
     state = LossProbeState(force_slots_by_step=force_slots_by_step)
     monkeypatch = pytest.MonkeyPatch()
     try:
         _install_probes(monkeypatch, state)
         torch.manual_seed(42)
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
         run_job(config)
     finally:
         monkeypatch.undo()
@@ -364,7 +423,92 @@ def _run_probes_in_one_job(
     by_slot = {rec.forced_slot: rec for rec in state.records}
     for slot, _ in probes:
         assert slot in by_slot, f"apply_snr_weight was not reached for slot {slot}"
-    return ProbeRunResult(by_slot=by_slot)
+    peak_allocated_mb = 0.0
+    peak_reserved_mb = 0.0
+    if torch.cuda.is_available():
+        peak_allocated_mb = torch.cuda.max_memory_allocated() / 2**20
+        peak_reserved_mb = torch.cuda.max_memory_reserved() / 2**20
+    stage_peak_allocated_mb = {
+        key: max(values) for key, values in state.stage_peak_alloc_mb.items() if values
+    }
+    stage_peak_reserved_mb = {
+        key: max(values) for key, values in state.stage_peak_reserved_mb.items() if values
+    }
+    return ProbeRunResult(
+        by_slot=by_slot,
+        peak_allocated_mb=peak_allocated_mb,
+        peak_reserved_mb=peak_reserved_mb,
+        stage_peak_allocated_mb=stage_peak_allocated_mb,
+        stage_peak_reserved_mb=stage_peak_reserved_mb,
+    )
+
+
+def _drop_accelerate_global_singleton() -> None:
+    try:
+        import toolkit.accelerator as acc
+    except Exception:
+        return
+    acc.global_accelerator = None
+
+
+def _release_cuda() -> None:
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+
+
+def _serialize_probe_result(result: ProbeRunResult) -> dict:
+    return {
+        "peak_allocated_mb": float(result.peak_allocated_mb),
+        "peak_reserved_mb": float(result.peak_reserved_mb),
+        "stage_peak_allocated_mb": {
+            key: float(value) for key, value in result.stage_peak_allocated_mb.items()
+        },
+        "stage_peak_reserved_mb": {
+            key: float(value) for key, value in result.stage_peak_reserved_mb.items()
+        },
+    }
+
+
+def _run_batch_memory_baseline_subprocess(
+    work_root: Path,
+    *,
+    batch_size: int,
+) -> dict:
+    output_json = work_root / f"batch_probe_b{batch_size}.json"
+    env = os.environ.copy()
+    env[_BASELINE_SUBPROCESS_ENV] = "1"
+    env[_BASELINE_BATCH_SIZE_ENV] = str(batch_size)
+    env[_BASELINE_WORK_ROOT_ENV] = str(work_root / f"worker_b{batch_size}")
+    env[_BASELINE_OUTPUT_JSON_ENV] = str(output_json)
+
+    cmd = [sys.executable, "-m", "testing.test_flowmatch_snr_real_model"]
+    subprocess.run(cmd, cwd=REPO_ROOT, env=env, check=True)
+    if not output_json.is_file():
+        raise RuntimeError(f"baseline subprocess did not write {output_json}")
+    return json.loads(output_json.read_text(encoding="utf-8"))
+
+
+def _baseline_subprocess_worker_main() -> None:
+    batch_size = int(os.environ[_BASELINE_BATCH_SIZE_ENV])
+    work_root = Path(os.environ[_BASELINE_WORK_ROOT_ENV])
+    output_json = Path(os.environ[_BASELINE_OUTPUT_JSON_ENV])
+    work_root.mkdir(parents=True, exist_ok=True)
+
+    probes = [(999, 1.0)]
+    try:
+        result = _run_probes_in_one_job(
+            work_root,
+            probes,
+            batch_size=batch_size,
+            enable_debug=True,
+        )
+        payload = _serialize_probe_result(result)
+        output_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    finally:
+        _drop_accelerate_global_singleton()
+        _release_cuda()
 
 
 def _print_probe_record(slot: int, rec: LossProbeRecord) -> None:
@@ -403,3 +547,41 @@ def test_low_noise_slot(snr_probe_records: ProbeRunResult):
     assert rec_lo.mse_per_sample != pytest.approx(rec_lo.post_snr_per_sample, rel=1e-3)
     assert rec_lo.calculate_loss_scalar == pytest.approx(rec_lo.pre_backward_scalar, rel=1e-6)
     assert rec_lo.hypo_gamma5_post_snr > rec_lo.hypo_gamma1_post_snr * 4.0
+
+
+def test_batch_size_memory_baseline_b1_vs_b2():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for memory baseline comparison")
+    model_path, _ = _resolve_model_paths()
+    if not model_path or not os.path.isdir(model_path):
+        pytest.skip(
+            "Z-Image model path is missing. Set ZIMAGE_DIFFSYNTH_MODEL_PATH or update defaults."
+        )
+
+    # Keep heavy subprocess artifacts on the repo drive (not pytest's system temp on C:)
+    # to avoid WinError 112 on machines with a small system partition.
+    work_root = (
+        REPO_ROOT
+        / "temp"
+        / "flowmatch_batch_memory_baseline"
+        / f"pytest_{os.getpid()}_{uuid.uuid4().hex[:8]}"
+    )
+    work_root.mkdir(parents=True, exist_ok=True)
+    run_b1 = _run_batch_memory_baseline_subprocess(work_root, batch_size=1)
+    _drop_accelerate_global_singleton()
+    _release_cuda()
+    run_b2 = _run_batch_memory_baseline_subprocess(work_root, batch_size=2)
+
+    for stage in ("prepare_batch", "forward", "loss", "backward"):
+        assert stage in run_b1["stage_peak_allocated_mb"], f"missing stage peak for B=1: {stage}"
+        assert stage in run_b2["stage_peak_allocated_mb"], f"missing stage peak for B=2: {stage}"
+
+    assert run_b1["peak_allocated_mb"] > 0.0
+    assert run_b2["peak_allocated_mb"] > 0.0
+    # Allow minor allocator noise; B=2 should not consume substantially less peak VRAM than B=1.
+    assert run_b2["peak_allocated_mb"] >= run_b1["peak_allocated_mb"] * 0.90
+
+
+if __name__ == "__main__":
+    if os.environ.get(_BASELINE_SUBPROCESS_ENV, "").strip() == "1":
+        _baseline_subprocess_worker_main()

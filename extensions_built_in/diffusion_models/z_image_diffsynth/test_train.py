@@ -250,9 +250,16 @@ def _train_subprocess_worker() -> None:
         or DEFAULT_ZIMAGE_SAMPLING_PATH
         or None
     )
+    batch_size = int(os.environ.get("ZIMAGE_TEST_TRAIN_BATCH_SIZE", "1"))
     if sampling_path and not os.path.isdir(sampling_path):
         sampling_path = None
-    lora_path = _train_lora(work_root, dataset_dir, model_path, sampling_path)
+    lora_path = _train_lora(
+        work_root,
+        dataset_dir,
+        model_path,
+        sampling_path,
+        batch_size=batch_size,
+    )
     marker = work_root / LORA_PATH_MARKER_NAME
     marker.write_text(str(lora_path.resolve()), encoding="utf-8")
     _log(f"[train subprocess] marker -> {marker}")
@@ -556,9 +563,16 @@ def _attach_lora_for_inference(sd, lora_path: str) -> None:
             sd._sampling_network = sampling_network
 
 
-def _train_lora(work_root: Path, dataset_dir: Path, model_path: str, sampling_path: str | None) -> Path:
+def _train_lora(
+    work_root: Path,
+    dataset_dir: Path,
+    model_path: str,
+    sampling_path: str | None,
+    *,
+    batch_size: int = 1,
+) -> Path:
     network_type = os.environ.get("ZIMAGE_TEST_TRAIN_NETWORK_TYPE", "lora").lower()
-    train_name = f"zimage_diffsynth_train_smoke_{network_type}"
+    train_name = f"zimage_diffsynth_train_smoke_{network_type}_b{batch_size}"
     output_root = work_root / "output"
     output_root.mkdir(parents=True, exist_ok=True)
 
@@ -606,7 +620,7 @@ def _train_lora(work_root: Path, dataset_dir: Path, model_path: str, sampling_pa
                         "noise_offset": 0.1,
                         "max_denoising_steps": 995,
                         "min_denoising_steps": 5,
-                        "batch_size": 1,
+                        "batch_size": batch_size,
                         "bypass_guidance_embedding": False,
                         "steps": total_steps,
                         "gradient_accumulation": 8,
@@ -756,7 +770,10 @@ def main() -> None:
     _log(f"[DEBUG] image cache dir: {image_cache} (force_regen={force_regen})")
 
     network_type = os.environ.get("ZIMAGE_TEST_TRAIN_NETWORK_TYPE", "lora").lower()
-    work_root = Path(tempfile.gettempdir()) / f"zimage_diffsynth_train_smoke_{network_type}"
+    batch_size = int(os.environ.get("ZIMAGE_TEST_TRAIN_BATCH_SIZE", "1"))
+    if batch_size < 1:
+        raise ValueError("ZIMAGE_TEST_TRAIN_BATCH_SIZE must be >= 1")
+    work_root = Path(tempfile.gettempdir()) / f"zimage_diffsynth_train_smoke_{network_type}_b{batch_size}"
     if work_root.exists():
         shutil.rmtree(work_root, ignore_errors=True)
     dataset_dir = work_root / "datasets" / "1"
@@ -836,6 +853,7 @@ def main() -> None:
                 dataset_dir=dataset_dir,
                 model_path=model_path,
                 sampling_path=sampling_path,
+                batch_size=batch_size,
             )
             _log(f"   LoRA checkpoint: {lora_path}")
             _cuda_mem_log("after _train_lora return")
@@ -855,6 +873,7 @@ def main() -> None:
         train_env["ZIMAGE_TEST_TRAIN_TRAIN_SUBPROCESS"] = "1"
         train_env["ZIMAGE_TEST_TRAIN_WORK_ROOT"] = str(work_root)
         train_env["ZIMAGE_TEST_TRAIN_DATASET_DIR"] = str(dataset_dir)
+        train_env["ZIMAGE_TEST_TRAIN_BATCH_SIZE"] = str(batch_size)
         cmd = [
             sys.executable,
             "-m",

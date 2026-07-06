@@ -779,6 +779,69 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 if isinstance(param, torch.nn.Parameter):  # Ensure it's a proper parameter
                     param.requires_grad_(True)
 
+    def audit_trainable_base_params(self):
+        """
+        Validate that trainable backbone params remain inside LoRA/DoRA network groups.
+        Warn by default; raise when train.fail_on_unexpected_trainable_params is enabled.
+        """
+        if self.network_config is None:
+            return
+
+        network_param_ids = set()
+        if self.network is not None:
+            try:
+                network_param_ids = {id(p) for p in self.network.parameters()}
+            except Exception:
+                network_param_ids = set()
+
+        optimizer_param_ids = set()
+        for group in self.params:
+            params = group.get('params', []) if isinstance(group, dict) else group
+            for param in params:
+                if isinstance(param, torch.nn.Parameter):
+                    optimizer_param_ids.add(id(param))
+
+        modules_to_check = [("unet", self.sd.get_model_to_train())]
+        if isinstance(self.sd.text_encoder, list):
+            for idx, encoder in enumerate(self.sd.text_encoder):
+                modules_to_check.append((f"text_encoder[{idx}]", encoder))
+        else:
+            modules_to_check.append(("text_encoder", self.sd.text_encoder))
+        modules_to_check.append(("vae", self.sd.vae))
+        if self.sd.refiner_unet is not None:
+            modules_to_check.append(("refiner_unet", self.sd.refiner_unet))
+
+        unexpected = []
+        for module_name, module in modules_to_check:
+            if module is None or not hasattr(module, "named_parameters"):
+                continue
+            for param_name, param in module.named_parameters(recurse=True):
+                if not isinstance(param, torch.nn.Parameter) or not param.requires_grad:
+                    continue
+                param_id = id(param)
+                if param_id in network_param_ids:
+                    continue
+                unexpected.append(
+                    f"{module_name}.{param_name} (in_optimizer={param_id in optimizer_param_ids})"
+                )
+
+        if not unexpected:
+            return
+
+        preview = ", ".join(unexpected[:12])
+        if len(unexpected) > 12:
+            preview += f", ... (+{len(unexpected) - 12} more)"
+        message = (
+            "Unexpected trainable base parameters detected outside LoRA/DoRA groups: "
+            f"{preview}"
+        )
+        fail_on_unexpected = bool(
+            getattr(self.train_config, "fail_on_unexpected_trainable_params", False)
+        )
+        if fail_on_unexpected:
+            raise RuntimeError(message)
+        print_acc(f"WARNING: {message}")
+
     def setup_ema(self):
         if self.train_config.ema_config.use_ema:
             # our params are in groups. We need them as a single iterable
@@ -1653,6 +1716,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
         
         # esure params require grad
         self.ensure_params_requires_grad(force=True)
+        self.audit_trainable_base_params()
         # Minimal verification mode for bf16 training:
         # keep trainable optimization parameters in fp32 so grads accumulate in fp32.
         if str(self.train_config.dtype).lower() in ("bf16", "bfloat16"):

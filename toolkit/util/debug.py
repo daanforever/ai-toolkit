@@ -69,8 +69,9 @@ def _format_cuda_diff(label: str, before: tuple, after: tuple) -> list:
     cache_after = reserved_after - alloc_after
     
     return [
-        f"[DEBUG {label}] CUDA alloc: {alloc_after / 1024:.1f} GB | reserved: {reserved_after / 1024:.1f} GB | cache: {cache_after / 1024:.1f} GB",
-        f"[DEBUG {label}] CUDA peaks: alloc={max_alloc_after / 1024:.1f} GB, reserved={max_reserved_after / 1024:.1f} GB",
+        f"\n[DEBUG {label}] CUDA alloc: {alloc_after / 1024:.1f} GB | reserved: {reserved_after / 1024:.1f} GB | cache: {cache_after / 1024:.1f} GB",
+        f"[DEBUG {label}] CUDA peaks: {max_alloc_after / 1024:.1f} GB | reserved: {max_reserved_after / 1024:.1f} GB",
+        f"[DEBUG {label}] CUDA  diff: {alloc_after - alloc_before / 1024:.1f} GB | reserved: {reserved_after - reserved_before / 1024:.1f} GB | cache: {cache_after - cache_before / 1024:.1f} GB",
     ]
 
 
