@@ -1569,7 +1569,6 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         
                         # Share parameters immediately to avoid wasteful GPU allocation
                         sampling_network.share_parameters_with(self.network)
-                        sampling_network.force_to(self.device_torch, dtype=get_torch_dtype(self.train_config.dtype))
                         sampling_network._update_torch_multiplier()
                         
                         sampling_network.apply_to(

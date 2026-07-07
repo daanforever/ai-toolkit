@@ -83,6 +83,51 @@ def _test_sample_config_multiple_prompts() -> None:
     _log("Sampling smoke: SampleConfig multiple-prompts check OK.")
 
 
+def _test_move_sampling_transformer_need_move() -> None:
+    """
+    When shared LoRA is already on GPU but base is on CPU, _move_sampling_transformer
+    must still move base to the target device (not skip via next(parameters())).
+    """
+    import torch
+    from extensions_built_in.diffusion_models.z_image_diffsynth.model import (
+        ZImageDiffSynthModel,
+        _DiTUnetWrapper,
+    )
+
+    if not torch.cuda.is_available():
+        _log("[need_move] CUDA not available; skipping.")
+        return
+
+    class _InnerDit(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.frozen_linear = torch.nn.Linear(4, 4, bias=False)
+            self.frozen_linear.weight.requires_grad_(False)
+            self.lora_linear = torch.nn.Linear(4, 4, bias=False)
+            self.lora_linear.weight.requires_grad_(True)
+
+    inner = _InnerDit()
+    inner.frozen_linear.to("cpu")
+    inner.lora_linear.to("cuda")
+    wrapper = _DiTUnetWrapper(inner)
+
+    sd = ZImageDiffSynthModel.__new__(ZImageDiffSynthModel)
+    sd.print_and_status_update = lambda *_args, **_kwargs: None
+    sd._sampling_transformer = wrapper
+    sd.device_torch = torch.device("cuda")
+
+    base = ZImageDiffSynthModel._first_frozen_base_param(wrapper)
+    assert base is not None and base.device.type == "cpu"
+
+    sd._move_sampling_transformer("cuda")
+    assert base.device.type == "cuda", "base should move to GPU when LoRA already on GPU"
+
+    sd._move_sampling_transformer("cpu")
+    assert base.device.type == "cpu", "base should move back to CPU"
+
+    _log("[need_move] _move_sampling_transformer base-param device check OK.")
+
+
 def _test_batch_sampling_device_moves() -> None:
     """
     Load Z-Image DiffSynth with a sampling transformer and run batch sampling
@@ -99,6 +144,9 @@ def _test_batch_sampling_device_moves() -> None:
     from toolkit.util.debug import set_debug_config
     from toolkit.config_modules import ModelConfig, GenerateImageConfig
     from toolkit.util.get_model import get_model_class
+    from extensions_built_in.diffusion_models.z_image_diffsynth.model import (
+        ZImageDiffSynthModel,
+    )
     from extensions_built_in.diffusion_models.z_image_diffsynth.test_smoke import (
         DEFAULT_ZIMAGE_MODEL_PATH,
         DEFAULT_ZIMAGE_SAMPLING_PATH,
@@ -161,6 +209,23 @@ def _test_batch_sampling_device_moves() -> None:
 
     sd.print_and_status_update = _wrapped_print  # type: ignore[assignment]
 
+    gpu_base_devices: list[str] = []
+    st = sd._sampling_transformer
+    _orig_st_to = st.to
+
+    def _spy_st_to(*args, **kwargs):
+        result = _orig_st_to(*args, **kwargs)
+        dev = args[0] if args else kwargs.get("device")
+        if dev is not None:
+            target = dev if isinstance(dev, torch.device) else torch.device(dev)
+            if target.type == "cuda":
+                base_p = ZImageDiffSynthModel._first_frozen_base_param(st)
+                if base_p is not None:
+                    gpu_base_devices.append(base_p.device.type)
+        return result
+
+    st.to = _spy_st_to  # type: ignore[method-assign]
+
     try:
         _log("[batch] building generation pipeline ...")
         pipeline = sd.get_generation_pipeline()
@@ -187,7 +252,18 @@ def _test_batch_sampling_device_moves() -> None:
         # sampler name here is mostly informational; the model always uses flow-match
         # style sampling internally.
         sd.generate_images(gen_configs, sampler="flowmatch")
+
+        base_after = ZImageDiffSynthModel._first_frozen_base_param(st)
+        assert base_after is not None, "expected frozen base param on sampling transformer"
+        assert (
+            base_after.device.type == "cpu"
+        ), f"after sampling, base should be on CPU, got {base_after.device}"
+        assert gpu_base_devices, "expected at least one GPU move during sampling"
+        assert (
+            gpu_base_devices[-1] == "cuda"
+        ), f"during sampling, base should be on GPU, saw {gpu_base_devices!r}"
     finally:
+        st.to = _orig_st_to  # type: ignore[method-assign]
         # Restore original printer so we don't affect other callers.
         sd.print_and_status_update = orig_print  # type: ignore[assignment]
 
@@ -355,6 +431,7 @@ def main() -> None:
     _log("Z-Image DiffSynth sampling smoke test (SampleConfig multi-prompt + batch device moves) ...")
     try:
         _test_sample_config_multiple_prompts()
+        _test_move_sampling_transformer_need_move()
         _test_batch_sampling_device_moves()
         _test_share_parameters_edge_cases()
     except AssertionError as e:

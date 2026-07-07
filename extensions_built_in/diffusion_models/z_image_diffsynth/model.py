@@ -146,15 +146,23 @@ class ZImageDiffSynthModel(BaseModel):
             except Exception:
                 pass
 
+    @staticmethod
+    def _first_frozen_base_param(module):
+        """First frozen non-LoRA parameter (base DiT weight), for device placement checks."""
+        for name, p in module.named_parameters():
+            if "lora" not in name.lower() and not p.requires_grad:
+                return p
+        return None
+
     def _move_sampling_transformer(self, device):
-        """Move only _sampling_transformer. _sampling_network is not moved (stays on CUDA)."""
+        """Move _sampling_transformer (sampling DiT base). Do not force_to _sampling_network."""
         with memory_debug(self.print_and_status_update, "Move sampling transformer"):
             st = getattr(self, "_sampling_transformer", None)
             if st is None:
                 return
             target = device if isinstance(device, torch.device) else torch.device(device)
-            p = list(st.parameters())
-            need_move = bool(p and next(iter(p)).device != target)
+            base_p = self._first_frozen_base_param(st)
+            need_move = base_p is None or base_p.device != target
             if not need_move:
                 return
             if is_debug_enabled():
@@ -584,6 +592,8 @@ class ZImageDiffSynthModel(BaseModel):
                         self.print_and_status_update,
                         "zimage_diffsynth after batch restore",
                     ):
+                        if saved_network is not None:
+                            self.network = saved_network
                         self._move_sampling_transformer("cpu")
                         self.model.to(self.device_torch, dtype=self.torch_dtype)
                         self._move_main_network(self.device_torch)
