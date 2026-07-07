@@ -4,11 +4,6 @@ import torch
 
 from optimum.quanto.quantize import _quantize_submodule
 from optimum.quanto.tensor import Optimizer, qtype, qtypes
-# from torchao.quantization.quant_api import (
-#     quantize_ as torchao_quantize_,
-#     Float8WeightOnlyConfig,
-#     UIntxWeightOnlyConfig,
-# )
 
 from torchao.quantization import Float8WeightOnlyConfig, quantize_ as torchao_quantize_, IntxWeightOnlyConfig, MappingType
 
@@ -332,7 +327,8 @@ def quantize_model(
             block.to(base_model.device_torch, dtype=base_model.torch_dtype, non_blocking=True)
             quantize(block, weights=quantization_type)
             freeze(block)
-            block.to("cpu", non_blocking=True)
+            if base_model.model_config.low_vram:
+                block.to("cpu", non_blocking=True)
 
         # todo, on extras find a universal way to quantize them on device and move them back to their original
         # device without having to move the transformer blocks to the device first

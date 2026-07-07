@@ -719,6 +719,7 @@ class SDTrainer(BaseSDTrainProcess):
 
         with torch.no_grad():
             loss_multiplier = torch.tensor(batch.loss_multiplier_list).to(self.device_torch, dtype=dtype)
+            network_weight = torch.tensor(batch.get_network_weight_list()).to(self.device_torch, dtype=dtype)
 
         if self.train_config.match_noise_norm:
             # match the norm of the noise
@@ -1072,6 +1073,10 @@ class SDTrainer(BaseSDTrainProcess):
         except:
             # todo handle mask with video models
             pass
+        try:
+            loss = loss * network_weight
+        except:
+            pass
         if prior_loss is not None:
             loss = loss + prior_loss
 
@@ -1275,7 +1280,8 @@ class SDTrainer(BaseSDTrainProcess):
             pure_loss = loss.mean().detach()
             pure_loss.requires_grad_(True)
 
-        loss = loss.mean()
+        nw = torch.tensor(network_weight_list, device=loss.device, dtype=loss.dtype)
+        loss = (loss * nw).mean()
         if loss.item() > 1e3:
             pass
         # Scale gradients so microbatch accumulation behaves like a mean.
@@ -1658,8 +1664,8 @@ class SDTrainer(BaseSDTrainProcess):
             else:
                 network = BlankNetwork()
 
-            # set the weights
-            network.multiplier = network_weight_list
+            # dataset balancing via network_weight is applied on loss in calculate_loss
+            network.multiplier = 1.0
 
         # activate network if it exits
 

@@ -422,5 +422,107 @@ def test_peft_share_parameters_with():
     assert torch.allclose(a_w, b_w_after)
 
 
+def _init_lora_weights(net):
+    with torch.no_grad():
+        for adapter in net.unet_loras:
+            for pname, p in adapter.named_parameters():
+                if "lora_A" in pname or "lora_B" in pname:
+                    p.fill_(0.5)
+
+
+@pytest.mark.parametrize("network_type", ["peft", "peft_dora"])
+def test_peft_multiplier_zero_disables_adapter(network_type):
+    """multiplier=0 must disable the adapter contribution, matching is_active=False."""
+    net, _ = _build_peft_network(network_type, n_blocks=2)
+    _init_lora_weights(net)
+    x = torch.randn(2, 4)
+    layer = net.unet_loras[0].layer
+
+    # By default, is_active is False, so adapters are disabled.
+    out_default = layer(x)
+
+    # Enable network, but set multiplier to 0.0
+    net.is_active = True
+    net.multiplier = 0.0
+    out_zero_mult = layer(x)
+
+    # Verify that multiplier=0.0 output is identical to default (disabled) output
+    assert torch.allclose(out_default, out_zero_mult, atol=1e-6)
+
+    # Set multiplier to 1.0, verify it differs from default
+    net.multiplier = 1.0
+    out_enabled = layer(x)
+    assert not torch.allclose(out_default, out_enabled, atol=1e-6)
+
+
+@pytest.mark.parametrize("network_type", ["peft", "peft_dora"])
+def test_peft_is_active_false_disables_adapter(network_type):
+    """is_active=False must disable the adapter contribution even if multiplier=1.0."""
+    net, _ = _build_peft_network(network_type, n_blocks=2)
+    _init_lora_weights(net)
+    x = torch.randn(2, 4)
+    layer = net.unet_loras[0].layer
+
+    # multiplier is 1.0, but is_active is False
+    net.is_active = False
+    net.multiplier = 1.0
+    out_inactive = layer(x)
+
+    # multiplier is 1.0, is_active is True
+    net.is_active = True
+    out_active = layer(x)
+
+    assert not torch.allclose(out_inactive, out_active, atol=1e-6)
+
+
+@pytest.mark.parametrize("network_type", ["peft", "peft_dora"])
+def test_peft_multiplier_scales_batch(network_type):
+    """A batch-split multiplier must scale the adapter contribution per-sample."""
+    net, _ = _build_peft_network(network_type, n_blocks=2)
+    _init_lora_weights(net)
+    x = torch.randn(2, 4)
+    layer = net.unet_loras[0].layer
+
+    # 1. Get base output (no adapters)
+    net.is_active = False
+    base_out = layer(x)
+
+    # 2. Get full output at multiplier = 1.0
+    net.is_active = True
+    net.multiplier = 1.0
+    full_out_1 = layer(x)
+    delta_1 = full_out_1 - base_out
+
+    # 3. Get scaled output at multiplier = [2.0, 0.5]
+    net.multiplier = [2.0, 0.5]
+    full_out_scaled = layer(x)
+    delta_scaled = full_out_scaled - base_out
+
+    # Verify row 0 is scaled by 2.0, row 1 is scaled by 0.5
+    expected_delta_row0 = delta_1[0] * 2.0
+    expected_delta_row1 = delta_1[1] * 0.5
+
+    assert torch.allclose(delta_scaled[0], expected_delta_row0, atol=1e-6)
+    assert torch.allclose(delta_scaled[1], expected_delta_row1, atol=1e-6)
+
+
+@pytest.mark.parametrize("network_type", ["peft", "peft_dora"])
+def test_peft_multiplier_one_is_noop(network_type):
+    """multiplier=1.0 must be a no-op compared to default PEFT behavior."""
+    net, _ = _build_peft_network(network_type, n_blocks=2)
+    _init_lora_weights(net)
+    x = torch.randn(2, 4)
+    layer = net.unet_loras[0].layer
+
+    # Get output with multiplier=1.0
+    net.is_active = True
+    net.multiplier = 1.0
+    out_mult_1 = layer(x)
+
+    net.is_active = False
+    base_out = layer(x)
+    assert not torch.allclose(out_mult_1, base_out, atol=1e-6)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-q"])

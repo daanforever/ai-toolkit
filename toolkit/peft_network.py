@@ -6,8 +6,7 @@ network (apply_to, prepare_optimizer_params, save_weights, load_weights,
 share_parameters_with, force_to, multiplier/is_active/is_merged_in flags).
 
 Scope (phase 1): basic LoRA and DoRA on quantized or unquantized Z-Image DiT.
-Slider-training features (network_weight batch-split multiplier, magnitude
-calibration) are deferred to phase 2.
+Slider-training features (magnitude calibration) are deferred to phase 2.
 """
 
 from __future__ import annotations
@@ -21,7 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 from torch import nn
 
-from toolkit.network_mixins import ToolkitNetworkMixin
+from toolkit.network_mixins import ToolkitNetworkMixin, broadcast_and_multiply
 
 try:
     from peft import LoraConfig, get_peft_model, get_peft_model_state_dict, set_peft_model_state_dict
@@ -142,6 +141,21 @@ def _lora_name_to_peft_path(lora_name: str) -> str:
         rest = lora_name[len("lora_unet__"):]
         return rest.replace("_", ".")
     return lora_name.replace("$$", ".").replace("__", ".")
+
+
+def _iter_lora_linears(peft_model: nn.Module | None):
+    if peft_model is None:
+        return
+    for module in peft_model.modules():
+        if isinstance(module, LoraLayer):
+            yield module
+
+
+def _expand_multiplier(multiplier: torch.Tensor, batch_size: int) -> torch.Tensor:
+    if multiplier.size(0) != batch_size:
+        num_interleaves = batch_size // multiplier.size(0)
+        multiplier = multiplier.repeat_interleave(num_interleaves)
+    return multiplier
 
 
 class PeftNetwork(ToolkitNetworkMixin, nn.Module):
@@ -303,6 +317,7 @@ class PeftNetwork(ToolkitNetworkMixin, nn.Module):
 
         # Initialise torch_multiplier to a sensible default.
         self.torch_multiplier = torch.tensor([float(multiplier)])
+        self._install_multiplier_wrappers()
 
     # ------------------------------------------------------------------ helpers
     def _collect_lora_adapters(self, peft_model: nn.Module) -> List[_PeftLoraAdapter]:
@@ -315,6 +330,63 @@ class PeftNetwork(ToolkitNetworkMixin, nn.Module):
             lora_name = _peft_path_to_lora_name(name)
             adapters.append(_PeftLoraAdapter(lora_name, module))
         return adapters
+
+    def _install_multiplier_wrappers(self):
+        network_ref = weakref.ref(self)
+
+        def make_wrapped_forward(module, orig_forward):
+            def wrapped_forward(x, *args, **kwargs):
+                net = network_ref()
+                if net is None:
+                    return orig_forward(x, *args, **kwargs)
+
+                is_merged = getattr(module, "merged", False)
+                disable_adapters = getattr(module, "disable_adapters", False)
+                if is_merged or disable_adapters:
+                    return orig_forward(x, *args, **kwargs)
+
+                if not net.is_active or net._multiplier == 0:
+                    prev = getattr(module, "_disable_adapters", False)
+                    module._disable_adapters = True
+                    try:
+                        return orig_forward(x, *args, **kwargs)
+                    finally:
+                        module._disable_adapters = prev
+
+                # Fast path for multiplier == 1.0 (avoid double forward)
+                if isinstance(net._multiplier, (int, float)) and net._multiplier == 1.0:
+                    return orig_forward(x, *args, **kwargs)
+
+                # Base-only pass
+                prev = getattr(module, "_disable_adapters", False)
+                module._disable_adapters = True
+                try:
+                    base_out = orig_forward(x, *args, **kwargs)
+                finally:
+                    module._disable_adapters = prev
+
+                full_out = orig_forward(x, *args, **kwargs)
+
+                if not isinstance(base_out, torch.Tensor) or not isinstance(full_out, torch.Tensor):
+                    return full_out
+
+                delta = full_out - base_out
+
+                mult = net.torch_multiplier.to(device=delta.device, dtype=delta.dtype)
+                mult = _expand_multiplier(mult, delta.size(0))
+                return base_out + broadcast_and_multiply(delta, mult)
+            return wrapped_forward
+
+        for model in (self.peft_model, self.te_peft_model):
+            if model is None:
+                continue
+            for module in _iter_lora_linears(model):
+                orig_forward = module.forward
+                if hasattr(orig_forward, "__wrapped_by_peft_network__"):
+                    continue
+                wrapped = make_wrapped_forward(module, orig_forward)
+                wrapped.__wrapped_by_peft_network__ = True
+                module.forward = wrapped
 
     def get_all_modules(self) -> List[_PeftLoraAdapter]:
         return list(self.unet_loras) + list(self.text_encoder_loras)

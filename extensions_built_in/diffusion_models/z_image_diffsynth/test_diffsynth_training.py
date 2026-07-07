@@ -9,6 +9,7 @@ import torch
 import torch.nn.functional as F
 from types import SimpleNamespace
 import importlib
+import inspect
 
 import pytest
 
@@ -327,6 +328,103 @@ def test_calculate_loss_applies_timestep_weight_after_snr(monkeypatch):
     )
     assert state["timestep_called"] == 1
     assert torch.allclose(loss, torch.tensor(15.0), rtol=1e-6, atol=1e-6)
+
+
+def test_calculate_loss_applies_network_weight():
+    sdtrainer_module = importlib.import_module("extensions_built_in.sd_trainer.SDTrainer")
+    SDTrainer = sdtrainer_module.SDTrainer
+
+    class _NoiseScheduler:
+        def __init__(self):
+            self.timesteps = torch.arange(1000, dtype=torch.float32)
+            self.config = SimpleNamespace(
+                num_train_timesteps=1000,
+                prediction_type="epsilon",
+            )
+
+    class _Batch:
+        def __init__(self, bsz: int, network_weights):
+            self.mask_tensor = None
+            self.loss_multiplier_list = [1.0] * bsz
+            self._network_weights = network_weights
+            self.latents = torch.zeros(bsz, 1, 2, 2)
+            self.tensor = torch.zeros_like(self.latents)
+            self.file_items = None
+            self.audio_pred = None
+            self.audio_target = None
+            self.sigmas = None
+
+        def get_is_reg_list(self):
+            return [False] * self.latents.shape[0]
+
+        def get_network_weight_list(self):
+            return list(self._network_weights)
+
+    trainer = object.__new__(SDTrainer)
+    cfg = TrainConfig()
+    cfg.dtype = "fp32"
+    cfg.loss_target = "noise"
+    cfg.loss_type = "mse"
+    cfg.train_turbo = False
+    cfg.do_guidance_loss = False
+    cfg.do_differential_guidance = False
+    cfg.do_prior_divergence = False
+    cfg.inverted_mask_prior = False
+    cfg.correct_pred_norm = False
+    cfg.match_noise_norm = False
+    cfg.pred_scaler = 1.0
+    cfg.target_noise_multiplier = 1.0
+    cfg.learnable_snr_gos = False
+    cfg.snr_gamma = None
+    cfg.min_snr_gamma = None
+    cfg.prediction_type = "epsilon"
+    cfg.linear_timesteps = False
+    cfg.linear_timesteps2 = False
+    cfg.timestep_weighting = "none"
+    cfg.content_or_style = "balanced"
+    cfg.target_norm_std = False
+    trainer.train_config = cfg
+    trainer.sd = SimpleNamespace(
+        is_flow_matching=True,
+        prediction_type="epsilon",
+        noise_scheduler=_NoiseScheduler(),
+    )
+    trainer.device_torch = torch.device("cpu")
+    trainer.dfe = None
+    trainer.adapter = None
+    trainer.writer = None
+    trainer.logger = None
+    trainer.step_num = 0
+    trainer.logging_config = SimpleNamespace(log_every=None)
+    trainer.accelerator = SimpleNamespace(is_main_process=False)
+    trainer.snr_gos = None
+
+    bsz = 2
+    batch = _Batch(bsz, network_weights=[0.25, 1.0])
+    noise_pred = torch.zeros(bsz, 1, 2, 2)
+    noise = torch.ones_like(noise_pred)
+    noisy_latents = torch.zeros_like(noise_pred)
+    timesteps = torch.tensor([100.0, 900.0])
+
+    loss = SDTrainer.calculate_loss(
+        trainer,
+        noise_pred=noise_pred,
+        noise=noise,
+        noisy_latents=noisy_latents,
+        timesteps=timesteps,
+        batch=batch,
+    )
+    # per-sample MSE = 1.0; network_weight [0.25, 1.0] -> mean = 0.625
+    assert torch.allclose(loss, torch.tensor(0.625), rtol=1e-6, atol=1e-6)
+
+
+def test_train_single_accumulation_uses_multiplier_one_for_dataset_balancing():
+    sdtrainer_module = importlib.import_module("extensions_built_in.sd_trainer.SDTrainer")
+    train_src = inspect.getsource(sdtrainer_module.SDTrainer.train_single_accumulation)
+    assert "network.multiplier = 1.0" in train_src
+    calc_src = inspect.getsource(sdtrainer_module.SDTrainer.calculate_loss)
+    assert "get_network_weight_list" in calc_src
+    assert "loss * network_weight" in calc_src
 
 
 def test_zimage_calculate_loss_does_not_double_apply_timestep_weight():
