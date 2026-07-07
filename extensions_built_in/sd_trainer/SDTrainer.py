@@ -2209,6 +2209,7 @@ class SDTrainer(BaseSDTrainProcess):
                             next_sample_noise = (stepped_latents - (1.0 - t_01) * original_samples) / t_01
                             noise = next_sample_noise
                             timesteps = stepped_timesteps
+                backward_done = False
                 # do a prior pred if we have an unconditional image, we will swap out the giadance later
                 if batch.unconditional_latents is not None or self.do_guided_loss:
                     # do guided loss
@@ -2225,7 +2226,9 @@ class SDTrainer(BaseSDTrainProcess):
                         mask_multiplier=mask_multiplier,
                         prior_pred=prior_pred,
                     )
-                    
+                    guidance_type = batch.file_items[0].dataset_config.guidance_type
+                    backward_done = guidance_type != "targeted_flow"
+
                 elif self.train_config.loss_type == 'mean_flow':
                     loss = self.get_mean_flow_loss(
                         noisy_latents=noisy_latents,
@@ -2240,6 +2243,7 @@ class SDTrainer(BaseSDTrainProcess):
                         microbatch_scale=microbatch_scale,
                         prior_pred=prior_pred,
                     )
+                    backward_done = True
                 else:
                     with self.timer('predict_unet'):
                         with memory_debug(

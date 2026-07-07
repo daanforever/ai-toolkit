@@ -165,7 +165,7 @@ class DataLoaderBatchDTO:
     def __init__(self, **kwargs):
         try:
             self.file_items: List["FileItemDTO"] = kwargs.get("file_items", None)
-            is_latents_cached = self.file_items[0].is_latent_cached
+            is_latents_cached = all(x.is_latent_cached for x in self.file_items)
             self.tensor: Union[torch.Tensor, None] = None
             self.latents: Union[torch.Tensor, None] = None
             self.control_tensor: Union[torch.Tensor, None] = None
@@ -347,7 +347,7 @@ class DataLoaderBatchDTO:
                 # find one to use as a base
                 base_unconditional_tensor = None
                 for x in self.file_items:
-                    if x.unaugmented_tensor is not None:
+                    if x.unconditional_tensor is not None:
                         base_unconditional_tensor = x.unconditional_tensor
                         break
                 unconditional_tensor = []

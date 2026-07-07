@@ -745,6 +745,61 @@ def get_dataloader_from_datasets(
     return data_loader
 
 
+def _iter_ai_toolkit_datasets(dataloader: DataLoader):
+    """Yield underlying AiToolkitDataset instances from any dataloader wrapper."""
+    for ds in get_dataloader_datasets(dataloader):
+        if isinstance(ds, ConcatDataset):
+            yield from ds.datasets
+        else:
+            yield ds
+
+
+def resize_dataloader_batch_size(
+        dataloader: DataLoader,
+        batch_size: int,
+        epoch_num=None,
+) -> DataLoader:
+    """
+    Update batch_size on an existing dataloader without recreating AiToolkitDataset objects.
+
+    Bucket mode: UnifiedBucketManager.update_batch_size() only rebuilds batch_indices.
+    Non-bucket mode: rebuilds the DataLoader wrapper around the same ConcatDataset.
+    """
+    if dataloader is None:
+        return None
+
+    if hasattr(dataloader.dataset, 'bucket_manager'):
+        bucket_manager = dataloader.dataset.bucket_manager
+        bucket_manager.update_batch_size(batch_size)
+        for ds in dataloader.dataset.datasets:
+            ds.batch_size = batch_size
+        dataloader.dataset.len = None
+        dataloader.len = None
+    else:
+        dataset = dataloader.dataset
+        dataloader_kwargs = {
+            'batch_size': batch_size,
+            'shuffle': True,
+            'collate_fn': dataloader.collate_fn,
+            'drop_last': dataloader.drop_last,
+            'num_workers': dataloader.num_workers,
+        }
+        if dataloader.num_workers > 0:
+            prefetch_factor = getattr(dataloader, 'prefetch_factor', None)
+            if prefetch_factor is not None:
+                dataloader_kwargs['prefetch_factor'] = prefetch_factor
+        dataloader = DataLoader(dataset, **dataloader_kwargs)
+
+    if epoch_num is not None:
+        for ds in _iter_ai_toolkit_datasets(dataloader):
+            if hasattr(ds, 'set_epoch_num'):
+                ds.set_epoch_num(epoch_num)
+            if hasattr(ds, 'len'):
+                ds.len = None
+
+    return dataloader
+
+
 def trigger_dataloader_setup_epoch(dataloader: DataLoader):
     # hacky but needed because of different types of datasets and dataloaders
     dataloader.len = None

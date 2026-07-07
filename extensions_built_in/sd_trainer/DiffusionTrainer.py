@@ -387,7 +387,7 @@ class DiffusionTrainer(SDTrainer):
         return self._get_runtime_scalar("runtime_beta2", float)
 
     def apply_runtime_batch_size(self):
-        """If runtime_batch_size is set in DB, apply it to train_config and recreate data loaders."""
+        """If runtime_batch_size is set in DB, apply it to train_config and resize data loaders."""
         if not self.is_ui_trainer:
             return
         batch_size = self.get_runtime_batch_size()
@@ -402,29 +402,26 @@ class DiffusionTrainer(SDTrainer):
         old_batch_size = self.train_config.batch_size
         self.train_config.batch_size = batch_size
         self._last_applied_runtime_batch_size = batch_size
-        
-        # Recreate data loaders with new batch_size
-        if self.datasets is not None:
-            from toolkit.data_loader import get_dataloader_from_datasets
-            self.data_loader = get_dataloader_from_datasets(
-                self.datasets, 
-                self.train_config.batch_size, 
-                self.sd, 
-                train_config=self.train_config
-            )
-        
-        if self.datasets_reg is not None:
-            from toolkit.data_loader import get_dataloader_from_datasets
-            self.data_loader_reg = get_dataloader_from_datasets(
-                self.datasets_reg, 
+
+        from toolkit.data_loader import resize_dataloader_batch_size
+
+        if self.data_loader is not None:
+            self.data_loader = resize_dataloader_batch_size(
+                self.data_loader,
                 self.train_config.batch_size,
-                self.sd, 
-                train_config=self.train_config
+                epoch_num=self.epoch_num,
             )
-        
+
+        if self.data_loader_reg is not None:
+            self.data_loader_reg = resize_dataloader_batch_size(
+                self.data_loader_reg,
+                self.train_config.batch_size,
+                epoch_num=self.epoch_num,
+            )
+
         if is_debug_enabled():
             print_acc(
-                f"\nruntime batch_size from UI/DB: {old_batch_size} -> {batch_size}, data loaders recreated"
+                f"\nruntime batch_size from UI/DB: {old_batch_size} -> {batch_size}, data loaders resized"
             )
 
     def get_runtime_gradient_accumulation(self):
@@ -1117,8 +1114,8 @@ class DiffusionTrainer(SDTrainer):
             self.apply_runtime_content_or_style()
             self.apply_runtime_fixed_cycle_params()
             self.apply_runtime_timestep_type()
-            self.apply_runtime_network_weights()
             self.apply_runtime_batch_size()
+            self.apply_runtime_network_weights()
             self.apply_runtime_gradient_accumulation()
             self.apply_runtime_save_every()
             self.apply_runtime_sample_every()
