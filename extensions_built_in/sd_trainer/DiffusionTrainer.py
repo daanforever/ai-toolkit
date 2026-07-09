@@ -766,7 +766,13 @@ class DiffusionTrainer(SDTrainer):
                     parsed = json.loads(raw)
                     if not isinstance(parsed, list):
                         return None
-                    return [float(x) for x in parsed if isinstance(x, (int, float)) and abs(x) == x and x > 0]
+                    return [
+                        float(x) for x in parsed
+                        if isinstance(x, (int, float))
+                        and (v := float(x)) == v
+                        and abs(v) != float("inf")
+                        and v >= 0
+                    ]
                 except (ValueError, TypeError):
                     return None
 
@@ -784,16 +790,34 @@ class DiffusionTrainer(SDTrainer):
             return
         if self.data_loader is None:
             return
-        datasets = get_dataloader_datasets(self.data_loader)
-        if len(datasets) >= len(weights) and all(
-            ds.dataset_config.network_weight == weights[i]
-            for i, ds in enumerate(datasets[: len(weights)])
-        ):
-            self._last_applied_runtime_network_weights = weights_tuple
-            return
-        for i, ds in enumerate(datasets):
-            if i < len(weights):
-                ds.dataset_config.network_weight = weights[i]
+
+        from toolkit.data_loader import rebuild_dataloader_network_weights
+
+        for loader in (self.data_loader, self.data_loader_reg):
+            if loader is None:
+                continue
+            datasets = get_dataloader_datasets(loader)
+            for i, ds in enumerate(datasets):
+                if i < len(weights):
+                    w = weights[i]
+                    ds.dataset_config.network_weight = w
+                    for file_item in ds.file_list:
+                        file_item.network_weight = w
+
+        try:
+            self.data_loader = rebuild_dataloader_network_weights(
+                self.data_loader, epoch_num=self.epoch_num
+            )
+        except ValueError:
+            pass
+        if self.data_loader_reg is not None:
+            try:
+                self.data_loader_reg = rebuild_dataloader_network_weights(
+                    self.data_loader_reg, epoch_num=self.epoch_num
+                )
+            except ValueError:
+                pass
+
         self._last_applied_runtime_network_weights = weights_tuple
         if is_debug_enabled():
             print_acc(f"\nruntime network_weights from UI/DB applied: {list(weights_tuple)}")

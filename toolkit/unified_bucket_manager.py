@@ -9,6 +9,7 @@ import random
 import warnings
 from typing import List, Dict, Tuple, TYPE_CHECKING
 from toolkit.print import print_acc
+from toolkit.data_loader import is_dataset_network_active
 
 if TYPE_CHECKING:
     from toolkit.data_loader import AiToolkitDataset
@@ -123,6 +124,8 @@ class UnifiedBucketManager:
         self.unified_buckets = {}
         
         for dataset_idx, dataset in enumerate(self.datasets):
+            if not is_dataset_network_active(dataset.dataset_config):
+                continue
             # Ensure dataset has buckets set up
             if not hasattr(dataset, 'buckets') or not dataset.buckets:
                 raise ValueError(

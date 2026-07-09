@@ -12,7 +12,7 @@ import torch
 from PIL import Image
 from PIL.ImageOps import exif_transpose
 from torchvision import transforms
-from torch.utils.data import Dataset, DataLoader, ConcatDataset
+from torch.utils.data import Dataset, DataLoader, ConcatDataset, SubsetRandomSampler
 from tqdm import tqdm
 import albumentations as A
 
@@ -37,6 +37,49 @@ import platform
 
 def is_native_windows():
     return platform.system() == "Windows" and platform.release() != "2"
+
+
+def is_dataset_network_active(dataset_config) -> bool:
+    return float(dataset_config.network_weight) != 0.0
+
+
+def _active_concat_indices(concat_dataset: ConcatDataset) -> List[int]:
+    indices = []
+    offset = 0
+    for ds in concat_dataset.datasets:
+        if is_dataset_network_active(ds.dataset_config):
+            indices.extend(range(offset, offset + len(ds)))
+        offset += len(ds)
+    return indices
+
+
+def _assert_active_training_items(indices: List[int], *, context: str = "dataloader"):
+    if len(indices) == 0:
+        raise ValueError(
+            f"Cannot create {context}: all datasets have network_weight == 0 "
+            "(no training items available for sampling)."
+        )
+
+
+def _build_non_bucket_dataloader(
+        concat_dataset: ConcatDataset,
+        batch_size: int,
+        collate_fn,
+        dataloader_kwargs: dict,
+        drop_last: bool = False,
+) -> DataLoader:
+    indices = _active_concat_indices(concat_dataset)
+    _assert_active_training_items(indices)
+    sampler = SubsetRandomSampler(indices)
+    return DataLoader(
+        concat_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        sampler=sampler,
+        collate_fn=collate_fn,
+        drop_last=drop_last,
+        **dataloader_kwargs,
+    )
 
 if TYPE_CHECKING:
     from toolkit.stable_diffusion_model import StableDiffusion
@@ -721,6 +764,9 @@ def get_dataloader_from_datasets(
         # Create unified bucket manager
         bucket_manager = UnifiedBucketManager(datasets, batch_size)
         bucket_manager.build_unified_buckets()
+        total_items = sum(len(v) for v in bucket_manager.unified_buckets.values())
+        if total_items == 0:
+            _assert_active_training_items([], context="bucket dataloader")
         bucket_manager.shuffle_and_build_batches()
         
         # Create unified dataset wrapper
@@ -735,12 +781,11 @@ def get_dataloader_from_datasets(
             **dataloader_kwargs
         )
     else:
-        data_loader = DataLoader(
+        data_loader = _build_non_bucket_dataloader(
             concatenated_dataset,
             batch_size=batch_size,
-            shuffle=True,
             collate_fn=dto_collation,
-            **dataloader_kwargs
+            dataloader_kwargs=dataloader_kwargs,
         )
     return data_loader
 
@@ -776,19 +821,65 @@ def resize_dataloader_batch_size(
         dataloader.dataset.len = None
         dataloader.len = None
     else:
-        dataset = dataloader.dataset
         dataloader_kwargs = {
-            'batch_size': batch_size,
-            'shuffle': True,
-            'collate_fn': dataloader.collate_fn,
-            'drop_last': dataloader.drop_last,
             'num_workers': dataloader.num_workers,
         }
         if dataloader.num_workers > 0:
             prefetch_factor = getattr(dataloader, 'prefetch_factor', None)
             if prefetch_factor is not None:
                 dataloader_kwargs['prefetch_factor'] = prefetch_factor
-        dataloader = DataLoader(dataset, **dataloader_kwargs)
+        dataloader = _build_non_bucket_dataloader(
+            dataloader.dataset,
+            batch_size=batch_size,
+            collate_fn=dataloader.collate_fn,
+            dataloader_kwargs=dataloader_kwargs,
+            drop_last=dataloader.drop_last,
+        )
+
+    if epoch_num is not None:
+        for ds in _iter_ai_toolkit_datasets(dataloader):
+            if hasattr(ds, 'set_epoch_num'):
+                ds.set_epoch_num(epoch_num)
+            if hasattr(ds, 'len'):
+                ds.len = None
+
+    return dataloader
+
+
+def rebuild_dataloader_network_weights(
+        dataloader: DataLoader,
+        epoch_num=None,
+) -> DataLoader:
+    """
+    Rebuild sampling after runtime network_weight changes without recreating AiToolkitDataset objects.
+
+    Bucket mode: rebuild unified_buckets and batch_indices (excludes network_weight == 0).
+    Non-bucket mode: rebuild DataLoader with SubsetRandomSampler over active sub-datasets.
+    """
+    if dataloader is None:
+        return None
+
+    if hasattr(dataloader.dataset, 'bucket_manager'):
+        bucket_manager = dataloader.dataset.bucket_manager
+        bucket_manager.build_unified_buckets(quiet=True)
+        bucket_manager.shuffle_and_build_batches(quiet=True)
+        dataloader.dataset.len = None
+        dataloader.len = None
+    else:
+        dataloader_kwargs = {
+            'num_workers': dataloader.num_workers,
+        }
+        if dataloader.num_workers > 0:
+            prefetch_factor = getattr(dataloader, 'prefetch_factor', None)
+            if prefetch_factor is not None:
+                dataloader_kwargs['prefetch_factor'] = prefetch_factor
+        dataloader = _build_non_bucket_dataloader(
+            dataloader.dataset,
+            batch_size=dataloader.batch_size,
+            collate_fn=dataloader.collate_fn,
+            dataloader_kwargs=dataloader_kwargs,
+            drop_last=dataloader.drop_last,
+        )
 
     if epoch_num is not None:
         for ds in _iter_ai_toolkit_datasets(dataloader):
