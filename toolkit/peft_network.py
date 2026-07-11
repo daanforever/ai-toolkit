@@ -158,6 +158,43 @@ def _expand_multiplier(multiplier: torch.Tensor, batch_size: int) -> torch.Tenso
     return multiplier
 
 
+def _install_dora_calibration_forward(sampling_mag_module, calibration_ratio: torch.Tensor) -> None:
+    """Wrap a sampling DoRA magnitude module's ``forward`` so the shared main
+    magnitude is calibrated to the sampling base at read time.
+
+    The magnitude Parameter stays shared by reference with the main network
+    (training updates propagate live); only during each sampling forward is a
+    calibrated view ``self.weight * calibration_ratio`` substituted, then the
+    shared Parameter is restored. ``calibration_ratio = ||W_sampling|| /
+    ||W_main||`` is a per-module constant captured at share time, mirroring the
+    ``calibrated_magnitude = magnitude * (initial / train)`` logic in
+    ``toolkit.models.DoRA.DoRAModule.apply_dora``.
+
+    Idempotent: a marker attribute prevents double-wrapping on re-share.
+    """
+    if getattr(sampling_mag_module, "_toolkit_dora_calibrated_forward", False):
+        return
+    orig_forward = sampling_mag_module.forward
+
+    def calibrated_forward(*args, **kwargs):
+        shared_weight = sampling_mag_module.weight
+        with torch.no_grad():
+            calibrated = (shared_weight.data * calibration_ratio).to(
+                device=shared_weight.device, dtype=shared_weight.dtype
+            )
+        calibrated_param = nn.Parameter(calibrated, requires_grad=False)
+        sampling_mag_module.weight = calibrated_param
+        try:
+            return orig_forward(*args, **kwargs)
+        finally:
+            sampling_mag_module.weight = shared_weight
+
+    calibrated_forward.__toolkit_dora_calibrated__ = True
+    sampling_mag_module.forward = calibrated_forward
+    sampling_mag_module._toolkit_dora_calibrated_forward = True
+    sampling_mag_module._toolkit_dora_orig_forward = orig_forward
+
+
 class PeftNetwork(ToolkitNetworkMixin, nn.Module):
     """Network wrapper that delegates LoRA/DoRA adaptation to the `peft` library.
 
@@ -755,14 +792,43 @@ class PeftNetwork(ToolkitNetworkMixin, nn.Module):
                 for adapter_name in main_mag:
                     if main_mag[adapter_name] is None or sampling_mag[adapter_name] is None:
                         continue
-                    # Magnitude is stored as a Parameter on the Magnitude layer.
-                    for pname, p in main_mag[adapter_name].named_parameters():
-                        try:
-                            setattr(sampling_mag[adapter_name], pname, p)
-                        except Exception:
-                            # Fall back to in-place copy if direct attr set fails.
-                            with torch.no_grad():
-                                getattr(sampling_mag[adapter_name], pname).copy_(p)
+                    if self.is_dora:
+                        # DoRA magnitude is base-weight-specific. The sampling
+                        # network's magnitude was initialized to ||W_sampling||
+                        # and the main network's to ||W_main||. We keep the
+                        # magnitude Parameter shared by reference with the main
+                        # network (so only the main network trains, and updates
+                        # propagate live to sampling), and apply a per-module
+                        # calibration ratio at read time so that PEFT's DoRA
+                        # forward sees a calibrated magnitude:
+                        #   calibrated = main_magnitude * (||W_sampling|| / ||W_main||)
+                        # which equals ||W_sampling|| at init -> identity at
+                        # step 0, and proportionally rescales main's trained
+                        # magnitude to the sampling base during training. This
+                        # mirrors toolkit.models.DoRA.DoRAModule.apply_dora.
+                        sampling_mag_module = sampling_mag[adapter_name]
+                        main_mag_module = main_mag[adapter_name]
+                        with torch.no_grad():
+                            sampling_initial = sampling_mag_module.weight.detach().clone()
+                            main_initial = main_mag_module.weight.detach().clone()
+                            calibration_ratio = (
+                                sampling_initial / main_initial.clamp(min=1e-6)
+                            ).to(main_mag_module.weight.dtype)
+                        # Share the magnitude Parameter by reference (main's).
+                        sampling_mag_module.weight = main_mag_module.weight
+                        sampling_mag_module._toolkit_dora_calibration_ratio = calibration_ratio
+                        _install_dora_calibration_forward(sampling_mag_module, calibration_ratio)
+                    else:
+                        # Non-DoRA: no magnitude vector to calibrate. PEFT
+                        # keeps lora_magnitude_vector[adapter] = None here, so
+                        # this branch is unreachable in practice but kept for
+                        # safety.
+                        for pname, p in main_mag[adapter_name].named_parameters():
+                            try:
+                                setattr(sampling_mag[adapter_name], pname, p)
+                            except Exception:
+                                with torch.no_grad():
+                                    getattr(sampling_mag[adapter_name], pname).copy_(p)
 
         # Refresh the sampling network's wrapper cache so it sees shared params.
         for a in self.unet_loras:
