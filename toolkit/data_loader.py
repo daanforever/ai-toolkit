@@ -482,7 +482,7 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
         self.batch_size = batch_size
         # we always random crop if random scale is enabled
         self.random_crop = self.random_scale if self.random_scale else dataset_config.random_crop
-        self.resolution = dataset_config.resolution
+        self.resolution = dataset_config.current_resolution
         self.caption_dict = None
         self.file_list: List['FileItemDTO'] = []
 

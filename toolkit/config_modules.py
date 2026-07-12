@@ -890,7 +890,9 @@ class DatasetConfig:
             self.caption_ext = '.' + self.caption_ext
         self.random_scale: bool = kwargs.get('random_scale', False)
         self.random_crop: bool = kwargs.get('random_crop', False)
-        self.resolution: int = kwargs.get('resolution', 512)
+        _resolution = kwargs.get('resolution', 512)
+        self.resolution: List[int] = [_resolution] if isinstance(_resolution, int) else list(_resolution)
+        self.current_resolution: int = kwargs.get('current_resolution', self.resolution[0])
         self.scale: float = kwargs.get('scale', 1.0)
         self.buckets: bool = kwargs.get('buckets', True)
         self.bucket_tolerance: int = kwargs.get('bucket_tolerance', 64)
@@ -1042,7 +1044,8 @@ def preprocess_dataset_raw_config(raw_config: List[dict]) -> List[dict]:
             resolution_list = [resolution]
         for res in resolution_list:
             dataset_copy = dataset.copy()
-            dataset_copy['resolution'] = res
+            dataset_copy['resolution'] = resolution_list
+            dataset_copy['current_resolution'] = res
             new_config.append(dataset_copy)
     return new_config
 

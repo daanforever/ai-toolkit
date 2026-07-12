@@ -53,7 +53,6 @@ class UnifiedBucketManager:
         Validate that dataset configurations are compatible.
         
         Critical parameters (must match):
-        - resolution
         - bucket_tolerance
         
         Warning parameters (should match, but not critical):
@@ -68,18 +67,10 @@ class UnifiedBucketManager:
         
         # Get reference config from first dataset
         ref_config = self.datasets[0].dataset_config
-        ref_resolution = ref_config.resolution
         ref_bucket_tolerance = ref_config.bucket_tolerance
         
         for idx, dataset in enumerate(self.datasets[1:], start=1):
             config = dataset.dataset_config
-            
-            # Critical checks - these must match
-            if config.resolution != ref_resolution:
-                raise ValueError(
-                    f"Dataset {idx} has incompatible resolution: {config.resolution} "
-                    f"(expected {ref_resolution}). All datasets must have the same resolution."
-                )
             
             if config.bucket_tolerance != ref_bucket_tolerance:
                 raise ValueError(
@@ -105,6 +96,12 @@ class UnifiedBucketManager:
                     f"Dataset {idx} has different random_crop: {config.random_crop} "
                     f"(reference: {ref_config.random_crop}). Elements will use their own dataset's random_crop."
                 )
+
+        resolutions = sorted({dataset.dataset_config.current_resolution for dataset in self.datasets})
+        if len(resolutions) > 1:
+            print_acc(
+                f'Multi-resolution mode: {len(self.datasets)} datasets with resolutions {resolutions}'
+            )
     
     def build_unified_buckets(self, quiet=False):
         """

@@ -91,10 +91,10 @@ def get_bucket_for_image_size(
 
     if bucket_size_list is None and resolution is None:
         # get resolution from width and height
-        resolution = get_resolution(width, height)
+        resolution = max(width, height)
     if bucket_size_list is None:
         # if real resolution is smaller, use that instead
-        real_resolution = get_resolution(width, height)
+        real_resolution = max(width, height)
         resolution = min(resolution, real_resolution)
         bucket_size_list = get_bucket_sizes(resolution=resolution, divisibility=divisibility)
 

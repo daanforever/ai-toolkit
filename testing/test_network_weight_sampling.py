@@ -69,6 +69,7 @@ def test_unified_buckets_exclude_zero_weight():
     ref_config = SimpleNamespace(
         network_weight=1.0,
         resolution=512,
+        current_resolution=512,
         bucket_tolerance=64,
         scale=1.0,
         random_scale=False,
@@ -79,6 +80,7 @@ def test_unified_buckets_exclude_zero_weight():
     inactive_config = SimpleNamespace(
         network_weight=0.0,
         resolution=512,
+        current_resolution=512,
         bucket_tolerance=64,
         scale=1.0,
         random_scale=False,

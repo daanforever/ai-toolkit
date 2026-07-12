@@ -154,23 +154,23 @@ def spatial_resize_crop_pil(file_item: 'FileItemDTO', img: Image.Image) -> Image
         min_img_size = min(img.size)
         dc = file_item.dataset_config
         if dc.random_crop:
-            if dc.random_scale and min_img_size > dc.resolution:
-                if min_img_size < dc.resolution:
+            if dc.random_scale and min_img_size > dc.current_resolution:
+                if min_img_size < dc.current_resolution:
                     print_acc(
                         f"Unexpected values: min_img_size={min_img_size}, "
-                        f"self.resolution={dc.resolution}, image file={file_item.path}"
+                        f"self.resolution={dc.current_resolution}, image file={file_item.path}"
                     )
-                    scale_size = dc.resolution
+                    scale_size = dc.current_resolution
                 else:
-                    scale_size = random.randint(dc.resolution, int(min_img_size))
+                    scale_size = random.randint(dc.current_resolution, int(min_img_size))
                 scaler = scale_size / min_img_size
                 scale_width = int((img.width + 5) * scaler)
                 scale_height = int((img.height + 5) * scaler)
                 img = img.resize((scale_width, scale_height), Image.BICUBIC)
-            img = transforms.RandomCrop(dc.resolution)(img)
+            img = transforms.RandomCrop(dc.current_resolution)(img)
         else:
             img = transforms.CenterCrop(min_img_size)(img)
-            img = img.resize((dc.resolution, dc.resolution), Image.BICUBIC)
+            img = img.resize((dc.current_resolution, dc.current_resolution), Image.BICUBIC)
     return img
 
 
@@ -332,7 +332,7 @@ class BucketsMixin:
         self.buckets = {}  # clear it
 
         config: 'DatasetConfig' = self.dataset_config
-        resolution = config.resolution
+        resolution = config.current_resolution
         bucket_tolerance = config.bucket_tolerance
         file_list: List['FileItemDTO'] = self.file_list
 
@@ -341,6 +341,12 @@ class BucketsMixin:
             file_item: 'FileItemDTO' = file_item
             width = int(file_item.width * file_item.dataset_config.scale)
             height = int(file_item.height * file_item.dataset_config.scale)
+
+            M = max(width, height)
+            r = resolution
+            min_tier_ge_m = min((t for t in config.resolution if t >= M), default=None)
+            if not (r <= M or r == min_tier_ge_m):
+                continue
 
             did_process_poi = False
             if file_item.has_point_of_interest:
@@ -1318,7 +1324,7 @@ class ClipImageFileItemDTOMixin:
             img = exif_transpose(img)
         except Exception as e:
             # make a random noise image
-            img = Image.new('RGB', (self.dataset_config.resolution, self.dataset_config.resolution))
+            img = Image.new('RGB', (self.dataset_config.current_resolution, self.dataset_config.current_resolution))
             print_acc(f"Error: {e}")
             print_acc(f"Error loading image: {clip_image_path}")
 
@@ -1735,7 +1741,7 @@ class PoiFileItemDTOMixin:
 
         # if img resolution is less than dataset resolution, just return and let the normal bucketing happen
         img_resolution = get_resolution(initial_width, initial_height)
-        if img_resolution <= self.dataset_config.resolution:
+        if img_resolution <= self.dataset_config.current_resolution:
             return False  # will trigger normal bucketing
 
         bucket_tolerance = self.dataset_config.bucket_tolerance
@@ -1781,7 +1787,7 @@ class PoiFileItemDTOMixin:
                 print_acc(f"Error getting resolution: {self.path}")
                 raise e
                 return False
-            if current_resolution >= self.dataset_config.resolution:
+            if current_resolution >= self.dataset_config.current_resolution:
                 # We can break now
                 break
             else:
@@ -1796,7 +1802,7 @@ class PoiFileItemDTOMixin:
 
         bucket_resolution = get_bucket_for_image_size(
             new_width, new_height,
-            resolution=self.dataset_config.resolution,
+            resolution=self.dataset_config.current_resolution,
             divisibility=bucket_tolerance
         )
 
