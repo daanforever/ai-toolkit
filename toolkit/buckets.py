@@ -89,41 +89,47 @@ def get_bucket_for_image_size(
         divisibility: int = 8
 ) -> BucketResolution:
 
-    if bucket_size_list is None and resolution is None:
-        # get resolution from width and height
+    if bucket_size_list is not None:
+        # Legacy path: caller provided a custom list — keep old closest-match logic
+        for bucket in bucket_size_list:
+            if bucket["width"] == width and bucket["height"] == height:
+                return bucket
+
+        closest_bucket = None
+        min_removed_pixels = float("inf")
+
+        for bucket in bucket_size_list:
+            scale_w = bucket["width"] / width
+            scale_h = bucket["height"] / height
+
+            # To minimize pixels, we use the larger scale factor to minimize the amount that has to be cropped.
+            scale = max(scale_w, scale_h)
+
+            new_width = int(width * scale)
+            new_height = int(height * scale)
+
+            removed_pixels = (new_width - bucket["width"]) * new_height + (new_height - bucket["height"]) * new_width
+
+            if removed_pixels < min_removed_pixels:
+                min_removed_pixels = removed_pixels
+                closest_bucket = bucket
+
+        if closest_bucket is None:
+            raise ValueError("No suitable bucket found")
+
+        return closest_bucket
+
+    # Dynamic bucket: scale to effective resolution, round down to divisibility
+    if resolution is None:
         resolution = max(width, height)
-    if bucket_size_list is None:
-        # if real resolution is smaller, use that instead
-        real_resolution = max(width, height)
-        resolution = min(resolution, real_resolution)
-        bucket_size_list = get_bucket_sizes(resolution=resolution, divisibility=divisibility)
-
-    # Check for exact match first
-    for bucket in bucket_size_list:
-        if bucket["width"] == width and bucket["height"] == height:
-            return bucket
-
-    # If exact match not found, find the closest bucket
-    closest_bucket = None
-    min_removed_pixels = float("inf")
-
-    for bucket in bucket_size_list:
-        scale_w = bucket["width"] / width
-        scale_h = bucket["height"] / height
-
-        # To minimize pixels, we use the larger scale factor to minimize the amount that has to be cropped.
-        scale = max(scale_w, scale_h)
-
-        new_width = int(width * scale)
-        new_height = int(height * scale)
-
-        removed_pixels = (new_width - bucket["width"]) * new_height + (new_height - bucket["height"]) * new_width
-
-        if removed_pixels < min_removed_pixels:
-            min_removed_pixels = removed_pixels
-            closest_bucket = bucket
-
-    if closest_bucket is None:
-        raise ValueError("No suitable bucket found")
-
-    return closest_bucket
+    effective_resolution = min(resolution, max(width, height))
+    scale = effective_resolution / max(width, height)
+    new_width = int(width * scale)
+    new_height = int(height * scale)
+    new_width -= new_width % divisibility
+    new_height -= new_height % divisibility
+    if new_width < divisibility:
+        new_width = divisibility
+    if new_height < divisibility:
+        new_height = divisibility
+    return {"width": new_width, "height": new_height}
