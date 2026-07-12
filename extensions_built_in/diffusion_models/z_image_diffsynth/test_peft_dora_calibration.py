@@ -16,6 +16,7 @@ Runs on CPU and does not require the full Z-Image model.
 
 import torch
 import torch.nn as nn
+import pytest
 
 
 class Attention(nn.Module):
@@ -87,13 +88,13 @@ def _build_dit_wrapper(seed: int, d: int = 8):
     return _UnetWrapperStub(dit)
 
 
-def _build_peft_dora_network(wrapper, base):
+def _build_peft_dora_network(wrapper, base, multiplier=1.0):
     from toolkit.peft_network import PeftNetwork
 
     return PeftNetwork(
         text_encoder=None,
         unet=wrapper,
-        multiplier=1.0,
+        multiplier=multiplier,
         lora_dim=2,
         alpha=2.0,
         train_unet=True,
@@ -257,6 +258,140 @@ def test_peft_dora_calibration_tracks_main_magnitude_update():
     )
 
 
+def _quantize_stub(model: nn.Module) -> nn.Module:
+    """Quantize all Linear leaves to qfloat8 in-place via optimum.quanto and freeze."""
+    from toolkit.util.quantize import quantize
+    from optimum.quanto import freeze
+    quantize(model, weights="qfloat8")
+    freeze(model)
+    return model
+
+
+def test_peft_dora_quantized_main_is_identity_at_step0():
+    """Reproduces the real production mismatch: the main DiT is quantized
+    (qfloat8 via optimum.quanto -> QLinear base layers) while the sampling DiT
+    stays fp32. PEFT's DoRA ``update_layer`` initializes the main magnitude from
+    ``dequantize_module_weight(QLinear)`` (the qfloat8-dequantized norm) and the
+    sampling magnitude from the fp32 base norm. These differ, so without
+    calibration ``mag_norm_scale = ||W_main||_dequant / ||W_sampling||_fp32 != 1``
+    and the step-0 DoRA output is corrupted. The calibration ratio
+    ``||W_sampling|| / ||W_main||`` applied at read time restores identity.
+
+    Uses the same seed for both DiTs so the only source of the norm mismatch is
+    quantization precision (isolating the quantized-base code path).
+    """
+    torch.manual_seed(7)
+    main_wrapper = _build_dit_wrapper(seed=7)
+    sampling_wrapper = _build_dit_wrapper(seed=7)
+    # Quantize the main base in-place; sampling stays fp32.
+    _quantize_stub(main_wrapper)
+
+    base = _StubBaseModel()
+    main_net = _build_peft_dora_network(main_wrapper, base)
+    sampling_net = _build_peft_dora_network(sampling_wrapper, base)
+
+    # Precondition: main base layers are actually quantized to QLinear.
+    main_qlinears = [m for m in main_wrapper.modules() if m.__class__.__name__ == "QLinear"]
+    assert main_qlinears, "main stub was not quantized to QLinear"
+
+    # Precondition: the qfloat8-dequant magnitude differs from the fp32 sampling
+    # magnitude (quantization introduces a norm mismatch the calibration must fix).
+    main_mags = _collect_magnitude_modules(main_net)
+    sampling_mags = _collect_magnitude_modules(sampling_net)
+    assert main_mags and sampling_mags
+    assert not torch.allclose(main_mags[0].weight, sampling_mags[0].weight, atol=1e-6), (
+        "quantized main magnitude must differ from fp32 sampling magnitude; "
+        f"main={main_mags[0].weight.flatten()[:4].tolist()} "
+        f"sampling={sampling_mags[0].weight.flatten()[:4].tolist()}"
+    )
+
+    sampling_net.share_parameters_with(main_net)
+
+    x = torch.randn(2, 8, 8, dtype=torch.float32)
+
+    sampling_net.is_active = False
+    with torch.no_grad():
+        base_out = sampling_net.peft_model(x)
+
+    sampling_net.is_active = True
+    with torch.no_grad():
+        adapter_out = sampling_net.peft_model(x)
+
+    assert torch.allclose(adapter_out, base_out, atol=1e-4), (
+        "peft_dora sampling forward on a quantized main / fp32 sampling base is "
+        "not identity at step 0 after share_parameters_with: "
+        f"max diff = {(adapter_out - base_out).abs().max().item()}"
+    )
+
+
+def test_peft_dora_multiplier_neq_1_scales_calibrated_delta():
+    """With multiplier != 1.0 the multiplier wrapper does a double forward:
+    ``base_out`` (adapters disabled) and ``full_out`` (DoRA calibrated), then
+    returns ``base_out + mult * (full_out - base_out)``.
+
+    For a single-linear ``bias=False`` stub with ``lora_B = 0`` and a main
+    magnitude update of ``*= 1.5``: at ``mult=1.0`` the calibrated DoRA output is
+    ``1.5 * base`` (proven by ``test_peft_dora_calibration_tracks_main_magnitude_update``),
+    so at ``mult=0.5`` the expected output is
+    ``base + 0.5 * (1.5*base - base) = 1.25 * base``. This verifies the
+    calibration is applied during the ``full_out`` sub-pass of the multiplier
+    double-forward (not skipped or double-applied) and that the scaled delta is
+    correct.
+    """
+
+    class Attention(nn.Module):  # name matches target_lora_modules
+        def __init__(self, d: int = 8):
+            super().__init__()
+            self.to_q = nn.Linear(d, d, bias=False)
+
+        def forward(self, x):
+            return self.to_q(x)
+
+    class _SingleDiT(nn.Module):
+        def __init__(self, d: int = 8):
+            super().__init__()
+            self.attention = Attention(d)
+
+        def forward(self, x):
+            return self.attention(x)
+
+    class _SingleBase:
+        arch = "zimage_diffsynth"
+        target_lora_modules = ["Attention"]
+
+    torch.manual_seed(1)
+    main_wrapper = _UnetWrapperStub(_SingleDiT())
+    torch.manual_seed(2)
+    sampling_wrapper = _UnetWrapperStub(_SingleDiT())
+    base = _SingleBase()
+
+    main_net = _build_peft_dora_network(main_wrapper, base)
+    sampling_net = _build_peft_dora_network(sampling_wrapper, base, multiplier=0.5)
+    sampling_net.share_parameters_with(main_net)
+
+    # Simulate a main magnitude update so DoRA is no longer identity (delta != 0).
+    main_mags = _collect_magnitude_modules(main_net)
+    with torch.no_grad():
+        for m in main_mags:
+            m.weight.mul_(1.5)
+
+    x = torch.randn(2, 8, 8, dtype=torch.float32)
+
+    sampling_net.is_active = False
+    with torch.no_grad():
+        base_out = sampling_net.peft_model(x)
+
+    sampling_net.is_active = True
+    with torch.no_grad():
+        mult_half_out = sampling_net.peft_model(x)
+
+    expected = 1.25 * base_out  # base + 0.5 * (1.5*base - base)
+    assert torch.allclose(mult_half_out, expected, atol=1e-3), (
+        "multiplier=0.5 did not produce base + 0.5*delta for calibrated DoRA: "
+        f"max diff vs 1.25*base = {(mult_half_out - expected).abs().max().item()}"
+    )
+
+
 def test_peft_non_dora_share_parameters_unchanged():
     """A plain peft (non-DoRA) network must be unaffected by the calibration
     change: no magnitude vector exists, so share_parameters_with shares only
@@ -309,5 +444,7 @@ if __name__ == "__main__":
     test_peft_dora_share_parameters_is_identity_at_step0()
     test_peft_dora_magnitude_is_shared_by_reference()
     test_peft_dora_calibration_tracks_main_magnitude_update()
+    test_peft_dora_quantized_main_is_identity_at_step0()
+    test_peft_dora_multiplier_neq_1_scales_calibrated_delta()
     test_peft_non_dora_share_parameters_unchanged()
     print("All peft_dora calibration tests passed.")
