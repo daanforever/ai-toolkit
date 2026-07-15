@@ -20,18 +20,27 @@ def devices_equal(a: torch.device, b: torch.device) -> bool:
     return a_idx == b_idx
 
 
+def _is_quantized_param(param: torch.Tensor) -> bool:
+    """True for torchao Float8Tensor / quanto QBytesTensor (and similar)."""
+    if hasattr(param, "qdata") and hasattr(param, "scale"):
+        return True
+    if hasattr(param, "_data") and hasattr(param, "_scale"):
+        return True
+    return False
+
+
 def safe_module_to_device(
     module: torch.nn.Module,
     device: torch.device,
     dtype: Optional[torch.dtype] = None,
 ) -> None:
     """
-    Move module to device (and optionally dtype) by replacing registered
-    parameters/buffers. Avoids Module.to() / swap_tensors.
+    Move module to device (and optionally dtype) without Module.to()/swap_tensors.
 
-    Replacing via ``nn.Parameter(tensor.to(device))`` correctly relocates
-    quanto QBytesTensor ``_data`` / ``_scale``; assigning ``param.data = ...``
-    does not.
+    - Quantized weights (torchao/quanto): replace Parameter so payload
+      (``qdata``/``_data`` + scale) relocates; ``param.data = ...`` does not.
+    - All other params (LoRA, plain bias): identity-preserving ``param.data =``
+      so optimizer / PEFT caches keep valid Parameter refs.
     """
     device = torch.device(device)
 
@@ -44,9 +53,12 @@ def safe_module_to_device(
             moved = param.to(device=device, dtype=dtype)
         else:
             moved = param.to(device=device)
-        module._parameters[name] = nn.Parameter(
-            moved, requires_grad=param.requires_grad
-        )
+        if _is_quantized_param(param):
+            module._parameters[name] = nn.Parameter(
+                moved, requires_grad=param.requires_grad
+            )
+        else:
+            param.data = moved.data if hasattr(moved, "data") else moved
 
     for name, buf in list(module.named_buffers(recurse=False)):
         if buf is None:
