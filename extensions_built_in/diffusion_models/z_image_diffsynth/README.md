@@ -9,6 +9,15 @@
   - `false`: toolkit chat template (`encode_prompt`).
   - Example: `use_diffsynth_training_loop: false` with `use_diffsynth_prompt_encoding: true` keeps toolkit loss / SNR / scheduler but DiffSynth literal prompts.
 
+## `model.compile` (per-block DiT `torch.compile`)
+
+- Set **`model.compile: true`** to JIT-compile DiffSynth DiT blocks with `torch.compile(..., dynamic=True)` (Z-Image paper §4.2 style).
+- Order: **quantize → LoRA → compile** (compile runs in `hook_before_train_loop` after the main DiT is on GPU). Gradient checkpointing stays **outside** each compiled block.
+- Works with the usual **`quantize: true`** (quanto float8) path.
+- Diffusers sampling transformer (`sampling_loader: diffusers` / `_sampling_is_diffusers`) is **not** compiled by this path; only DiffSynth `ZImageDiT` ModuleLists (`layers`, optional refiners).
+- On Windows or when inductor/Triton is unavailable, failures are soft: training continues in eager mode.
+- Expect slower first steps while JIT warms up.
+
 ## `use_diffsynth_training_loop`
 
 - **Source of truth:** `model.model_kwargs["use_diffsynth_training_loop"]` (default `true` if omitted).
@@ -53,4 +62,5 @@ When aligning a job with [DiffSynth-Studio/examples](DiffSynth-Studio/examples/z
 - `test_snr_weighting.py` — SNR / `min_snr_gamma` for toolkit loop (`use_diffsynth_training_loop: false`).
 - `test_smoke.py` step 4d — SNR API guard for default DiffSynth adapter (`compute_snr`; SNR disabled in default training).
 - `test_smoke.py` step 7a — trainer flags and `linear_timesteps`.
+- `test_compile_quantized_blocks.py` — per-block compile helper (CPU) + float8/quanto + checkpoint smoke (CUDA).
 - `testing/test_gaussian_full.py` — regression with `use_diffsynth_training_loop: false` (toolkit gaussian path).

@@ -176,6 +176,10 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
         if sd is not None:
             dev = self.device_torch
             sd._move_main_network(dev)
+            if getattr(self, "_compile_dit_blocks", False) and hasattr(
+                sd, "compile_dit_blocks"
+            ):
+                sd.compile_dit_blocks()
         self.internal_hook_before_train_loop()
 
     def hook_after_sd_init_before_load(self):
@@ -184,6 +188,14 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
         but before sd.load_model(). We use this hook to mark the model as
         flow-matching while preserving DiffusionTrainer's existing behavior.
         """
+        # Defer per-block DiT compile to hook_before_train_loop (after quantize + LoRA).
+        # Suppress BaseSDTrainProcess whole-unet torch.compile which is ineffective here.
+        self._compile_dit_blocks = bool(
+            getattr(self.model_config, "compile", False)
+        )
+        if self._compile_dit_blocks:
+            self.model_config.compile = False
+
         # Preserve DiffusionTrainer logic (status updates, hooks, etc.)
         super().hook_after_sd_init_before_load()
 

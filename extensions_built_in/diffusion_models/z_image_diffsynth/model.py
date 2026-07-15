@@ -111,6 +111,7 @@ class ZImageDiffSynthModel(BaseModel):
         # Enable gradient checkpointing by default for DiffSynth DiT to
         # reduce peak VRAM usage during training forwards.
         self.gradient_checkpointing = True
+        self._dit_blocks_compiled = False
 
     @staticmethod
     def get_train_scheduler(use_diffsynth_loop=True, use_dynamic_shifting=False):
@@ -635,6 +636,50 @@ class ZImageDiffSynthModel(BaseModel):
         if not getattr(self, "_disable_context_refiner", True):
             names.append("context_refiner")
         return names
+
+    def compile_dit_blocks(self):
+        """Per-block torch.compile on DiffSynth DiT ModuleLists (after quantize + LoRA)."""
+        if getattr(self, "_dit_blocks_compiled", False):
+            return
+        from .compile_blocks import compile_dit_module_lists
+
+        names = self.get_transformer_block_names() or []
+        log = self.print_and_status_update
+        totals = {"ok": 0, "failed": 0, "skipped": 0}
+
+        def _accumulate(stats):
+            for k in totals:
+                totals[k] += stats.get(k, 0)
+
+        if self._raw_dit is not None and names:
+            log("[zimage_diffsynth] Compiling main DiT blocks (torch.compile dynamic=True)")
+            _accumulate(compile_dit_module_lists(self._raw_dit, names, log_fn=log))
+
+        sampling = getattr(self, "_sampling_transformer", None)
+        if (
+            sampling is not None
+            and not getattr(self, "_sampling_is_diffusers", False)
+            and names
+        ):
+            inner = getattr(sampling, "_inner_dit", None)
+            if inner is None:
+                inner = unwrap_model(sampling)
+                if hasattr(inner, "_inner_dit"):
+                    inner = inner._inner_dit
+            if inner is not None:
+                log("[zimage_diffsynth] Compiling sampling DiT blocks")
+                try:
+                    inner.to(self.device_torch)
+                except Exception:
+                    pass
+                _accumulate(compile_dit_module_lists(inner, names, log_fn=log))
+                self._move_sampling_transformer("cpu")
+
+        self._dit_blocks_compiled = True
+        log(
+            f"[zimage_diffsynth] DiT compile summary: ok={totals['ok']} "
+            f"failed={totals['failed']} skipped={totals['skipped']}"
+        )
 
     def get_lora_optimizer_param_groups(self, network, unet_lr, default_lr):
         unet_loras = getattr(network, "unet_loras", None)
