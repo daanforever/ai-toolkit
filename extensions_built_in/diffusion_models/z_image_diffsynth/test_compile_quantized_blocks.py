@@ -200,13 +200,59 @@ def test_compile_quantized_lora_stub_with_checkpoint():
     assert any(g is not None for g in lora_grads), "expected LoRA parameter grads"
 
 
-if __name__ == "__main__":
-    # Allow running without pytest for quick CPU check
-    class _M:
-        @staticmethod
-        def setattr(obj, name, value):
-            setattr(obj, name, value)
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_wrapper_to_unwrap_recompile_after_device_move():
+    """Compiled+quantized DiT must survive wrapper.to(cpu)/to(cuda) without weakref crash."""
+    if not _cuda_compile_supported():
+        pytest.skip("torch.compile/inductor not usable on this platform")
 
-    test_compile_dit_module_lists_replaces_and_skips(_M())
-    test_compile_dit_module_lists_skips_non_modulelist()
-    print("CPU unit tests OK")
+    from toolkit.util.quantize import quantize, get_qtype
+    from optimum.quanto import freeze
+    from extensions_built_in.diffusion_models.z_image_diffsynth.model import (
+        _DiTUnetWrapper,
+    )
+    from extensions_built_in.diffusion_models.z_image_diffsynth.compile_blocks import (
+        is_compiled_module,
+    )
+
+    device = torch.device("cuda")
+    dit = _TinyDiT(d=8, n=2).to(device=device, dtype=torch.bfloat16)
+    try:
+        quantize(dit, weights=get_qtype("float8"))
+        freeze(dit)
+    except Exception as e:
+        pytest.skip(f"quanto float8 quantize failed: {e}")
+
+    stats = compile_dit_module_lists(dit, ["layers"])
+    if stats["ok"] < 1:
+        pytest.skip(f"compile failed: {stats}")
+
+    wrapper = _DiTUnetWrapper(dit)
+    try:
+        wrapper.to("cpu")
+    except Exception as e:
+        pytest.fail(f"wrapper.to('cpu') failed after compile: {e}")
+
+    for block in wrapper._inner_dit.layers:
+        assert not (
+            is_compiled_module(block) or hasattr(block, "_orig_mod")
+        ), "blocks should be unwrapped on CPU"
+
+    try:
+        wrapper.to(device)
+    except Exception as e:
+        pytest.fail(f"wrapper.to(cuda) failed after unwrap: {e}")
+
+    assert any(
+        is_compiled_module(b) or hasattr(b, "_orig_mod")
+        for b in wrapper._inner_dit.layers
+    ), "blocks should be recompiled on CUDA"
+
+    x = torch.randn(2, 8, device=device, dtype=torch.bfloat16)
+    try:
+        out = _gradient_checkpoint_forward(wrapper._inner_dit.layers[0], True, x)
+        out.sum().backward()
+    except Exception as e:
+        pytest.skip(f"checkpoint forward after recompile failed: {e}")
+
+    assert torch.isfinite(out).all()

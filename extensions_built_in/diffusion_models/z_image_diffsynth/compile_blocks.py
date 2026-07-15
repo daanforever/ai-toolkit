@@ -1,7 +1,7 @@
 """Per-block torch.compile for DiffSynth Z-Image DiT ModuleLists."""
 
 from collections import defaultdict
-from typing import Callable, Dict, List, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence, Union
 
 import torch
 import torch.nn as nn
@@ -13,6 +13,106 @@ try:
 except ImportError:  # pragma: no cover
     def is_compiled_module(module):  # type: ignore[misc]
         return hasattr(module, "_orig_mod")
+
+
+_DIT_BLOCK_ATTRS = ("layers", "noise_refiner", "context_refiner")
+
+
+def discover_dit_block_names(dit: nn.Module) -> List[str]:
+    """Return ModuleList attribute names that hold DiT blocks."""
+    names = []
+    for name in _DIT_BLOCK_ATTRS:
+        if isinstance(getattr(dit, name, None), nn.ModuleList):
+            names.append(name)
+    return names
+
+
+def unwrap_compiled_module_lists(
+    dit: nn.Module,
+    block_names: Optional[Sequence[str]] = None,
+) -> int:
+    """Replace OptimizedModule entries with their `_orig_mod`. Returns unwrap count."""
+    if block_names is None:
+        block_names = discover_dit_block_names(dit)
+    count = 0
+    for name in block_names:
+        module_list = getattr(dit, name, None)
+        if not isinstance(module_list, nn.ModuleList):
+            continue
+        for i, block in enumerate(module_list):
+            if is_compiled_module(block) or hasattr(block, "_orig_mod"):
+                module_list[i] = block._orig_mod
+                count += 1
+    return count
+
+
+def _device_is_cpu(device: Union[torch.device, str, int, None]) -> bool:
+    if device is None:
+        return False
+    if isinstance(device, torch.device):
+        return device.type == "cpu"
+    if isinstance(device, str):
+        return device == "cpu" or device.startswith("cpu:")
+    if isinstance(device, int):
+        return False
+    return False
+
+
+def _module_params_on_cpu(module: nn.Module) -> bool:
+    try:
+        p = next(module.parameters(), None)
+    except Exception:
+        return False
+    return p is None or p.device.type == "cpu"
+
+
+def _resolve_result_is_cpu(module: nn.Module, *args, **kwargs) -> bool:
+    """Whether module will be / is on CPU after applying to(*args, **kwargs)."""
+    if "device" in kwargs:
+        return _device_is_cpu(kwargs["device"])
+    # nn.Module.to(device), to(device, dtype), to(dtype), to(tensor), ...
+    if args:
+        first = args[0]
+        if isinstance(first, (torch.device, str)):
+            return _device_is_cpu(first)
+        if isinstance(first, torch.Tensor):
+            return first.device.type == "cpu"
+        if isinstance(first, torch.dtype):
+            return _module_params_on_cpu(module)
+        if isinstance(first, int):
+            # device index → CUDA
+            return False
+    if "dtype" in kwargs or "memory_format" in kwargs:
+        return _module_params_on_cpu(module)
+    return _module_params_on_cpu(module)
+
+
+def move_dit_with_compiled_blocks(
+    dit: nn.Module,
+    block_names: Optional[Sequence[str]] = None,
+    *args,
+    log_fn: Optional[Callable[[str], None]] = None,
+    **kwargs,
+) -> nn.Module:
+    """Unwrap compiled DiT blocks, run dit.to(*args, **kwargs), recompile on non-CPU.
+
+    Avoids ``Couldn't swap ... weight`` / weakref failures from torch.compile + quanto.
+    After a CPU offload, blocks stay unwrapped; the next non-CPU move recompiles.
+    """
+    log = log_fn or (lambda _msg: None)
+    if block_names is None:
+        block_names = discover_dit_block_names(dit)
+    unwrapped = unwrap_compiled_module_lists(dit, block_names)
+    if unwrapped:
+        setattr(dit, "_zimage_blocks_need_recompile", True)
+        if is_debug_enabled():
+            log(f"[compile] unwrapped {unwrapped} block(s) for device move")
+    dit.to(*args, **kwargs)
+    need_recompile = getattr(dit, "_zimage_blocks_need_recompile", False)
+    if need_recompile and not _resolve_result_is_cpu(dit, *args, **kwargs):
+        compile_dit_module_lists(dit, block_names, log_fn=log)
+        setattr(dit, "_zimage_blocks_need_recompile", False)
+    return dit
 
 
 def compile_dit_module_lists(

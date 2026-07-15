@@ -15,6 +15,7 @@
 - Order: **quantize → LoRA → compile** (compile runs in `hook_before_train_loop` after the main DiT is on GPU). Gradient checkpointing stays **outside** each compiled block.
 - Works with the usual **`quantize: true`** (quanto float8) path.
 - Diffusers sampling transformer (`sampling_loader: diffusers` / `_sampling_is_diffusers`) is **not** compiled by this path; only DiffSynth `ZImageDiT` ModuleLists (`layers`, optional refiners).
+- Device moves (sample / offload) **unwrap → `.to` → recompile on GPU** so quanto + compile do not hit `Couldn't swap ... weight` / weakref errors.
 - On Windows or when inductor/Triton is unavailable, failures are soft: training continues in eager mode.
 - Expect slower first steps while JIT warms up.
 

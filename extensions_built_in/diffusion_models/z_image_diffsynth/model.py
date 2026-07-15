@@ -59,6 +59,19 @@ class _DiTUnetWrapper(torch.nn.Module):
     def forward(self, *args, **kwargs):
         return self._modules["_inner_dit"](*args, **kwargs)
 
+    def to(self, *args, **kwargs):
+        # torch.compile leaves weakrefs that break nn.Module._apply / swap_tensors (quanto).
+        from .compile_blocks import move_dit_with_compiled_blocks
+
+        move_dit_with_compiled_blocks(self._inner_dit, None, *args, **kwargs)
+        return self
+
+    def cpu(self):
+        return self.to("cpu")
+
+    def cuda(self, device=None):
+        return self.to("cuda" if device is None else device)
+
     def __getattr__(self, name):
         if name in ("dit", "_inner_dit"):
             return self._modules["_inner_dit"]
@@ -171,9 +184,12 @@ class ZImageDiffSynthModel(BaseModel):
                     f"\n[zimage_diffsynth] moving sampling transformer to {device}"
                 )
             try:
+                # Wrapper.to unwraps compiled blocks; plain Module uses nn.Module.to.
                 st.to(device)
-            except Exception:
-                pass
+            except Exception as e:
+                self.print_and_status_update(
+                    f"[zimage_diffsynth] failed moving sampling transformer to {device}: {e}"
+                )
 
     def _flush_cuda(self):
         """Release CUDA cache and run GC so VRAM is actually freed after model moves."""
