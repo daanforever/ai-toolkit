@@ -200,6 +200,89 @@ def test_compile_quantized_lora_stub_with_checkpoint():
     assert any(g is not None for g in lora_grads), "expected LoRA parameter grads"
 
 
+def _assert_qweight_on_device(module: nn.Module, device: torch.device) -> None:
+    """Assert quantized weight payload tensors match device (quanto or torchao)."""
+    from toolkit.util.device import devices_equal
+
+    checked = 0
+    for _, param in module.named_parameters():
+        payloads = []
+        if hasattr(param, "_data") and hasattr(param, "_scale"):
+            payloads = [param._data, param._scale]
+        elif hasattr(param, "qdata") and hasattr(param, "scale"):
+            payloads = [param.qdata, param.scale]
+        else:
+            continue
+        assert devices_equal(param.device, device), f"param.device={param.device}"
+        for t in payloads:
+            assert devices_equal(t.device, device), f"payload.device={t.device}"
+        checked += 1
+    assert checked > 0, "expected at least one quantized weight with payload"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_safe_module_to_device_moves_qbytes_payload():
+    """safe_module_to_device must relocate QBytesTensor _data/_scale, not only param.device."""
+    from toolkit.util.quantize import quantize, get_qtype
+    from toolkit.util.device import safe_module_to_device
+    from optimum.quanto import freeze
+
+    device = torch.device("cuda")
+    mod = nn.Linear(8, 8).to(device=device, dtype=torch.bfloat16)
+    try:
+        quantize(mod, weights=get_qtype("float8"))
+        freeze(mod)
+    except Exception as e:
+        pytest.skip(f"quanto float8 quantize failed: {e}")
+
+    safe_module_to_device(mod, torch.device("cpu"))
+    _assert_qweight_on_device(mod, torch.device("cpu"))
+
+    safe_module_to_device(mod, device)
+    _assert_qweight_on_device(mod, device)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_wrapper_to_same_device_keeps_compiled():
+    """Same-device .to (and dtype=bf16) must no-op and leave blocks compiled."""
+    if not _cuda_compile_supported():
+        pytest.skip("torch.compile/inductor not usable on this platform")
+
+    from toolkit.util.quantize import quantize, get_qtype
+    from optimum.quanto import freeze
+    from extensions_built_in.diffusion_models.z_image_diffsynth.model import (
+        _DiTUnetWrapper,
+    )
+    from extensions_built_in.diffusion_models.z_image_diffsynth.compile_blocks import (
+        is_compiled_module,
+    )
+
+    device = torch.device("cuda")
+    dit = _TinyDiT(d=8, n=2).to(device=device, dtype=torch.bfloat16)
+    try:
+        quantize(dit, weights=get_qtype("float8"))
+        freeze(dit)
+    except Exception as e:
+        pytest.skip(f"quanto float8 quantize failed: {e}")
+
+    stats = compile_dit_module_lists(dit, ["layers"])
+    if stats["ok"] < 1:
+        pytest.skip(f"compile failed: {stats}")
+
+    wrapper = _DiTUnetWrapper(dit)
+    before = [wrapper._inner_dit.layers[i] for i in range(len(wrapper._inner_dit.layers))]
+
+    try:
+        wrapper.to(device)
+        wrapper.to(device, dtype=torch.bfloat16)
+    except Exception as e:
+        pytest.fail(f"same-device wrapper.to failed: {e}")
+
+    for i, block in enumerate(wrapper._inner_dit.layers):
+        assert block is before[i], "same-device move must not unwrap/recompile"
+        assert is_compiled_module(block) or hasattr(block, "_orig_mod")
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_wrapper_to_unwrap_recompile_after_device_move():
     """Compiled+quantized DiT must survive wrapper.to(cpu)/to(cuda) without weakref crash."""
@@ -237,6 +320,7 @@ def test_wrapper_to_unwrap_recompile_after_device_move():
         assert not (
             is_compiled_module(block) or hasattr(block, "_orig_mod")
         ), "blocks should be unwrapped on CPU"
+    _assert_qweight_on_device(wrapper._inner_dit, torch.device("cpu"))
 
     try:
         wrapper.to(device)
@@ -247,6 +331,7 @@ def test_wrapper_to_unwrap_recompile_after_device_move():
         is_compiled_module(b) or hasattr(b, "_orig_mod")
         for b in wrapper._inner_dit.layers
     ), "blocks should be recompiled on CUDA"
+    _assert_qweight_on_device(wrapper._inner_dit, device)
 
     x = torch.randn(2, 8, device=device, dtype=torch.bfloat16)
     try:

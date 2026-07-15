@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 
 from toolkit.util.debug import is_debug_enabled
+from toolkit.util.device import devices_equal, safe_module_to_device
 
 try:
     from diffusers.utils.torch_utils import is_compiled_module
@@ -66,24 +67,45 @@ def _module_params_on_cpu(module: nn.Module) -> bool:
     return p is None or p.device.type == "cpu"
 
 
-def _resolve_result_is_cpu(module: nn.Module, *args, **kwargs) -> bool:
-    """Whether module will be / is on CPU after applying to(*args, **kwargs)."""
+def _resolve_target_device(
+    module: nn.Module, *args, **kwargs
+) -> Optional[torch.device]:
+    """Target device from nn.Module.to(*args, **kwargs). None = dtype-only / no move."""
     if "device" in kwargs:
-        return _device_is_cpu(kwargs["device"])
-    # nn.Module.to(device), to(device, dtype), to(dtype), to(tensor), ...
+        return torch.device(kwargs["device"])
     if args:
         first = args[0]
-        if isinstance(first, (torch.device, str)):
-            return _device_is_cpu(first)
+        if isinstance(first, torch.device):
+            return first
+        if isinstance(first, str):
+            return torch.device(first)
         if isinstance(first, torch.Tensor):
-            return first.device.type == "cpu"
-        if isinstance(first, torch.dtype):
-            return _module_params_on_cpu(module)
+            return first.device
         if isinstance(first, int):
-            # device index → CUDA
-            return False
+            return torch.device("cuda", first)
+        if isinstance(first, torch.dtype):
+            return None
     if "dtype" in kwargs or "memory_format" in kwargs:
-        return _module_params_on_cpu(module)
+        return None
+    return None
+
+
+def _module_already_on_device(module: nn.Module, device: torch.device) -> bool:
+    target = torch.device(device)
+    for p in module.parameters():
+        if not devices_equal(p.device, target):
+            return False
+    for b in module.buffers():
+        if not devices_equal(b.device, target):
+            return False
+    return True
+
+
+def _resolve_result_is_cpu(module: nn.Module, *args, **kwargs) -> bool:
+    """Whether module will be / is on CPU after applying to(*args, **kwargs)."""
+    target = _resolve_target_device(module, *args, **kwargs)
+    if target is not None:
+        return _device_is_cpu(target)
     return _module_params_on_cpu(module)
 
 
@@ -94,7 +116,10 @@ def move_dit_with_compiled_blocks(
     log_fn: Optional[Callable[[str], None]] = None,
     **kwargs,
 ) -> nn.Module:
-    """Unwrap compiled DiT blocks, run dit.to(*args, **kwargs), recompile on non-CPU.
+    """Move DiT without Module.to() when compiled+quantized.
+
+    - Same-device (ignore dtype): early return; keep compiled blocks.
+    - Real device change: unwrap → Parameter/buffer replace move → recompile on GPU.
 
     Avoids ``Couldn't swap ... weight`` / weakref failures from torch.compile + quanto.
     After a CPU offload, blocks stay unwrapped; the next non-CPU move recompiles.
@@ -102,14 +127,22 @@ def move_dit_with_compiled_blocks(
     log = log_fn or (lambda _msg: None)
     if block_names is None:
         block_names = discover_dit_block_names(dit)
+
+    target = _resolve_target_device(dit, *args, **kwargs)
+    if target is None or _module_already_on_device(dit, target):
+        return dit
+
     unwrapped = unwrap_compiled_module_lists(dit, block_names)
     if unwrapped:
         setattr(dit, "_zimage_blocks_need_recompile", True)
         if is_debug_enabled():
             log(f"[compile] unwrapped {unwrapped} block(s) for device move")
-    dit.to(*args, **kwargs)
+
+    # Device only — do not cast QBytesTensor scale dtype via torch_dtype.
+    safe_module_to_device(dit, torch.device(target), dtype=None)
+
     need_recompile = getattr(dit, "_zimage_blocks_need_recompile", False)
-    if need_recompile and not _resolve_result_is_cpu(dit, *args, **kwargs):
+    if need_recompile and not _device_is_cpu(target):
         compile_dit_module_lists(dit, block_names, log_fn=log)
         setattr(dit, "_zimage_blocks_need_recompile", False)
     return dit
