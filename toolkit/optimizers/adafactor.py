@@ -891,8 +891,9 @@ class Adafactor(torch.optim.Optimizer):
     @staticmethod
     def _group_running_max_update(group, key: str, candidate: torch.Tensor) -> None:
         """In-place: group[key] = max(group[key], candidate), with device alignment."""
+        candidate = candidate.detach()
         if key not in group:
-            group[key] = candidate.clone().detach()
+            group[key] = candidate.clone()
             return
         current = group[key]
         if isinstance(current, torch.Tensor) and current.device != candidate.device:
@@ -903,8 +904,9 @@ class Adafactor(torch.optim.Optimizer):
     @staticmethod
     def _group_running_min_update(group, key: str, candidate: torch.Tensor) -> None:
         """In-place: group[key] = min(group[key], candidate), with device alignment."""
+        candidate = candidate.detach()
         if key not in group:
-            group[key] = candidate.clone().detach()
+            group[key] = candidate.clone()
             return
         current = group[key]
         if isinstance(current, torch.Tensor) and current.device != candidate.device:

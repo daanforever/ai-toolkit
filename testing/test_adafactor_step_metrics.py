@@ -103,3 +103,28 @@ def test_step_metrics_stored_as_float_not_tensor():
         assert isinstance(st[key], float)
     assert "update_hat" not in st
     assert "scaled_update" not in st
+
+
+def _assert_detached_group_scalar(group, key):
+    t = group[key]
+    assert isinstance(t, torch.Tensor)
+    assert t.requires_grad is False
+    assert t.grad_fn is None
+
+
+def test_group_running_max_update_detaches_requires_grad_candidate():
+    group = {}
+    Adafactor._group_running_max_update(group, "rms_max", torch.tensor(1.0, requires_grad=True))
+    _assert_detached_group_scalar(group, "rms_max")
+    Adafactor._group_running_max_update(group, "rms_max", torch.tensor(2.0, requires_grad=True))
+    _assert_detached_group_scalar(group, "rms_max")
+    assert group["rms_max"].item() == 2.0
+
+
+def test_group_running_min_update_detaches_requires_grad_candidate():
+    group = {}
+    Adafactor._group_running_min_update(group, "rms_min", torch.tensor(2.0, requires_grad=True))
+    _assert_detached_group_scalar(group, "rms_min")
+    Adafactor._group_running_min_update(group, "rms_min", torch.tensor(1.0, requires_grad=True))
+    _assert_detached_group_scalar(group, "rms_min")
+    assert group["rms_min"].item() == 1.0
