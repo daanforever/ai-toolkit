@@ -18,6 +18,7 @@ from toolkit.util.debug import memory_debug, is_debug_enabled
 
 from toolkit.kohya_lora import LoRANetwork
 from toolkit.models.DoRA import DoRAModule
+from toolkit.lora_utils.bf16_init import ensure_bf16_nonzero_
 from toolkit.lora_utils.deferred_lora_init import (
     finalize_deferred_lora_init,
     lora_down_present_in_loaded_keys,
@@ -169,6 +170,9 @@ class LoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
                     if is_debug_enabled():
                         print(f"LoRA {lora_name}: applied lora_down_init_scale={lora_down_init_scale}")
 
+            if not self._deferred_lora_init_pending:
+                ensure_bf16_nonzero_(self.lora_down.weight)
+
         if not self.full_rank:
             torch.nn.init.zeros_(self.lora_up.weight)
 
@@ -223,6 +227,7 @@ class LoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
                 self.lora_down.weight.mul_(lora_down_init_scale)
             if is_debug_enabled():
                 print(f"LoRA {self.lora_name}: applied lora_down_init_scale={lora_down_init_scale}")
+        ensure_bf16_nonzero_(self.lora_down.weight)
         self._deferred_lora_init_pending = False
 
 

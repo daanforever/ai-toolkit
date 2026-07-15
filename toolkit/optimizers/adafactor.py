@@ -726,15 +726,53 @@ class Adafactor(torch.optim.Optimizer):
         return tensor.norm(2) / (tensor.numel() ** 0.5)
 
     @staticmethod
-    def _finite_or_zero(tensor: torch.Tensor) -> torch.Tensor:
+    def _finite_or_eps(tensor: torch.Tensor, eps: float, *, unsigned: bool = False) -> torch.Tensor:
+        """Replace non-finite values with ±eps (or +eps if unsigned). Never writes 0."""
         if torch.isfinite(tensor).all():
             return tensor
-        return torch.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0)
+        eps_t = float(eps)
+        if unsigned:
+            return torch.nan_to_num(tensor, nan=eps_t, posinf=eps_t, neginf=eps_t)
+        out = tensor.clone()
+        mask = ~torch.isfinite(out)
+        signs = torch.sign(out)
+        # NaN sign is NaN; treat NaN/0 as +1
+        signs = torch.where(
+            torch.isfinite(signs) & (signs != 0),
+            signs,
+            torch.ones_like(signs),
+        )
+        posinf = torch.isposinf(out)
+        neginf = torch.isneginf(out)
+        fill = signs * eps_t
+        fill = torch.where(posinf, torch.full_like(fill, eps_t), fill)
+        fill = torch.where(neginf, torch.full_like(fill, -eps_t), fill)
+        return torch.where(mask, fill, out)
 
     @staticmethod
-    def _maybe_finite_or_zero_inplace(tensor: torch.Tensor) -> None:
-        if not torch.isfinite(tensor).all():
-            tensor.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
+    def _maybe_finite_or_eps_inplace(
+        tensor: torch.Tensor, eps: float, *, unsigned: bool = False
+    ) -> None:
+        """In-place version of ``_finite_or_eps``."""
+        if torch.isfinite(tensor).all():
+            return
+        eps_t = float(eps)
+        if unsigned:
+            tensor.nan_to_num_(nan=eps_t, posinf=eps_t, neginf=eps_t)
+            return
+        mask = ~torch.isfinite(tensor)
+        signs = torch.sign(tensor)
+        signs = torch.where(
+            torch.isfinite(signs) & (signs != 0),
+            signs,
+            torch.ones_like(signs),
+        )
+        posinf = torch.isposinf(tensor)
+        neginf = torch.isneginf(tensor)
+        fill = signs * eps_t
+        fill = torch.where(posinf, torch.full_like(fill, eps_t), fill)
+        fill = torch.where(neginf, torch.full_like(fill, -eps_t), fill)
+        tensor[mask] = fill[mask]
 
     @staticmethod
     def _clamp_effective_wd(effective_wd):
@@ -1109,7 +1147,9 @@ class Adafactor(torch.optim.Optimizer):
                 if grad.is_sparse:
                     raise RuntimeError(
                         "Adafactor does not support sparse gradients.")
-                grad = self._finite_or_zero(grad)
+                eps0 = group["eps"][0]
+                eps1 = group["eps"][1]
+                grad = self._finite_or_eps(grad, eps0)
                 
                 # if p has atts _scale then it is quantized. We need to divide the grad by the scale
                 # if hasattr(p, "_scale"):
@@ -1166,7 +1206,7 @@ class Adafactor(torch.optim.Optimizer):
                 state["RMS"] = self._rms(p_data_fp32)
                 rms_t = state["RMS"]
                 if not math.isfinite(rms_t.item()):
-                    p_data_fp32.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
+                    self._maybe_finite_or_eps_inplace(p_data_fp32, eps1)
                     state["RMS"] = self._rms(p_data_fp32)
                     rms_t = state["RMS"]
                 self._maybe_group_running_max_update(group, "rms_max", rms_t)
@@ -1176,7 +1216,6 @@ class Adafactor(torch.optim.Optimizer):
                 gr = state["grad_rms"]
                 self._maybe_group_running_max_update(group, "grad_rms_max", gr)
 
-                eps0 = group["eps"][0]
                 beta2 = self._effective_beta2(group, gr, eps0, state["step"])
                 update = (grad**2) + eps0
                 if factored:
@@ -1187,8 +1226,8 @@ class Adafactor(torch.optim.Optimizer):
                         update.mean(dim=-1), alpha=(1.0 - beta2))
                     exp_avg_sq_col.mul_(beta2).add_(
                         update.mean(dim=-2), alpha=(1.0 - beta2))
-                    self._maybe_finite_or_zero_inplace(exp_avg_sq_row)
-                    self._maybe_finite_or_zero_inplace(exp_avg_sq_col)
+                    self._maybe_finite_or_eps_inplace(exp_avg_sq_row, eps0, unsigned=True)
+                    self._maybe_finite_or_eps_inplace(exp_avg_sq_col, eps0, unsigned=True)
 
                     # Approximation of exponential moving average of square of gradient
                     update = self._approx_sq_grad(
@@ -1198,13 +1237,13 @@ class Adafactor(torch.optim.Optimizer):
                     exp_avg_sq = state["exp_avg_sq"]
 
                     exp_avg_sq.mul_(beta2).add_(update, alpha=(1.0 - beta2))
-                    self._maybe_finite_or_zero_inplace(exp_avg_sq)
+                    self._maybe_finite_or_eps_inplace(exp_avg_sq, eps0, unsigned=True)
                     update = exp_avg_sq.clamp(min=eps0).rsqrt().mul_(grad)
 
                 # Preconditioned + clipped direction (before LR) for fresh brake signal
                 update_hat = update.div_(
                     (self._rms(update) / group["clip_threshold"]).clamp_(min=1.0))
-                update_hat = self._finite_or_zero(update_hat)
+                update_hat = self._finite_or_eps(update_hat, eps0)
 
                 if (
                     "beta2_direction_ema" not in state
@@ -1242,14 +1281,14 @@ class Adafactor(torch.optim.Optimizer):
 
                     # Momentum on clipped+lr-scaled direction (transformers / pre-16acf685)
                     exp_avg.mul_(beta1_for_ema).add_(scaled_update, alpha=(1 - beta1_for_ema))
-                    self._maybe_finite_or_zero_inplace(exp_avg)
+                    self._maybe_finite_or_eps_inplace(exp_avg, eps0)
 
                     update = exp_avg
 
                 else:
                     update = scaled_update
 
-                update = self._finite_or_zero(update)
+                update = self._finite_or_eps(update, eps0)
 
                 update_rms = self._rms(update)
 

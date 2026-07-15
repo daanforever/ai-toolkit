@@ -23,6 +23,27 @@ def _make_opt(**kwargs):
     return opt, param
 
 
+def test_finite_or_eps_signed_never_writes_zero():
+    eps = 1e-3
+    t = torch.tensor([float("nan"), float("inf"), float("-inf"), 2.0])
+    out = Adafactor._finite_or_eps(t, eps)
+    assert torch.isfinite(out).all()
+    assert (out != 0).all()
+    assert out[0].item() == pytest.approx(eps)
+    assert out[1].item() == pytest.approx(eps)
+    assert out[2].item() == pytest.approx(-eps)
+    assert out[3].item() == pytest.approx(2.0)
+
+
+def test_finite_or_eps_unsigned_uses_positive_eps():
+    eps = 1e-30
+    t = torch.tensor([float("nan"), float("-inf"), 1.0])
+    out = Adafactor._finite_or_eps(t, eps, unsigned=True)
+    assert torch.isfinite(out).all()
+    assert out[0].item() == pytest.approx(eps)
+    assert out[1].item() == pytest.approx(eps)
+
+
 def test_nan_grad_sanitized_params_remain_finite():
     opt, param = _make_opt()
     param.grad = torch.tensor([float("nan"), 1.0, -1.0, 0.5])
@@ -47,14 +68,16 @@ def test_factored_preconditioner_zero_ema_step_finite():
     assert torch.isfinite(param).all()
 
 
-def test_nan_weights_healed_in_place():
+def test_nan_weights_healed_with_eps1_not_zero():
     opt, param = _make_opt()
+    eps1 = opt.param_groups[0]["eps"][1]
     with torch.no_grad():
         param.copy_(torch.tensor([float("nan"), 1.0, 2.0, 3.0]))
     param.grad = torch.zeros_like(param)
     opt.step()
     assert torch.isfinite(param).all()
-    assert param[0].item() == 0.0
+    assert param[0].item() == pytest.approx(eps1)
+    assert param[0].item() != 0.0
 
 
 def test_weight_decay_skipped_when_effective_wd_non_finite(monkeypatch):

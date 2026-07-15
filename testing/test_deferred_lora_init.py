@@ -105,6 +105,27 @@ def test_loramodule_ephemeral_zeros_weights():
     assert mod._deferred_lora_init_pending is False
 
 
+def test_ensure_bf16_nonzero_clears_exact_zeros():
+    from toolkit.lora_utils.bf16_init import ensure_bf16_nonzero_
+
+    w = torch.randn(32, 16)
+    w.view(-1)[0] = 0.0
+    w.view(-1)[7] = 0.0
+    n = ensure_bf16_nonzero_(w)
+    assert n == 2
+    assert (w.to(torch.bfloat16) == 0).sum().item() == 0
+
+
+def test_loramodule_kaiming_down_no_bf16_zeros_up_still_zero():
+    org = torch.nn.Linear(64, 32, bias=False)
+    net = _linear_network()
+    torch.manual_seed(0)
+    mod = LoRAModule("layer.bf16safe", org, network=net, lora_dim=8)
+    down_bf16 = mod.lora_down.weight.detach().to(torch.bfloat16)
+    assert (down_bf16 == 0).sum().item() == 0
+    assert (mod.lora_up.weight == 0).all()
+
+
 def test_loramodule_deferred_pissa_skips_pissa_in_init_sets_pending():
     org = torch.nn.Linear(6, 10, bias=False)
     nk = SimpleNamespace(network_kwargs={"init_lora_weights": "pissa"})
