@@ -247,10 +247,10 @@ class _StubBaseModel:
     target_lora_modules = ["Attention", "FeedForward"]
 
     def convert_lora_weights_before_save(self, sd):
-        return {k.replace("transformer.", "diffusion_model."): v for k, v in sd.items()}
+        return lora_mod.convert_lora_weights_before_save(sd)
 
     def convert_lora_weights_before_load(self, sd):
-        return {k.replace("diffusion_model.", "transformer."): v for k, v in sd.items()}
+        return lora_mod.convert_lora_weights_before_load(sd)
 
     def get_lora_optimizer_param_groups(self, network, unet_lr, default_lr):
         unet_loras = getattr(network, "unet_loras", None)
@@ -363,6 +363,16 @@ def test_peft_lora_name_matches_block_key_regex():
         }, f"unexpected block_key {block_key!r} for {adapter.lora_name!r}"
 
 
+def test_convert_lora_weights_before_save_strips_compiled_orig_mod_segment():
+    sd = {
+        "transformer._inner_dit.layers.0._orig_mod.attention.to_q.lora_A.weight": torch.randn(2, 4),
+    }
+    out = lora_mod.convert_lora_weights_before_save(sd)
+    assert list(out.keys()) == [
+        "diffusion_model._inner_dit.layers.0.attention.to_q.lora_A.weight"
+    ]
+
+
 def test_peft_save_load_roundtrip():
     """Saved safetensors keys must round-trip back into a fresh PeftNetwork."""
     import os
@@ -390,6 +400,65 @@ def test_peft_save_load_roundtrip():
         a_w = net1.peft_model.state_dict()["base_model.model._inner_dit.layers.0.attention.to_q.lora_A.default.weight"]
         b_w = net2.peft_model.state_dict()["base_model.model._inner_dit.layers.0.attention.to_q.lora_A.default.weight"]
         assert torch.allclose(a_w, b_w), "lora_A weights differ after round-trip"
+    finally:
+        try:
+            os.remove(tmp)
+        except PermissionError:
+            pass
+
+
+def test_peft_save_load_roundtrip_after_compiled_block_wrap():
+    """Compiled DiT blocks must not leak ``._orig_mod.`` into saved LoRA keys."""
+    import os
+    import tempfile
+
+    from safetensors.torch import load_file, save_file
+
+    from extensions_built_in.diffusion_models.z_image_diffsynth.test_compile_quantized_blocks import (
+        _FakeCompiled,
+    )
+
+    net1, base = _build_peft_network("peft", n_blocks=2)
+    inner = net1.peft_model.base_model.model._inner_dit
+    for module_list in (inner.layers, inner.noise_refiner, inner.context_refiner):
+        for i in range(len(module_list)):
+            module_list[i] = _FakeCompiled(module_list[i])
+
+    lora_a_key = (
+        "base_model.model._inner_dit.layers.0._orig_mod.attention.to_q.lora_A.default.weight"
+    )
+    lora_b_key = (
+        "base_model.model._inner_dit.layers.0._orig_mod.attention.to_q.lora_B.default.weight"
+    )
+    lora_a_key_uncompiled = (
+        "base_model.model._inner_dit.layers.0.attention.to_q.lora_A.default.weight"
+    )
+    lora_b_key_uncompiled = (
+        "base_model.model._inner_dit.layers.0.attention.to_q.lora_B.default.weight"
+    )
+    with torch.no_grad():
+        net1.peft_model.state_dict()[lora_a_key].fill_(0.25)
+        net1.peft_model.state_dict()[lora_b_key].fill_(-0.5)
+
+    sd = net1.get_state_dict(dtype=torch.float32)
+    assert sd, "expected non-empty LoRA state dict"
+    assert not any("._orig_mod." in key for key in sd.keys())
+
+    tmp = tempfile.mktemp(suffix=".safetensors")
+    try:
+        save_file(sd, tmp)
+        loaded = load_file(tmp)
+        loaded = base.convert_lora_weights_before_load(loaded)
+
+        net2, _ = _build_peft_network("peft", n_blocks=2)
+        net2.load_weights(loaded)
+
+        a_w = net1.peft_model.state_dict()[lora_a_key]
+        b_w = net1.peft_model.state_dict()[lora_b_key]
+        a_w2 = net2.peft_model.state_dict()[lora_a_key_uncompiled]
+        b_w2 = net2.peft_model.state_dict()[lora_b_key_uncompiled]
+        assert torch.allclose(a_w, a_w2), "lora_A weights differ after compiled save round-trip"
+        assert torch.allclose(b_w, b_w2), "lora_B weights differ after compiled save round-trip"
     finally:
         try:
             os.remove(tmp)

@@ -187,6 +187,56 @@ def test_peft_dora_magnitude_is_shared_by_reference():
         )
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_peft_dora_shared_magnitude_survives_safe_device_move():
+    """Shared DoRA magnitude Parameter ids must survive safe_module_to_device.
+
+    Magnitude is a Parameter (identity path), not a buffer. _PeftLoraAdapter
+    caches Parameter refs only — no buffer cache to invalidate on move.
+    """
+    from toolkit.util.device import safe_module_to_device
+
+    device = torch.device("cuda")
+    main_wrapper = _build_dit_wrapper(seed=1)
+    sampling_wrapper = _build_dit_wrapper(seed=2)
+    base = _StubBaseModel()
+
+    main_net = _build_peft_dora_network(main_wrapper, base)
+    sampling_net = _build_peft_dora_network(sampling_wrapper, base)
+    sampling_net.share_parameters_with(main_net)
+
+    # Move peft_model to CUDA the same way training does before sample offload.
+    safe_module_to_device(main_net.peft_model, device)
+    safe_module_to_device(sampling_net.peft_model, device)
+
+    main_mags = _collect_magnitude_modules(main_net)
+    sampling_mags = _collect_magnitude_modules(sampling_net)
+    assert main_mags and sampling_mags
+
+    mag_params = [m.weight for m in main_mags]
+    opt = torch.optim.AdamW(mag_params, lr=1e-3)
+    opt_ids = {id(p) for g in opt.param_groups for p in g["params"]}
+    shared_ids = [id(m.weight) for m in main_mags]
+
+    for main_m, sampling_m in zip(main_mags, sampling_mags):
+        assert sampling_m.weight is main_m.weight
+
+    safe_module_to_device(main_net.peft_model, torch.device("cpu"))
+    safe_module_to_device(main_net.peft_model, device)
+
+    main_mags_after = _collect_magnitude_modules(main_net)
+    sampling_mags_after = _collect_magnitude_modules(sampling_net)
+    for main_m, sampling_m in zip(main_mags_after, sampling_mags_after):
+        assert sampling_m.weight is main_m.weight, (
+            "shared DoRA magnitude must remain the same object after device move"
+        )
+        assert id(main_m.weight) in opt_ids, (
+            "DoRA magnitude Parameter must stay in the optimizer after device move"
+        )
+
+    assert [id(m.weight) for m in main_mags_after] == shared_ids
+
+
 def test_peft_dora_calibration_tracks_main_magnitude_update():
     """After a magnitude update on the main network, the sampling forward must
     reflect the calibrated magnitude (main_magnitude * ratio) at read time.

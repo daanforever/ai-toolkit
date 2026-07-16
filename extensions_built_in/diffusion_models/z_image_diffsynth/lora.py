@@ -75,13 +75,19 @@ def group_loras_by_block(loras: List[Any]) -> Dict[str, List[Any]]:
     return ordered
 
 
+_COMPILED_MODULE_KEY_SEGMENT = "._orig_mod."
+
+
 def convert_lora_weights_before_save(state_dict: Dict[str, Any]) -> Dict[str, Any]:
     """Convert toolkit LoRA keys to DiffSynth convention for saving.
     Toolkit uses prefix 'transformer' or 'lora_transformer'; DiffSynth expects 'diffusion_model'.
+    Per-block torch.compile inserts ``._orig_mod.`` into module paths; strip it so checkpoints
+    remain loadable after resume on an uncompiled model.
     """
     new_sd = {}
     for key, value in state_dict.items():
-        new_key = key.replace("transformer.", "diffusion_model.").replace(
+        new_key = key.replace(_COMPILED_MODULE_KEY_SEGMENT, ".")
+        new_key = new_key.replace("transformer.", "diffusion_model.").replace(
             "lora_transformer.", "diffusion_model."
         )
         new_sd[new_key] = value
