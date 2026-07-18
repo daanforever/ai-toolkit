@@ -151,3 +151,75 @@ def test_set_lr_still_scaled_dynamically():
     state1 = _state_with_rms(opt, 1)
     assert opt._get_lr(opt.param_groups[0], state0) == pytest.approx(2e-3 + eps[0])
     assert opt._get_lr(opt.param_groups[1], state1) == pytest.approx(eps[0])
+
+
+def test_scale_lr_factor_power_curve():
+    p0 = torch.nn.Parameter(torch.ones(2))
+    p1 = torch.nn.Parameter(torch.ones(2))
+    p2 = torch.nn.Parameter(torch.ones(2))
+    lr = 1e-3
+    eps = (1e-30, 1e-3)
+    opt = Adafactor(
+        [
+            {"params": [p0], "index": 0},
+            {"params": [p1], "index": 1},
+            {"params": [p2], "index": 2},
+        ],
+        lr=lr,
+        eps=eps,
+        relative_step=False,
+        scale_parameter=False,
+        warmup_init=False,
+        beta1=None,
+        weight_decay=0.0,
+        scale_lr_by_index=True,
+        scale_lr_factor=2.0,
+    )
+    assert opt.scale_lr_factor == 2.0
+    assert opt._max_index == 2
+
+    for idx, expected_factor in ((0, 1.0), (1, 0.25), (2, 0.0)):
+        state = _state_with_rms(opt, group_idx=idx)
+        got = opt._get_lr(opt.param_groups[idx], state)
+        expected = lr * expected_factor + eps[0]
+        assert got == pytest.approx(expected)
+
+
+def test_scale_lr_factor_errors_when_non_positive():
+    p = torch.nn.Parameter(torch.ones(2))
+    with pytest.raises(ValueError, match="scale_lr_factor must be > 0"):
+        Adafactor(
+            [{"params": [p]}],
+            lr=1e-3,
+            relative_step=False,
+            scale_parameter=False,
+            warmup_init=False,
+            beta1=None,
+            weight_decay=0.0,
+            scale_lr_by_index=False,
+            scale_lr_factor=0.0,
+        )
+
+
+def test_scale_lr_factor_ignored_when_mode_off():
+    p0 = torch.nn.Parameter(torch.ones(2))
+    p1 = torch.nn.Parameter(torch.ones(2))
+    lr = 1e-3
+    opt = Adafactor(
+        [
+            {"params": [p0], "index": 0},
+            {"params": [p1], "index": 1},
+        ],
+        lr=lr,
+        relative_step=False,
+        scale_parameter=False,
+        warmup_init=False,
+        beta1=None,
+        weight_decay=0.0,
+        scale_lr_by_index=False,
+        scale_lr_factor=2.0,
+    )
+    assert opt.scale_lr_factor == 2.0
+    assert opt.scale_lr_by_index is False
+    state = _state_with_rms(opt, 1)
+    assert opt._get_lr(opt.param_groups[1], state) == pytest.approx(lr)

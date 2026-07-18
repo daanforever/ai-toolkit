@@ -170,6 +170,7 @@ class Adafactor(torch.optim.Optimizer):
         saddle_point_threshold: float = 0.001,
         saddle_point_step: float = 0.01,
         scale_lr_by_index: bool = False,
+        scale_lr_factor: float = 1.0,
     ):
         weight_decay_mode = self._validate_weight_decay_mode(weight_decay_mode)
         eps = self._normalize_eps(eps)
@@ -200,25 +201,7 @@ class Adafactor(torch.optim.Optimizer):
             group["eps"] = self._normalize_eps(group.get("eps", eps), fallback_eps1=eps[1])
             group.setdefault("warmup_active", False)
 
-        self.scale_lr_by_index = bool(scale_lr_by_index)
-        self._max_index = None
-        if self.scale_lr_by_index:
-            indices = [
-                int(group["index"])
-                for group in self.param_groups
-                if "index" in group
-            ]
-            if not indices:
-                raise ValueError(
-                    "scale_lr_by_index=True but no param_group has 'index'; "
-                    "cannot determine max_index"
-                )
-            max_index = max(indices)
-            if max_index <= 0:
-                raise ValueError(
-                    f"scale_lr_by_index=True requires max_index > 0, got max_index={max_index}"
-                )
-            self._max_index = max_index
+        self._init_scale_lr_by_index(scale_lr_by_index, scale_lr_factor)
 
         # Create stagnation detector for RMS(parameter) based heuristic.
         self._saddle_point_detector = StagnationDetector(
@@ -283,6 +266,37 @@ class Adafactor(torch.optim.Optimizer):
             group["lr"] = value
         if is_debug_enabled():
             print_acc(f"Adafactor: applied runtime lr={value}")
+
+    def _init_scale_lr_by_index(
+        self, scale_lr_by_index: bool, scale_lr_factor: float = 1.0
+    ) -> None:
+        """Enable index-based LR scaling and resolve max_index from param groups."""
+        scale_lr_factor = float(scale_lr_factor)
+        if scale_lr_factor <= 0:
+            raise ValueError(
+                f"scale_lr_factor must be > 0, got scale_lr_factor={scale_lr_factor}"
+            )
+        self.scale_lr_factor = scale_lr_factor
+        self.scale_lr_by_index = bool(scale_lr_by_index)
+        self._max_index = None
+        if not self.scale_lr_by_index:
+            return
+        indices = [
+            int(group["index"])
+            for group in self.param_groups
+            if "index" in group
+        ]
+        if not indices:
+            raise ValueError(
+                "scale_lr_by_index=True but no param_group has 'index'; "
+                "cannot determine max_index"
+            )
+        max_index = max(indices)
+        if max_index <= 0:
+            raise ValueError(
+                f"scale_lr_by_index=True requires max_index > 0, got max_index={max_index}"
+            )
+        self._max_index = max_index
 
     def set_min_lr(self, value: float) -> None:
         """Update min_lr at runtime (e.g. from UI)."""
@@ -634,8 +648,11 @@ class Adafactor(torch.optim.Optimizer):
         if self.scale_lr_by_index and "index" in param_group:
             base_lr = (
                 base_lr
-                * (self._max_index - int(param_group["index"]))
-                / self._max_index
+                * (
+                    (self._max_index - int(param_group["index"]))
+                    / self._max_index
+                )
+                ** self.scale_lr_factor
                 + float(param_group["eps"][0])
             )
 
