@@ -141,7 +141,7 @@ class ZImageDiffSynthModel(BaseModel):
         return 16 * 2
 
     def _move_main_network(self, device):
-        """Re-pin training LoRA to CUDA in fp32. Never move to CPU. Call after sampling only."""
+        """Re-pin training LoRA to CUDA; preserve network.dtype. Never move to CPU."""
         with memory_debug(self.print_and_status_update, "Move main network"):
             target = device if isinstance(device, torch.device) else torch.device(device)
             if target.type == "cpu":
@@ -151,8 +151,10 @@ class ZImageDiffSynthModel(BaseModel):
                 return
             net = unwrap_model(net)
             try:
-                # LoRA trainable weights must stay fp32 for optimizer.step(); model may be bf16.
-                net.force_to(target, self.torch_dtype)
+                # Preserve network.dtype (e.g. fp32 for optimizer); do not use model.dtype.
+                p = next((p for p in net.parameters() if p.requires_grad), None)
+                dtype = p.dtype if p is not None else self.torch_dtype
+                net.force_to(target, dtype)
                 if is_debug_enabled():
                     self.print_and_status_update(
                         f"\n[zimage_diffsynth] main network force_to {device}"
@@ -404,11 +406,7 @@ class ZImageDiffSynthModel(BaseModel):
                 text_embeds = [text_embeds[i][attention_mask[i].bool()] for i in range(text_embeds.shape[0])]
             else:
                 text_embeds = [text_embeds[i] for i in range(text_embeds.shape[0])]
-        # Cast embeddings to model dtype at DiT boundary
-        if isinstance(text_embeds, list):
-            text_embeds = [t.to(self.torch_dtype) for t in text_embeds]
-        elif isinstance(text_embeds, torch.Tensor):
-            text_embeds = text_embeds.to(self.torch_dtype)
+        train_dtype = getattr(self, "train_torch_dtype", None) or self.torch_dtype
         # Pass raw DiT to DiffSynth model_fn (expects real DiT with t_embedder, etc.).
         # When debug logging is enabled, wrap the forward call in a memory_debug
         # context so that VRAM usage can be compared with the baseline z_image
@@ -419,6 +417,7 @@ class ZImageDiffSynthModel(BaseModel):
             timestep,
             text_embeds,
             use_gradient_checkpointing=use_gradient_checkpointing,
+            train_dtype=train_dtype,
         )
         return noise_pred
 
@@ -439,20 +438,21 @@ class ZImageDiffSynthModel(BaseModel):
             use_diffsynth_prompt_encoding = _resolve_use_diffsynth_prompt_encoding(mk)
         except Exception:
             use_diffsynth_prompt_encoding = True
+        encode_dtype = getattr(self, "train_torch_dtype", None) or self.torch_dtype
         if use_diffsynth_prompt_encoding:
             return diffsynth_training_mod.encode_prompt_diffsynth_literal_t2i(
                 tok,
                 te,
                 prompt,
                 self.device_torch,
-                dtype=torch.float32,
+                dtype=encode_dtype,
             )
         return prompt_encoding_mod.encode_prompt(
             tok,
             te,
             prompt,
             self.device_torch,
-            dtype=torch.float32,
+            dtype=encode_dtype,
         )
 
     def get_loss_target(self, *args, **kwargs):

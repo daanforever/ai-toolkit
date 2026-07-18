@@ -225,6 +225,9 @@ class NetworkConfig:
         # start from a pretrained lora
         self.pretrained_lora_path = normalize_path(kwargs.get('pretrained_lora_path', None))
 
+        # LoRA / network weight dtype (None → fallback to train.dtype at use site)
+        self.dtype: Optional[str] = kwargs.get('dtype', None)
+
 
 AdapterTypes = Literal['t2i', 'ip', 'ip+', 'clip', 'ilora', 'photo_maker', 'control_net', 'control_lora', 'i2v']
 

@@ -88,6 +88,7 @@ except Exception:
 from toolkit.config_modules import GenerateImageConfig, ModelConfig, NetworkConfig
 from toolkit.job import run_job
 from toolkit.lora_special import LoRASpecialNetwork
+from toolkit.train_tools import get_torch_dtype
 from toolkit.unloader import FakeTextEncoder, unload_text_encoder
 from toolkit.util.get_model import get_model_class
 from toolkit.util.debug import memory_debug
@@ -385,6 +386,7 @@ def _build_model(device: torch.device, phase: str = "unknown"):
         model_config = ModelConfig(**model_cfg)
         model_cls = get_model_class(model_config)
         sd = model_cls(device, model_config, dtype="bf16")
+        sd.train_torch_dtype = get_torch_dtype("bf16")
         sd.load_model()
     _log(f"[PHASE {phase}] build_model: done")
     return sd
@@ -609,6 +611,7 @@ def _train_lora(
                     "network": {
                         "rank_dropout": 0.01,
                         "type": network_type,
+                        "dtype": "fp32",
                         "linear": 8,
                         "linear_alpha": 8,
                         "conv": 0,
@@ -687,6 +690,7 @@ def _train_lora(
                         "debug_zimage_load": False,
                         "name_or_path": model_path,
                         "sampling_name_or_path": sampling_path,
+                        "dtype": "bf16",
                         "quantize": True,
                         "qtype": "qfloat8",
                         "quantize_te": True,

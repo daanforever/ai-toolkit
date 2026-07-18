@@ -121,8 +121,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
         model_config = self.get_conf('model', {})
         self.modules_being_trained: List[torch.nn.Module] = []
 
-        # update modelconfig dtype to match train
-        model_config['dtype'] = self.train_config.dtype
+        # Respect model.dtype when set; otherwise fall back to train.dtype
+        if model_config.get('dtype') is None:
+            model_config['dtype'] = self.train_config.dtype
         self.model_config = ModelConfig(**model_config)
 
         self.save_config = SaveConfig(**self.get_conf('save', {}))
@@ -273,6 +274,12 @@ class BaseSDTrainProcess(BaseTrainProcess):
         self.current_boundary_index = 0
         self.steps_this_boundary = 0
         self.num_consecutive_oom = 0
+
+    def _resolve_network_dtype(self) -> torch.dtype:
+        raw = None
+        if self.network_config is not None:
+            raw = getattr(self.network_config, "dtype", None)
+        return get_torch_dtype(raw or self.train_config.dtype)
 
     def post_process_generate_image_config_list(self, generate_image_config_list: List[GenerateImageConfig]):
         # override in subclass
@@ -1281,10 +1288,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
             # device=self.device,
             device=self.accelerator.device,
             model_config=model_config_to_load,
-            dtype=self.train_config.dtype,
+            dtype=self.model_config.dtype,
             custom_pipeline=self.custom_pipeline,
             noise_scheduler=sampler,
         )
+        self.sd.train_torch_dtype = get_torch_dtype(self.train_config.dtype)
         
         self.hook_after_sd_init_before_load()
         # run base sd process run
@@ -1300,7 +1308,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
         self.sd.add_after_sample_image_hook(self.sample_step_hook)
 
-        dtype = get_torch_dtype(self.train_config.dtype)
+        dtype = get_torch_dtype(self.model_config.dtype)
 
         # model is loaded from BaseSDProcess
         unet = self.sd.unet
@@ -1485,7 +1493,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 )
 
                 # todo switch everything to proper mixed precision like this
-                self.network.force_to(self.device_torch, dtype=get_torch_dtype(self.train_config.dtype))
+                self.network.force_to(self.device_torch, dtype=self._resolve_network_dtype())
 
                 # give network to sd so it can use it
                 self.sd.network = self.network
@@ -1734,9 +1742,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
         # esure params require grad
         self.ensure_params_requires_grad(force=True)
         self.audit_trainable_base_params()
-        # Minimal verification mode for bf16 training:
+        # Minimal verification mode for bf16 network weights:
         # keep trainable optimization parameters in fp32 so grads accumulate in fp32.
-        if str(self.train_config.dtype).lower() in ("bf16", "bfloat16"):
+        _promo_dtype = self._resolve_network_dtype() if self.network_config is not None else get_torch_dtype(self.train_config.dtype)
+        if _promo_dtype in (torch.bfloat16,):
             for param_group in self.params:
                 params_to_check = param_group.get("params", []) if isinstance(param_group, dict) else param_group
                 for param in params_to_check:

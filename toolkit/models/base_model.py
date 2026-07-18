@@ -119,6 +119,8 @@ class BaseModel:
         self.device = device
         self.dtype = dtype
         self.torch_dtype = get_torch_dtype(dtype)
+        # train-step activation dtype; BaseSDTrainProcess overrides from train.dtype
+        self.train_torch_dtype = self.torch_dtype
         self.device_torch = torch.device(device)
 
         self.vae_device_torch = torch.device(device)

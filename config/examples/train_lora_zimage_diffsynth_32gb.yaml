@@ -12,6 +12,7 @@ config:
       device: cuda:0
       network:
         type: "lora"
+        dtype: fp32
         linear: 128
         linear_alpha: 128
       save:
@@ -55,6 +56,7 @@ config:
       model:
         name_or_path: "Tongyi-MAI/Z-Image"
         arch: "zimage_diffsynth"
+        dtype: bf16
         # Optional: Turbo for fewer-step sampling
         # sampling_name_or_path: "Tongyi-MAI/Z-Image-Turbo"
         quantize: true

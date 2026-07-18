@@ -349,8 +349,17 @@ def main():
         embeds = sd.get_prompt_embeds("a cat on a mat")
         assert embeds.text_embeds is not None
         te = embeds.text_embeds
+        encode_dtype = getattr(sd, "train_torch_dtype", None) or sd.torch_dtype
         if isinstance(te, torch.Tensor):
-            _log(f"   text_embeds shape: {te.shape}")
+            _log(f"   text_embeds shape: {te.shape} dtype={te.dtype}")
+            assert te.dtype == encode_dtype, (
+                f"prompt embeds dtype {te.dtype} != train_torch_dtype {encode_dtype}"
+            )
+        elif isinstance(te, list) and te and isinstance(te[0], torch.Tensor):
+            _log(f"   text_embeds: list len={len(te)} dtype={te[0].dtype}")
+            assert te[0].dtype == encode_dtype, (
+                f"prompt embeds dtype {te[0].dtype} != train_torch_dtype {encode_dtype}"
+            )
         else:
             _log(f"   text_embeds: {type(te)} (len={len(te) if hasattr(te, '__len__') else 'n/a'})")
     except Exception:
