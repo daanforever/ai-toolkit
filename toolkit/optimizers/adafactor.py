@@ -169,6 +169,7 @@ class Adafactor(torch.optim.Optimizer):
         saddle_point_window: int = 100,
         saddle_point_threshold: float = 0.001,
         saddle_point_step: float = 0.01,
+        scale_lr_by_index: bool = False,
     ):
         weight_decay_mode = self._validate_weight_decay_mode(weight_decay_mode)
         eps = self._normalize_eps(eps)
@@ -198,6 +199,26 @@ class Adafactor(torch.optim.Optimizer):
         for group in self.param_groups:
             group["eps"] = self._normalize_eps(group.get("eps", eps), fallback_eps1=eps[1])
             group.setdefault("warmup_active", False)
+
+        self.scale_lr_by_index = bool(scale_lr_by_index)
+        self._max_index = None
+        if self.scale_lr_by_index:
+            indices = [
+                int(group["index"])
+                for group in self.param_groups
+                if "index" in group
+            ]
+            if not indices:
+                raise ValueError(
+                    "scale_lr_by_index=True but no param_group has 'index'; "
+                    "cannot determine max_index"
+                )
+            max_index = max(indices)
+            if max_index <= 0:
+                raise ValueError(
+                    f"scale_lr_by_index=True requires max_index > 0, got max_index={max_index}"
+                )
+            self._max_index = max_index
 
         # Create stagnation detector for RMS(parameter) based heuristic.
         self._saddle_point_detector = StagnationDetector(
@@ -609,6 +630,14 @@ class Adafactor(torch.optim.Optimizer):
         if base_lr is None:
             # Allow relative-step mode with lr=None.
             base_lr = 1.0
+
+        if self.scale_lr_by_index and "index" in param_group:
+            base_lr = (
+                base_lr
+                * (self._max_index - int(param_group["index"]))
+                / self._max_index
+                + float(param_group["eps"][0])
+            )
 
         min_lr     = param_group["min_lr"]          # Minimum learning rate
         eps0       = param_group["eps"][0]          # Small constant for numerical stability (division guard)

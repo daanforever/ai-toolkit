@@ -708,12 +708,14 @@ class ZImageDiffSynthModel(BaseModel):
 
         if "other" in grouped_loras:
             self.print_and_status_update(
-                f"[zimage_diffsynth] LoRA block grouping fallback=other count={len(grouped_loras['other'])}"
+                f"[zimage_diffsynth] LoRA block grouping fallback=other count={len(grouped_loras['other']['loras'])}"
             )
 
         lr_value = unet_lr if unet_lr is not None else default_lr
         param_groups = []
-        for block_key, block_loras in grouped_loras.items():
+        for block_key, entry in grouped_loras.items():
+            block_loras = entry["loras"]
+            block_index = entry["block_index"]
             lora_params = []
             magnitude_params = []
             for lora in block_loras:
@@ -727,6 +729,8 @@ class ZImageDiffSynthModel(BaseModel):
                 group = {"params": lora_params, "name": block_key}
                 if lr_value is not None:
                     group["lr"] = lr_value
+                if "layer" in block_key and block_index is not None:
+                    group["index"] = block_index
                 param_groups.append(group)
 
             if magnitude_params:

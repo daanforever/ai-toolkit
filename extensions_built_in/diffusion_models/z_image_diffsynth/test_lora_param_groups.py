@@ -37,6 +37,35 @@ def _make_model_stub() -> ZImageDiffSynthModel:
 
 
 @pytest.mark.parametrize(
+    "lora_name,expected_key,expected_index",
+    [
+        (
+            "transformer$$_inner_dit$$layers$$0$$attention$$to_q",
+            "layers_0",
+            0,
+        ),
+        (
+            "transformer$$_inner_dit$$layers$$29$$feed_forward$$w2",
+            "layers_29",
+            29,
+        ),
+        (
+            "lora_unet__inner_dit_noise_refiner_1_attention_to_v",
+            "noise_refiner_1",
+            1,
+        ),
+        (
+            "lora_transformer__inner_dit_context_refiner_0_feed_forward_w1",
+            "context_refiner_0",
+            0,
+        ),
+    ],
+)
+def test_parse_lora_block(lora_name, expected_key, expected_index):
+    assert lora_mod.parse_lora_block(lora_name) == (expected_key, expected_index)
+
+
+@pytest.mark.parametrize(
     "lora_name,expected",
     [
         (
@@ -70,8 +99,10 @@ def test_group_loras_by_block_falls_back_to_other():
     grouped = lora_mod.group_loras_by_block(loras)
 
     assert list(grouped.keys()) == ["layers_0", "other"]
-    assert len(grouped["layers_0"]) == 1
-    assert len(grouped["other"]) == 1
+    assert len(grouped["layers_0"]["loras"]) == 1
+    assert grouped["layers_0"]["block_index"] == 0
+    assert len(grouped["other"]["loras"]) == 1
+    assert grouped["other"]["block_index"] is None
 
 
 def test_model_optimizer_groups_are_disjoint_per_block():
@@ -97,6 +128,10 @@ def test_model_optimizer_groups_are_disjoint_per_block():
     names = [group["name"] for group in param_groups]
     assert len(names) == len(set(names))
     assert set(names) == {"layers_0", "layers_1", "noise_refiner_0"}
+    by_name = {g["name"]: g for g in param_groups}
+    assert by_name["layers_0"]["index"] == 0
+    assert by_name["layers_1"]["index"] == 1
+    assert "index" not in by_name["noise_refiner_0"]
 
     param_to_expected_block = {}
     for lora in loras:
@@ -139,6 +174,7 @@ def test_adafactor_accepts_30_block_groups():
     names = [group["name"] for group in param_groups]
     assert len(names) == len(set(names))
     assert names == [f"layers_{idx}" for idx in range(30)]
+    assert [g["index"] for g in param_groups] == list(range(30))
 
     optimizer = Adafactor(
         param_groups,
@@ -197,6 +233,10 @@ def test_model_optimizer_groups_dora_magnitude():
     assert len(names) == len(set(names))
     assert set(names) == {"layers_0", "layers_0_magnitude", "layers_1"}
     assert mag_groups[0]["name"] == "layers_0_magnitude"
+    assert "index" not in mag_groups[0]
+    by_name = {g["name"]: g for g in non_mag_groups}
+    assert by_name["layers_0"]["index"] == 0
+    assert by_name["layers_1"]["index"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -272,7 +312,9 @@ class _StubBaseModel:
             return None
         grouped = lora_mod.group_loras_by_block(unet_loras)
         param_groups = []
-        for block_key, block_loras in grouped.items():
+        for block_key, entry in grouped.items():
+            block_loras = entry["loras"]
+            block_index = entry["block_index"]
             lora_params = []
             magnitude_params = []
             for lora in block_loras:
@@ -285,6 +327,8 @@ class _StubBaseModel:
                 g = {"params": lora_params, "name": block_key}
                 if unet_lr is not None:
                     g["lr"] = unet_lr
+                if "layer" in block_key and block_index is not None:
+                    g["index"] = block_index
                 param_groups.append(g)
             if magnitude_params:
                 mg = {
