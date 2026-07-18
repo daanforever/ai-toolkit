@@ -93,6 +93,10 @@ def test_model_optimizer_groups_are_disjoint_per_block():
     assert param_groups is not None
     assert len(param_groups) == 3
     assert all(group["lr"] == pytest.approx(1e-4) for group in param_groups)
+    assert all("name" in group for group in param_groups)
+    names = [group["name"] for group in param_groups]
+    assert len(names) == len(set(names))
+    assert set(names) == {"layers_0", "layers_1", "noise_refiner_0"}
 
     param_to_expected_block = {}
     for lora in loras:
@@ -131,6 +135,10 @@ def test_adafactor_accepts_30_block_groups():
 
     assert param_groups is not None
     assert len(param_groups) == 30
+    assert all("name" in group for group in param_groups)
+    names = [group["name"] for group in param_groups]
+    assert len(names) == len(set(names))
+    assert names == [f"layers_{idx}" for idx in range(30)]
 
     optimizer = Adafactor(
         param_groups,
@@ -183,6 +191,12 @@ def test_model_optimizer_groups_dora_magnitude():
     # Verify non-magnitude groups contain the weights
     total_non_mag_params = sum(len(g["params"]) for g in non_mag_groups)
     assert total_non_mag_params == 3  # weight from to_q, to_k, and layers_1 w1
+
+    assert all("name" in group for group in param_groups)
+    names = [group["name"] for group in param_groups]
+    assert len(names) == len(set(names))
+    assert set(names) == {"layers_0", "layers_0_magnitude", "layers_1"}
+    assert mag_groups[0]["name"] == "layers_0_magnitude"
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +272,7 @@ class _StubBaseModel:
             return None
         grouped = lora_mod.group_loras_by_block(unet_loras)
         param_groups = []
-        for _, block_loras in grouped.items():
+        for block_key, block_loras in grouped.items():
             lora_params = []
             magnitude_params = []
             for lora in block_loras:
@@ -268,12 +282,16 @@ class _StubBaseModel:
                     else:
                         lora_params.append(p)
             if lora_params:
-                g = {"params": lora_params}
+                g = {"params": lora_params, "name": block_key}
                 if unet_lr is not None:
                     g["lr"] = unet_lr
                 param_groups.append(g)
             if magnitude_params:
-                mg = {"params": magnitude_params, "is_magnitude": True}
+                mg = {
+                    "params": magnitude_params,
+                    "is_magnitude": True,
+                    "name": f"{block_key}_magnitude",
+                }
                 if unet_lr is not None:
                     mg["lr"] = unet_lr
                 param_groups.append(mg)
@@ -311,6 +329,9 @@ def test_peft_param_groups_disjoint():
     assert groups, "expected at least one param group"
     # 3 layers blocks + 1 noise_refiner + 1 context_refiner = 5 groups
     assert len(groups) == 5
+    assert all("name" in group for group in groups)
+    names = [group["name"] for group in groups]
+    assert len(names) == len(set(names))
 
     seen_ids = set()
     for group in groups:

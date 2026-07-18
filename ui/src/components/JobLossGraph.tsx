@@ -335,30 +335,35 @@ export default function JobLossGraph({ job }: Props) {
           <div className="bg-gray-950 border border-gray-800 rounded-lg p-3">
             <label className="block text-xs text-gray-400 mb-2">Metric type</label>
             <div className="flex flex-wrap gap-2">
-              <ToggleButton 
-                checked={metricFilter === 'loss'} 
-                onClick={() => setMetricFilter('loss')} 
-                label="Loss" 
+              <ToggleButton
+                checked={metricFilter === 'loss'}
+                onClick={() => setMetricFilter('loss')}
+                label="Loss"
               />
-              <ToggleButton 
-                checked={metricFilter === 'learning_rate'} 
-                onClick={() => setMetricFilter('learning_rate')} 
-                label="Learning Rate" 
+              <ToggleButton
+                checked={metricFilter === 'learning_rate'}
+                onClick={() => setMetricFilter('learning_rate')}
+                label="Learning Rate"
               />
-              <ToggleButton 
-                checked={metricFilter === 'diff_guidance'} 
-                onClick={() => setMetricFilter('diff_guidance')} 
-                label="Diff Guidance" 
+              <ToggleButton
+                checked={metricFilter === 'diff_guidance'}
+                onClick={() => setMetricFilter('diff_guidance')}
+                label="Diff Guidance"
               />
-              <ToggleButton 
-                checked={metricFilter === 'all'} 
-                onClick={() => setMetricFilter('all')} 
-                label="All" 
+              <ToggleButton
+                checked={metricFilter === 'rms_max'}
+                onClick={() => setMetricFilter('rms_max')}
+                label="RMS max"
               />
-              <ToggleButton 
-                checked={metricFilter === 'other'} 
-                onClick={() => setMetricFilter('other')} 
-                label="Other" 
+              <ToggleButton
+                checked={metricFilter === 'all'}
+                onClick={() => setMetricFilter('all')}
+                label="All"
+              />
+              <ToggleButton
+                checked={metricFilter === 'other'}
+                onClick={() => setMetricFilter('other')}
+                label="Other"
               />
             </div>
           </div>

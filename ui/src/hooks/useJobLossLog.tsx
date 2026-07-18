@@ -11,12 +11,13 @@ export interface LossPoint {
 
 type SeriesMap = Record<string, LossPoint[]>;
 
-export type MetricFilter = 'loss' | 'learning_rate' | 'diff_guidance' | 'all' | 'other';
+export type MetricFilter = 'loss' | 'learning_rate' | 'diff_guidance' | 'rms_max' | 'all' | 'other';
 
-function categorizeMetric(key: string): 'loss' | 'learning_rate' | 'diff_guidance' | 'other' {
+function categorizeMetric(key: string): 'loss' | 'learning_rate' | 'diff_guidance' | 'rms_max' | 'other' {
   if (key === 'learning_rate' || key === 'train/lr_mean') return 'learning_rate';
   if (/effective_lr|precond_gain|momentum_gain|lr_mean|beta2/i.test(key)) return 'learning_rate';
   if (key === 'diff_guidance_norm') return 'diff_guidance';
+  if (/^rms_max\//.test(key)) return 'rms_max';
   if (/loss/i.test(key)) return 'loss';
   return 'other';
 }
@@ -35,7 +36,7 @@ function isLossKey(key: string) {
 }
 
 export default function useJobLossLog(
-  jobID: string, 
+  jobID: string,
   reloadInterval: null | number = null,
   metricFilter: MetricFilter = 'loss'
 ) {
@@ -75,8 +76,8 @@ export default function useJobLossLog(
       const newKeys = first.keys ?? [];
       setKeys(newKeys);
 
-      const wantedKeys = (newKeys.filter(k => matchesFilter(k, metricFilter)).length 
-        ? newKeys.filter(k => matchesFilter(k, metricFilter)) 
+      const wantedKeys = (newKeys.filter(k => matchesFilter(k, metricFilter)).length
+        ? newKeys.filter(k => matchesFilter(k, metricFilter))
         : (metricFilter === 'loss' ? ['loss'] : [])
       ).sort();
 

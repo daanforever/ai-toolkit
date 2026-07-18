@@ -2064,7 +2064,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 update_rms = 0.0  # Average weight update RMS (for monitoring optimizer step magnitude)
                 update_rms_max = 0.0  # Max RMS across param groups (for graphs)
                 param_rms = 0.0  # Average parameter RMS across groups (Adafactor)
-                param_rms_max = 0.0  # Running max of parameter RMS (for graphs)
+                param_rms_max_by_layer = {}  # Per-named-group rms_max (Adafactor)
                 param_rms_min = 0.0  # Running min of parameter RMS (for graphs)
                 grad_rms = 0.0  # Average gradient RMS across groups (Adafactor)
                 grad_rms_max = 0.0  # Running max of gradient RMS (for graphs)
@@ -2125,7 +2125,13 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     update_rms = _safe_get(optimizer, 'get_mean_update_rms', 0.0)
                     update_rms_max = _safe_get(optimizer, 'get_mean_update_rms_max', 0.0)
                     param_rms = _safe_get(optimizer, 'get_mean_rms', 0.0)
-                    param_rms_max = _safe_get(optimizer, 'get_max_rms', 0.0)
+                    if hasattr(optimizer, 'get_max_rms'):
+                        try:
+                            rms_max_val = optimizer.get_max_rms()
+                            if isinstance(rms_max_val, dict):
+                                param_rms_max_by_layer = rms_max_val
+                        except Exception:
+                            pass
                     param_rms_min = _safe_get(optimizer, 'get_min_rms', 0.0)
                     grad_rms = _safe_get(optimizer, 'get_mean_grad_rms', 0.0)
                     grad_rms_max = _safe_get(optimizer, 'get_mean_grad_rms_max', 0.0)
@@ -2218,7 +2224,12 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         if self.progress_bar is not None:
                             self.progress_bar.unpause()
 
-                    if self.logging_config.log_every and self.step_num % self.logging_config.log_every == 0:
+                    log_every = self.logging_config.log_every
+                    should_log = (
+                        log_every is None
+                        or (log_every and self.step_num % log_every == 0)
+                    )
+                    if should_log:
                         if self.progress_bar is not None:
                             self.progress_bar.pause()
                         with self.timer('log_to_tensorboard'):
@@ -2233,7 +2244,6 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                             self.writer.add_scalar(f"train/update_rms", update_rms, self.step_num)
                                             self.writer.add_scalar(f"train/update_rms_max", update_rms_max, self.step_num)
                                             self.writer.add_scalar(f"train/param_rms", param_rms, self.step_num)
-                                            self.writer.add_scalar(f"train/param_rms_max", param_rms_max, self.step_num)
                                             self.writer.add_scalar(f"train/param_rms_min", param_rms_min, self.step_num)
                                             self.writer.add_scalar(f"train/grad_rms", grad_rms, self.step_num)
                                             self.writer.add_scalar(f"train/grad_rms_max", grad_rms_max, self.step_num)
@@ -2249,9 +2259,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                             self.writer.add_scalar(f"train/momentum_gain", momentum_gain, self.step_num)
                                             self.writer.add_scalar(f"train/beta1", beta1, self.step_num)
                                             self.writer.add_scalar(f"train/beta2", beta2, self.step_num)
+                                        for layer_name, layer_rms_max in param_rms_max_by_layer.items():
+                                            self.writer.add_scalar(f"rms_max/{layer_name}", layer_rms_max, self.step_num)
                                 if self.progress_bar is not None:
                                     self.progress_bar.unpause()
-                        
+
                         if self.accelerator.is_main_process:
                             # log to logger
                             self.logger.log({
@@ -2266,7 +2278,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                     'diff_guidance_norm': self.diff_guidance_norm,
                                 })
                                 self.diff_guidance_norm = None
-                            
+
                             self.logger.log({
                                 'train/update_rms': update_rms,
                             })
@@ -2277,10 +2289,6 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
                             self.logger.log({
                                 'train/param_rms': param_rms,
-                            })
-
-                            self.logger.log({
-                                'train/param_rms_max': param_rms_max,
                             })
 
                             self.logger.log({
@@ -2341,97 +2349,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                 'train/beta2': beta2,
                             })
 
-                            if loss_dict is not None:
-                                for key, value in loss_dict.items():
-                                    self.logger.log({
-                                        f'loss/{key}': value,
-                                    })
-                    elif self.logging_config.log_every is None:
-                        if self.accelerator.is_main_process:
-                            # log every step
-                            self.logger.log({
-                                'learning_rate': learning_rate,
-                            })
-                            # Log differential guidance norm if available
-                            if hasattr(self, 'diff_guidance_norm') and self.diff_guidance_norm is not None:
+                            for layer_name, layer_rms_max in param_rms_max_by_layer.items():
                                 self.logger.log({
-                                    'diff_guidance_norm': self.diff_guidance_norm,
+                                    f'rms_max/{layer_name}': layer_rms_max,
                                 })
-                                self.diff_guidance_norm = None
-
-                            self.logger.log({
-                                'train/update_rms': update_rms,
-                            })
-
-                            self.logger.log({
-                                'train/update_rms_max': update_rms_max,
-                            })
-
-                            self.logger.log({
-                                'train/param_rms': param_rms,
-                            })
-
-                            self.logger.log({
-                                'train/param_rms_max': param_rms_max,
-                            })
-
-                            self.logger.log({
-                                'train/param_rms_min': param_rms_min,
-                            })
-
-                            self.logger.log({
-                                'train/grad_rms': grad_rms,
-                            })
-
-                            self.logger.log({
-                                'train/grad_rms_max': grad_rms_max,
-                            })
-
-                            self.logger.log({
-                                'train/gns': gns,
-                            })
-
-                            self.logger.log({
-                                'train/dir_consistency_mean': dir_consistency_mean,
-                            })
-
-                            self.logger.log({
-                                'train/instability_score': instability_score,
-                            })
-
-                            self.logger.log({
-                                'train/saddle_point_boost': saddle_point_boost,
-                            })
-
-                            self.logger.log({
-                                'train/step_efficiency': step_efficiency,
-                            })
-
-                            self.logger.log({
-                                'train/dynamic_gain': dynamic_gain,
-                            })
-
-                            self.logger.log({
-                                'train/effective_lr': effective_lr,
-                            })
-                            self.logger.log({
-                                'train/effective_wd': effective_wd,
-                            })
-
-                            self.logger.log({
-                                'train/precond_gain': precond_gain,
-                            })
-
-                            self.logger.log({
-                                'train/momentum_gain': momentum_gain,
-                            })
-
-                            self.logger.log({
-                                'train/beta1': beta1,
-                            })
-                            self.logger.log({
-                                'train/beta2': beta2,
-                            })
 
                             if loss_dict is not None:
                                 for key, value in loss_dict.items():

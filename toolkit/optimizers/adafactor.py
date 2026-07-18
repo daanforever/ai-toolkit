@@ -1413,16 +1413,16 @@ class Adafactor(torch.optim.Optimizer):
 
     def get_max_rms(self):
         """
-        Absolute max of per-group ``rms_max`` across all parameter groups.
-        Use with get_mean_rms() to monitor parameter scale vs recent max.
+        Per-named-group ``rms_max`` mapping: ``{group_name: rms_max_value}``.
+        Only groups with both ``name`` and ``rms_max`` are included.
         """
-        per_group = [
-            self._group_scalar_item(group, "rms_max", 0.0)
-            for group in self.param_groups
-        ]
-        if len(per_group) == 0:
-            return 0.0
-        return torch.tensor(per_group, dtype=torch.float64).max().item()
+        out = {}
+        for group in self.param_groups:
+            name = group.get("name")
+            if name is None or "rms_max" not in group:
+                continue
+            out[name] = self._group_scalar_item(group, "rms_max", 0.0)
+        return out
 
     def get_min_rms(self):
         """
