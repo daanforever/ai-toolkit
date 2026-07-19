@@ -53,6 +53,7 @@ class DiffusionTrainer(SDTrainer):
             self._last_applied_runtime_beta2 = None
             self._last_applied_runtime_content_or_style = None
             self._last_applied_runtime_timestep_type = None
+            self._last_applied_runtime_timestep_weighting = None
             self._last_applied_runtime_network_weights: Optional[tuple] = None
             self._last_applied_runtime_batch_size = None
             self._last_applied_runtime_gradient_accumulation = None
@@ -746,6 +747,27 @@ class DiffusionTrainer(SDTrainer):
         if is_debug_enabled():
             print_acc(f"\nruntime timestep_type from UI/DB: {value}")
 
+    def get_runtime_timestep_weighting(self):
+        """Read runtime_timestep_weighting from DB (only when is_ui_trainer). Returns str or None."""
+        return self._get_runtime_scalar("runtime_timestep_weighting", str)
+
+    def apply_runtime_timestep_weighting(self):
+        """If runtime_timestep_weighting is set in DB, apply it to train_config."""
+        if not self.is_ui_trainer:
+            return
+        value = self.get_runtime_timestep_weighting()
+        if value is None:
+            return
+        if value == self._last_applied_runtime_timestep_weighting:
+            return
+        if value == self.train_config.timestep_weighting:
+            self._last_applied_runtime_timestep_weighting = value
+            return
+        self.train_config.timestep_weighting = value
+        self._last_applied_runtime_timestep_weighting = value
+        if is_debug_enabled():
+            print_acc(f"\nruntime timestep_weighting from UI/DB: {value}")
+
     def get_runtime_network_weights(self):
         """Read runtime_network_weights from DB (only when is_ui_trainer). Returns list of float or None."""
         if not self.is_ui_trainer:
@@ -1005,6 +1027,7 @@ class DiffusionTrainer(SDTrainer):
         self._last_applied_runtime_beta2 = None
         self._last_applied_runtime_content_or_style = None
         self._last_applied_runtime_timestep_type = None
+        self._last_applied_runtime_timestep_weighting = None
         self._last_applied_runtime_network_weights = None
         self._last_applied_runtime_batch_size = None
         self._last_applied_runtime_gradient_accumulation = None
@@ -1138,6 +1161,7 @@ class DiffusionTrainer(SDTrainer):
             self.apply_runtime_content_or_style()
             self.apply_runtime_fixed_cycle_params()
             self.apply_runtime_timestep_type()
+            self.apply_runtime_timestep_weighting()
             self.apply_runtime_batch_size()
             self.apply_runtime_network_weights()
             self.apply_runtime_gradient_accumulation()

@@ -57,6 +57,7 @@ model RuntimeParams {
   runtime_beta2            Float?
   runtime_content_or_style String?
   runtime_timestep_type    String?
+  runtime_timestep_weighting String?
   runtime_network_weights  String?
   runtime_fixed_cycle_timesteps String?
   runtime_fixed_cycle_seed Int?

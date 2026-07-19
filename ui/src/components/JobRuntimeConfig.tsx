@@ -316,6 +316,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         beta2?: number;
         content_or_style?: string;
         timestep_type?: string;
+        timestep_weighting?: string;
         gaussian_mean?: number;
         gaussian_std?: number;
         gaussian_mean_2?: number;
@@ -340,6 +341,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         beta2: beta2,
         content_or_style: contentOrStyle,
         timestep_type: timestepType,
+        timestep_weighting: timestepWeighting,
         gaussian_mean: gaussianMean,
         gaussian_std: gaussianStd,
         gaussian_mean_2: gaussianMean2,
