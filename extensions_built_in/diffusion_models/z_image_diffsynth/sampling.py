@@ -153,12 +153,18 @@ class ZImageDiffSynthPipelineWrapper:
                 t = timesteps[progress_id].unsqueeze(0).expand(latents.shape[0])
                 if guidance_scale <= 1.0 or not prompt_embeds or not negative_prompt_embeds:
                     cond_emb = prompt_embeds[0] if prompt_embeds else None
-                    noise_pred = fwd_mod.run_forward(dit, latents, t, cond_emb)
+                    noise_pred = fwd_mod.run_forward(
+                        dit, latents, t, cond_emb, model_dtype=self.dtype
+                    )
                 else:
                     cond_emb = prompt_embeds[0]
                     uncond_emb = negative_prompt_embeds[0]
-                    pred_cond = fwd_mod.run_forward(dit, latents, t, cond_emb)
-                    pred_uncond = fwd_mod.run_forward(dit, latents, t, uncond_emb)
+                    pred_cond = fwd_mod.run_forward(
+                        dit, latents, t, cond_emb, model_dtype=self.dtype
+                    )
+                    pred_uncond = fwd_mod.run_forward(
+                        dit, latents, t, uncond_emb, model_dtype=self.dtype
+                    )
                     noise_pred = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
                 latents = _step_scheduler(sigmas, timesteps, noise_pred, t[0], latents, device)
 

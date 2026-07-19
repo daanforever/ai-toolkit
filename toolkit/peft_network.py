@@ -437,8 +437,9 @@ class PeftNetwork(ToolkitNetworkMixin, nn.Module):
     def prepare_grad_etc(self, text_encoder=None, unet=None) -> None:
         # PEFT already set requires_grad on lora params during get_peft_model;
         # ensure the base is frozen.
+        adapter_ids = {id(p) for p in self._trainable_params()}
         for p in self.peft_model.parameters():
-            if not any(p is lp for lp in self._trainable_params()):
+            if id(p) not in adapter_ids:
                 p.requires_grad_(False)
         if self.te_peft_model is not None:
             for p in self.te_peft_model.parameters():
@@ -446,11 +447,27 @@ class PeftNetwork(ToolkitNetworkMixin, nn.Module):
             for p in self._trainable_params_te():
                 p.requires_grad_(True)
 
+    def _iter_adapter_parameters(self, include_te: bool = True):
+        """Yield PEFT adapter parameters from collected LoraLayer wrappers."""
+        for adapter in self.unet_loras:
+            for _, p in adapter.named_parameters():
+                yield p
+        if include_te:
+            for adapter in self.text_encoder_loras:
+                for _, p in adapter.named_parameters():
+                    yield p
+
     def _trainable_params(self):
-        return list(self.peft_model.parameters())
+        return list(self._iter_adapter_parameters(include_te=False))
 
     def _trainable_params_te(self):
-        return [] if self.te_peft_model is None else list(self.te_peft_model.parameters())
+        if self.te_peft_model is None:
+            return []
+        params = []
+        for adapter in self.text_encoder_loras:
+            for _, p in adapter.named_parameters():
+                params.append(p)
+        return params
 
     def requires_grad_(self, requires_grad: bool = True):
         if requires_grad:
@@ -472,16 +489,65 @@ class PeftNetwork(ToolkitNetworkMixin, nn.Module):
                     p.requires_grad_(False)
         return self
 
+    @staticmethod
+    def _parse_to_device_dtype(*args, **kwargs):
+        """Parse device/dtype like nn.Module.to without applying them."""
+        device = kwargs.get("device", None)
+        dtype = kwargs.get("dtype", None)
+        if not args:
+            return device, dtype
+        first = args[0]
+        if isinstance(first, torch.dtype):
+            if dtype is None:
+                dtype = first
+        elif isinstance(first, torch.Tensor):
+            if device is None:
+                device = first.device
+            if dtype is None:
+                dtype = first.dtype
+        elif isinstance(first, nn.Module):
+            try:
+                p = next(first.parameters())
+                if device is None:
+                    device = p.device
+                if dtype is None:
+                    dtype = p.dtype
+            except StopIteration:
+                pass
+        else:
+            # device string / torch.device / int
+            if device is None:
+                device = first
+        if len(args) >= 2 and isinstance(args[1], torch.dtype) and dtype is None:
+            dtype = args[1]
+        return device, dtype
+
+    def _move_peft_tree(self, device=None, dtype=None):
+        """Move full PEFT tree by device only; cast dtype only on adapters."""
+        if device is not None:
+            self.peft_model.to(device)
+            if self.te_peft_model is not None:
+                self.te_peft_model.to(device)
+        if dtype is not None:
+            for p in self._iter_adapter_parameters(include_te=True):
+                p.data = p.data.to(dtype=dtype)
+        if device is not None or dtype is not None:
+            self.torch_multiplier = self.torch_multiplier.to(
+                device=device if device is not None else self.torch_multiplier.device,
+                dtype=dtype if dtype is not None else self.torch_multiplier.dtype,
+            )
+
     def force_to(self, device, dtype):
-        self.peft_model.to(device, dtype)
-        if self.te_peft_model is not None:
-            self.te_peft_model.to(device, dtype)
-        self.torch_multiplier = self.torch_multiplier.to(device, dtype)
+        # Move the full PEFT tree to device without casting frozen base weights.
+        # Only adapter params receive network.dtype (matches LoRA force_to).
+        self._move_peft_tree(device=device, dtype=dtype)
 
     def to(self, *args, **kwargs):
-        self.peft_model.to(*args, **kwargs)
-        if self.te_peft_model is not None:
-            self.te_peft_model.to(*args, **kwargs)
+        device, dtype = self._parse_to_device_dtype(*args, **kwargs)
+        if device is None and dtype is None:
+            # Fall back for unexpected signatures; never cast whole tree by dtype.
+            return self
+        self._move_peft_tree(device=device, dtype=dtype)
         return self
 
     def train(self, mode: bool = True):

@@ -4,18 +4,12 @@ from typing import Optional
 import torch
 
 
-def _first_param_dtype(module) -> Optional[torch.dtype]:
-    try:
-        return next(module.parameters()).dtype
-    except (StopIteration, AttributeError, TypeError):
-        return None
-
-
 def run_forward(
     dit,
     latents: torch.Tensor,
     timestep: torch.Tensor,
     prompt_embeds,
+    model_dtype: torch.dtype,
     use_gradient_checkpointing: bool = False,
     use_gradient_checkpointing_offload: bool = False,
     train_dtype: Optional[torch.dtype] = None,
@@ -26,7 +20,8 @@ def run_forward(
     Returns prediction tensor in same convention as DiffSynth-Studio (flow matching).
 
     Activations are aligned to train_dtype (fallback: latents.dtype). If that differs from
-    DiT weight dtype, a compute gate casts inputs to weight dtype and casts the output back.
+    model_dtype (YAML model.dtype), a compute gate casts inputs to model_dtype and casts
+    the output back. CUDA autocast uses model_dtype for fp16/bf16.
     """
     import sys
     import os
@@ -69,27 +64,35 @@ def run_forward(
     if isinstance(latents, torch.Tensor) and latents.dtype != act_dtype:
         latents = latents.to(act_dtype)
 
-    # Compute gate: DiT weights may be model.dtype while activations are train.dtype
-    weight_dtype = _first_param_dtype(dit)
+    # Compute gate: model.dtype may differ from train.dtype activations
     out_dtype = act_dtype
-    if weight_dtype is not None and latents.dtype != weight_dtype:
-        latents = latents.to(weight_dtype)
+    if latents.dtype != model_dtype:
+        latents = latents.to(model_dtype)
         if isinstance(prompt_embeds, torch.Tensor):
-            prompt_embeds = prompt_embeds.to(weight_dtype)
+            prompt_embeds = prompt_embeds.to(model_dtype)
         elif isinstance(prompt_embeds, list):
             prompt_embeds = [
-                p.to(weight_dtype) if isinstance(p, torch.Tensor) else p for p in prompt_embeds
+                p.to(model_dtype) if isinstance(p, torch.Tensor) else p for p in prompt_embeds
             ]
 
-    out = model_fn_z_image_turbo(
-        dit,
-        latents=latents,
-        timestep=timestep,
-        prompt_embeds=prompt_embeds,
-        use_gradient_checkpointing=use_gradient_checkpointing,
-        use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
-        **kwargs,
+    use_autocast = (
+        latents.device.type == "cuda"
+        and model_dtype in (torch.float16, torch.bfloat16)
     )
+    with torch.autocast(
+        device_type="cuda",
+        dtype=model_dtype if use_autocast else torch.float32,
+        enabled=use_autocast,
+    ):
+        out = model_fn_z_image_turbo(
+            dit,
+            latents=latents,
+            timestep=timestep,
+            prompt_embeds=prompt_embeds,
+            use_gradient_checkpointing=use_gradient_checkpointing,
+            use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
+            **kwargs,
+        )
     if isinstance(out, torch.Tensor) and out.dtype != out_dtype:
         out = out.to(out_dtype)
     return out

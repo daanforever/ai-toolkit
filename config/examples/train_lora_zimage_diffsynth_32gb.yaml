@@ -38,7 +38,7 @@ config:
         timestep_weighting: "weighted"
         content_or_style: "balanced"
         loss_type: "mse"
-        dtype: bf16
+        dtype: fp32
         optimizer: "prodigy"
         lr: 1.0
         optimizer_params:

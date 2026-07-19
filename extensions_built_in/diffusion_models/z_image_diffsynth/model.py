@@ -416,6 +416,7 @@ class ZImageDiffSynthModel(BaseModel):
             latent_model_input,
             timestep,
             text_embeds,
+            model_dtype=self.torch_dtype,
             use_gradient_checkpointing=use_gradient_checkpointing,
             train_dtype=train_dtype,
         )
