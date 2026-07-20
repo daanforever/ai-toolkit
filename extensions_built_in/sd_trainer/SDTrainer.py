@@ -55,6 +55,28 @@ def flush():
     gc.collect()
 
 
+def batch_num_samples(batch) -> int:
+    """Number of samples in a DataLoaderBatchDTO (or compatible object)."""
+    file_items = getattr(batch, "file_items", None)
+    if file_items is not None and len(file_items) > 0:
+        return len(file_items)
+    latents = getattr(batch, "latents", None)
+    if latents is not None and hasattr(latents, "shape") and latents.shape[0] > 0:
+        return int(latents.shape[0])
+    tensor = getattr(batch, "tensor", None)
+    if tensor is not None and hasattr(tensor, "shape") and tensor.shape[0] > 0:
+        return int(tensor.shape[0])
+    return 1
+
+
+def sample_weighted_microbatch_scales(batch_sizes: List[int]) -> List[float]:
+    """Per-microbatch scales so each sample contributes equally across accumulation."""
+    if not batch_sizes:
+        return []
+    total = float(sum(max(1, int(n)) for n in batch_sizes))
+    return [max(1, int(n)) / total for n in batch_sizes]
+
+
 adapter_transforms = transforms.Compose([
     transforms.ToTensor(),
 ])
@@ -2363,10 +2385,12 @@ class SDTrainer(BaseSDTrainProcess):
             batch_list = batch
         else:
             batch_list = [batch]
-        microbatch_scale = 1.0 / float(len(batch_list))
-        total_loss = None
+        batch_sizes = [batch_num_samples(b) for b in batch_list]
+        scales = sample_weighted_microbatch_scales(batch_sizes)
+        total_samples = float(sum(batch_sizes))
+        weighted_loss_sum = None
         self.optimizer.zero_grad()
-        for batch in batch_list:
+        for i, batch in enumerate(batch_list):
             if self.sd.is_multistage:
                 # handle multistage switching
                 if self.steps_this_boundary >= self.train_config.switch_boundary_every or self.current_boundary_index not in self.sd.trainable_multistage_boundaries:
@@ -2379,12 +2403,14 @@ class SDTrainer(BaseSDTrainProcess):
                         if self.current_boundary_index in self.sd.trainable_multistage_boundaries:
                             # if this boundary is trainable, we can stop looking
                             break
+            microbatch_scale = scales[i]
             loss = self.train_single_accumulation(batch, microbatch_scale=microbatch_scale)
             self.steps_this_boundary += 1
-            if total_loss is None:
-                total_loss = loss
+            weighted_term = loss * batch_sizes[i]
+            if weighted_loss_sum is None:
+                weighted_loss_sum = weighted_term
             else:
-                total_loss += loss
+                weighted_loss_sum = weighted_loss_sum + weighted_term
             if len(batch_list) > 1 and self.model_config.low_vram:
                 torch.cuda.empty_cache()
 
@@ -2441,7 +2467,7 @@ class SDTrainer(BaseSDTrainProcess):
                 self.adapter.restore_embeddings()
 
         loss_dict = OrderedDict(
-            {'loss': (total_loss / len(batch_list)).item()}
+            {'loss': (weighted_loss_sum / total_samples).item()}
         )
 
         self.end_of_training_loop()

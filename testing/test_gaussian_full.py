@@ -649,8 +649,10 @@ def test_min_snr_gamma_high_timestep_and_accumulation_mixing(tmp_path, monkeypat
         if abs(mean_all - mean_high) > 1e-7:
             mixed_steps_with_shifted_loss += 1
         if step_num in step_loss_from_hook:
+            # batch_size=1 => equal n_i; sample-weighted mean ≡ arithmetic mean over microbatches
             assert abs(step_loss_from_hook[step_num] - mean_all) < 1e-6, (
-                "hook_train_loop loss must equal mean over microbatches for this step"
+                "hook_train_loop loss must equal sample-weighted mean over microbatches "
+                "(with equal n_i this is the arithmetic mean)"
             )
 
     assert mixed_steps > 0, (
