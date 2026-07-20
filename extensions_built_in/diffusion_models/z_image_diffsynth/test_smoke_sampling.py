@@ -128,6 +128,72 @@ def _test_move_sampling_transformer_need_move() -> None:
     _log("[need_move] _move_sampling_transformer base-param device check OK.")
 
 
+def _test_create_sampling_network_stays_on_cpu() -> None:
+    """
+    Creating the sampling LoRA network must leave _sampling_transformer on CPU
+    (no CUDA move). Matches BaseSDTrainProcess after skipping GPU move for
+    sampling-network construction.
+    """
+    import torch
+    from toolkit.lora_special import LoRASpecialNetwork
+    from extensions_built_in.diffusion_models.z_image_diffsynth.model import (
+        ZImageDiffSynthModel,
+        _DiTUnetWrapper,
+    )
+
+    class DummyTextEncoder(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+
+    class LoRACompatibleLinear(torch.nn.Linear):
+        pass
+
+    class UNet2DConditionModel(torch.nn.Module):  # type: ignore[override]
+        def __init__(self) -> None:
+            super().__init__()
+            self.frozen_linear = torch.nn.Linear(4, 4, bias=False)
+            self.frozen_linear.weight.requires_grad_(False)
+            self.block = torch.nn.Module()
+            self.block.linear = LoRACompatibleLinear(4, 4)
+
+    _log("[cpu_create] building main + sampling LoRA networks on CPU ...")
+    text_enc = DummyTextEncoder()
+    main_unet = _DiTUnetWrapper(UNet2DConditionModel())
+    sampling_unet = _DiTUnetWrapper(UNet2DConditionModel())
+    sampling_unet.to("cpu")
+
+    base = ZImageDiffSynthModel._first_frozen_base_param(sampling_unet)
+    assert base is not None and base.device.type == "cpu", (
+        "[cpu_create] expected sampling transformer frozen base on CPU before create"
+    )
+
+    common = dict(
+        text_encoder=text_enc,
+        train_text_encoder=False,
+        train_unet=True,
+        lora_dim=2,
+        alpha=1.0,
+        target_lin_modules=LoRASpecialNetwork.UNET_TARGET_REPLACE_MODULE,
+        target_conv_modules=LoRASpecialNetwork.UNET_TARGET_REPLACE_MODULE_CONV2D_3X3,
+    )
+    main_network = LoRASpecialNetwork(unet=main_unet, **common)
+    sampling_network = LoRASpecialNetwork(unet=sampling_unet, **common)
+
+    assert main_network.unet_loras, "[cpu_create] expected main unet LoRA modules"
+    assert sampling_network.unet_loras, "[cpu_create] expected sampling unet LoRA modules"
+
+    sampling_network.share_parameters_with(main_network)
+    sampling_network._update_torch_multiplier()
+    sampling_network.apply_to(text_enc, sampling_unet, False, True)
+
+    base_after = ZImageDiffSynthModel._first_frozen_base_param(sampling_unet)
+    assert base_after is not None and base_after.device.type == "cpu", (
+        "[cpu_create] sampling transformer frozen base must stay on CPU after network create"
+    )
+
+    _log("[cpu_create] sampling network create keeps sampling transformer on CPU OK.")
+
+
 def _test_batch_sampling_device_moves() -> None:
     """
     Load Z-Image DiffSynth with a sampling transformer and run batch sampling
@@ -432,6 +498,7 @@ def main() -> None:
     try:
         _test_sample_config_multiple_prompts()
         _test_move_sampling_transformer_need_move()
+        _test_create_sampling_network_stays_on_cpu()
         _test_batch_sampling_device_moves()
         _test_share_parameters_edge_cases()
     except AssertionError as e:

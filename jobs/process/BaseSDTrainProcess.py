@@ -1528,17 +1528,13 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 self.network.prepare_grad_etc(text_encoder, unet)
                 flush()
 
-                # Create sampling network if sampling_transformer is specified and LoRA is used
+                # Create sampling network if sampling_transformer is specified and LoRA is used.
+                # Keep sampling transformer on CPU: it is only a structure stub for LoRA
+                # name/hooks; weights are shared from the main network (avoids OOM).
                 if hasattr(self.sd, '_sampling_transformer') and self.sd._sampling_transformer is not None:
                     with memory_debug(print_acc, "Creating sampling network"):
                         print_acc("Creating sampling network for _sampling_transformer")
-                        
-                        # Move sampling transformer to GPU for fast network creation on CUDA
-                        if hasattr(self.sd, "_move_sampling_transformer"):
-                            self.sd._move_sampling_transformer(self.device_torch)
-                        else:
-                            self.sd._sampling_transformer.to(self.device_torch)
-                        
+
                         sampling_network = NetworkClass(
                             text_encoder=text_encoder,
                             unet=self.sd._sampling_transformer,
@@ -1574,28 +1570,22 @@ class BaseSDTrainProcess(BaseTrainProcess):
                             deferred_lora_init=False,
                             **network_kwargs
                         )
-                        
+
                         # Share parameters immediately to avoid wasteful GPU allocation
                         sampling_network.share_parameters_with(self.network)
                         sampling_network._update_torch_multiplier()
-                        
+
                         sampling_network.apply_to(
                             text_encoder,
                             self.sd._sampling_transformer,
                             self.train_config.train_text_encoder,
                             self.train_config.train_unet
                         )
-                        
+
                         # Set can_merge_in same as main network (False if quantized/layer_offloading)
                         if self.model_config.quantize or self.model_config.layer_offloading:
                             sampling_network.can_merge_in = False
-                        
-                        # Move sampling transformer back to CPU to save VRAM during training
-                        if hasattr(self.sd, "_move_sampling_transformer"):
-                            self.sd._move_sampling_transformer("cpu")
-                        else:
-                            self.sd._sampling_transformer.to("cpu")
-                        
+
                         # Store sampling network on model for use during generation
                         self.sd._sampling_network = sampling_network
                         flush()
