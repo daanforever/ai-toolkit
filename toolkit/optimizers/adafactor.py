@@ -72,7 +72,8 @@ class Adafactor(torch.optim.Optimizer):
             When True, the group learning rate `lr` is approached smoothly: one interpolation segment per change of
             `lr`, progress tracked once per group per step (see `_global_lr`). Works with both `relative_step=True` and
             manual mode (`relative_step=False`). If `lr` changes during a segment (e.g. via `set_lr`), a new segment
-            starts from the current interpolated level toward the new `lr` (up or down). Runtime toggling of
+            starts from the current interpolated level toward the new `lr` (up or down). When any param group
+            completes its segment (reaches target `lr`), warmup is stopped for all groups. Runtime toggling of
             `warmup_init` is not supported.
         warmup_steps (`int`, *optional*, defaults to `100`):
             When `warmup_init=True`, number of optimizer steps to interpolate each warmup segment from its start
@@ -528,14 +529,31 @@ class Adafactor(torch.optim.Optimizer):
             print_acc(f"Adafactor: applied runtime warmup_steps={value}")
 
     def _global_lr(self) -> None:
-        """Once per optimizer step: group-level warmup before any per-parameter _get_lr."""
+        """Once per optimizer step: group-level warmup before any per-parameter _get_lr.
+
+        When any group completes its warmup segment (``warmup_complete_pending_cleanup``),
+        ``stop_warmup`` is called on all other groups still warming up.
+        """
         groups = self.param_groups
         if not groups:
             return
+        any_reached_target = False
         for group in groups:
             if not group.get("warmup_init"):
                 continue
+            if group.get("warmup_complete_pending_cleanup"):
+                any_reached_target = True
             self._warmup_update_group(group)
+            if group.get("warmup_complete_pending_cleanup"):
+                any_reached_target = True
+        if any_reached_target:
+            for group in groups:
+                if not group.get("warmup_init"):
+                    continue
+                if group.get("warmup_complete_pending_cleanup"):
+                    continue  # cleanup next step / already pending
+                if group.get("warmup_active") or "warmup_lr" in group:
+                    self.stop_warmup(group)
 
     @staticmethod
     def scheduled_lr_changed(new_lr: float | None, old_lr: float | None) -> bool:
@@ -566,6 +584,7 @@ class Adafactor(torch.optim.Optimizer):
         Segment: linear ramp stored in ``warmup_lr``; start level is prior ``warmup_lr`` if
         present, else ``group["lr"] * eps[1]``. After ``warmup_steps`` updates, marks warmup
         complete and performs cleanup on the next step (so the last warmup_lr is applied once).
+        Completing a segment triggers a global stop for all other groups via ``_global_lr``.
         """
         if group.pop("warmup_complete_pending_cleanup", False):
             self.stop_warmup(group)

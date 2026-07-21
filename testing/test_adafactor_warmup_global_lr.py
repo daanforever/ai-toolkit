@@ -105,3 +105,36 @@ def test_warmup_final_intermediate_lr_is_applied_before_cleanup():
     w1.grad = torch.zeros_like(w1)
     opt.step()
     assert g["lr_mean"].item() == pytest.approx(1.0)
+
+
+def test_warmup_stops_all_groups_when_any_reaches_target():
+    """When one group completes its segment, stop_warmup runs on all other groups."""
+    p1 = torch.nn.Parameter(torch.ones(2))
+    p2 = torch.nn.Parameter(torch.ones(2))
+    opt = Adafactor(
+        [{"params": [p1]}, {"params": [p2]}],
+        lr=1.0,
+        relative_step=False,
+        scale_parameter=False,
+        warmup_init=True,
+        warmup_steps=10,
+        beta1=None,
+        weight_decay=0.0,
+    )
+    g0, g1 = opt.param_groups
+    g0["warmup_steps"] = 2
+    g1["warmup_steps"] = 10
+
+    for _ in range(2):
+        p1.grad = torch.zeros_like(p1)
+        p2.grad = torch.zeros_like(p2)
+        opt.step()
+
+    # First group completed its segment; delayed cleanup still pending.
+    assert g0.get("warmup_complete_pending_cleanup") is True
+    assert "warmup_lr" in g0
+
+    # Second group must be force-stopped immediately (no longer warming).
+    assert not g1.get("warmup_active", False)
+    assert "warmup_lr" not in g1
+    assert "warmup_progress" not in g1

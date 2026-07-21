@@ -1,0 +1,96 @@
+job: "extension"
+config:
+  name: "zdiffsynth"
+  process:
+    - type: "z_image_diffsynth_trainer"
+      device: "cuda"
+      network:
+        dtype: "fp32"
+        rank_dropout: 0.1
+        type: "lora"
+        linear: 8
+        linear_alpha: 1
+        conv: 0
+        conv_alpha: 0
+        network_kwargs:
+          ignore_if_contains:
+            - "noise_refiner"
+            - "all_final_layer"
+      save:
+        dtype: "bf16"
+        save_every: 50
+        max_step_saves_to_keep: 2
+        save_format: "safetensors"
+      train:
+        min_snr_gamma: 0
+        timestep_weighting: "gaussian"
+        batch_size: 2
+        gradient_accumulation: 1
+        noise_scheduler: "flowmatch"
+        prediction_type: "flowmatch"
+        timestep_type: "shift"
+        content_or_style: "balanced"
+        gaussian_mean: 999
+        gaussian_std: 1
+        gaussian_mean_2: 120
+        gaussian_std_2: 0.59
+        gaussian_shift: 0.01
+        bypass_guidance_embedding: false
+        steps: 100000
+        train_unet: true
+        train_text_encoder: false
+        gradient_checkpointing: true
+        optimizer: "adafactor"
+        optimizer_params:
+          scale_lr_by_index: true
+          scale_lr_factor: 3
+          beta2: 0.999
+          beta2_adaptive: false
+          beta2_min: 0.9
+          weight_decay: 0.03
+          scale_parameter: false
+          relative_step: false
+          warmup_init: true
+          warmup_steps: 500
+          min_lr: 1e-7
+          rms_max_decay_rate: 0.99
+          stochastic_accumulation: true
+          stochastic_rounding: true
+          factored: true
+          beta1: 0
+          saddle_point_window: 100
+          saddle_point_threshold: 0.0001
+          saddle_point_step: 0.5
+          weight_decay_mode: "absolute"
+          weight_decay_increment: 0
+        unload_text_encoder: false
+        cache_text_embeddings: true
+        ema_config:
+          use_ema: false
+          ema_decay: 0.99
+        skip_first_sample: false
+        force_first_sample: false
+        disable_sampling: false
+        dtype: "fp32"
+        diff_output_preservation: false
+        loss_type: "mse"
+        blank_prompt_preservation: false
+        lr: 0.0004
+      model:
+        dtype: "bf16"
+        compile: false
+        debug_zimage_load: false
+        name_or_path: "e:/Backup/huggingface/hub/models--Tongyi-MAI--Z-Image/snapshots/04cc4abb7c5069926f75c9bfde9ef43d49423021/"
+        sampling_name_or_path: "e:/Backup/huggingface/hub/models--Tongyi-MAI--Z-Image-Turbo/snapshots/0e36c2b379e66fa531d01cc531c44919e5f1c6fd/"
+        quantize: true
+        qtype: "qfloat8"
+        quantize_te: false
+        qtype_te: "qfloat8"
+        arch: "zimage_diffsynth"
+        low_vram: false
+        model_kwargs:
+          sampling_loader: "diffsynth"
+          use_dynamic_shifting: true
+          use_diffsynth_training_loop: false
+          disable_noise_refiner: false
+          disable_context_refiner: false
