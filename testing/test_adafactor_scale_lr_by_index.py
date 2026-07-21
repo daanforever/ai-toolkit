@@ -223,3 +223,115 @@ def test_scale_lr_factor_ignored_when_mode_off():
     assert opt.scale_lr_by_index is False
     state = _state_with_rms(opt, 1)
     assert opt._get_lr(opt.param_groups[1], state) == pytest.approx(lr)
+
+
+def _make_indexed_wd_opt(
+    weight_decay_mode: str,
+    *,
+    scale_lr_by_index: bool = True,
+    lr: float = 0.2,
+    wd: float = 0.1,
+    include_unindexed: bool = False,
+):
+    p0 = torch.nn.Parameter(torch.ones(4, dtype=torch.float32))
+    p1 = torch.nn.Parameter(torch.ones(4, dtype=torch.float32))
+    p2 = torch.nn.Parameter(torch.ones(4, dtype=torch.float32))
+    groups = [
+        {"params": [p0], "index": 0},
+        {"params": [p1], "index": 1},
+        {"params": [p2], "index": 2},
+    ]
+    if include_unindexed:
+        p_u = torch.nn.Parameter(torch.ones(4, dtype=torch.float32))
+        groups = [
+            {"params": [p0], "index": 0},
+            {"params": [p_u]},
+            {"params": [p2], "index": 2},
+        ]
+    opt = Adafactor(
+        groups,
+        lr=lr,
+        relative_step=False,
+        scale_parameter=False,
+        warmup_init=False,
+        beta1=None,
+        weight_decay=wd,
+        weight_decay_mode=weight_decay_mode,
+        scale_lr_by_index=scale_lr_by_index,
+    )
+    return opt
+
+
+def _zero_grad_step(opt):
+    for group in opt.param_groups:
+        for p in group["params"]:
+            p.grad = torch.zeros_like(p)
+    opt.step()
+
+
+def test_scale_wd_by_index_param_rms():
+    opt = _make_indexed_wd_opt("param_rms", lr=0.2, wd=0.1)
+    _zero_grad_step(opt)
+    effective = opt.get_effective_wd()
+    assert effective[0] == pytest.approx(0.0)
+    assert effective[1] == pytest.approx(0.1)
+    assert effective[2] == pytest.approx(0.2)
+    assert all(g["weight_decay"] == pytest.approx(0.1) for g in opt.param_groups)
+
+
+def test_scale_wd_by_index_absolute():
+    lr = 0.2
+    wd = 0.1
+    eps = (1e-30, 1e-3)
+    opt = Adafactor(
+        [
+            {"params": [torch.nn.Parameter(torch.ones(4))], "index": 0},
+            {"params": [torch.nn.Parameter(torch.ones(4))], "index": 1},
+            {"params": [torch.nn.Parameter(torch.ones(4))], "index": 2},
+        ],
+        lr=lr,
+        eps=eps,
+        relative_step=False,
+        scale_parameter=False,
+        warmup_init=False,
+        beta1=None,
+        weight_decay=wd,
+        weight_decay_mode="absolute",
+        scale_lr_by_index=True,
+    )
+    _zero_grad_step(opt)
+    # lr_scaled: index 0 -> lr+eps0, index 1 -> 0.5*lr+eps0, index 2 -> eps0
+    expected = [
+        (wd * 0) * (lr + eps[0]),
+        (wd * 1) * (0.5 * lr + eps[0]),
+        (wd * 2) * (eps[0]),
+    ]
+    effective = opt.get_effective_wd()
+    for got, exp in zip(effective, expected):
+        assert got == pytest.approx(exp)
+
+
+def test_scale_wd_by_index_update_rms_zero_grad():
+    opt = _make_indexed_wd_opt("update_rms", lr=0.2, wd=0.1)
+    _zero_grad_step(opt)
+    assert all(v == pytest.approx(0.0) for v in opt.get_effective_wd())
+
+
+def test_scale_wd_skips_unindexed_group():
+    opt = _make_indexed_wd_opt(
+        "param_rms", lr=0.2, wd=0.1, include_unindexed=True
+    )
+    _zero_grad_step(opt)
+    effective = opt.get_effective_wd()
+    # index 0 -> 0; unindexed -> wd * rms (no * index); index 2 -> wd * 2
+    assert effective[0] == pytest.approx(0.0)
+    assert effective[1] == pytest.approx(0.1)
+    assert effective[2] == pytest.approx(0.2)
+
+
+def test_scale_wd_disabled_when_mode_off():
+    opt = _make_indexed_wd_opt(
+        "param_rms", scale_lr_by_index=False, lr=0.2, wd=0.1
+    )
+    _zero_grad_step(opt)
+    assert all(v == pytest.approx(0.1) for v in opt.get_effective_wd())

@@ -1355,6 +1355,8 @@ class Adafactor(torch.optim.Optimizer):
 
                 if group["weight_decay"] != 0 and not group.get("is_magnitude", False):
                     wd = group["weight_decay"]
+                    if self.scale_lr_by_index and "index" in group:
+                        wd = wd * int(group["index"])
                     weight_decay_mode = self._validate_weight_decay_mode(
                         group.get("weight_decay_mode", "absolute")
                     )
