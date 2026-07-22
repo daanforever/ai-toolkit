@@ -57,7 +57,8 @@ class Adafactor(torch.optim.Optimizer):
             Weight decay (L2 penalty)
         weight_decay_increment (`float`, *optional*, defaults to 0.0):
             Value added to `weight_decay` once per optimizer step (applied after step updates,
-            so it takes effect starting from the next step).
+            so it takes effect starting from the next step). After each increment,
+            `weight_decay` is clamped to `[0, 1]`.
         weight_decay_mode (`str`, *optional*, defaults to `"absolute"`):
             Weight decay mode: `"update_rms"` uses update RMS, `"param_rms"` uses parameter RMS,
             `"absolute"` uses decoupled factor `(1 - weight_decay * lr)`.
@@ -1420,8 +1421,10 @@ class Adafactor(torch.optim.Optimizer):
                     )
                 )
 
-            group["weight_decay"] = max(0,  group.get("weight_decay", 0.0) + group.get(
-                "weight_decay_increment", 0.0))
+            group["weight_decay"] = max(
+                0.0,
+                min(1.0, group.get("weight_decay", 0.0) + group.get("weight_decay_increment", 0.0)),
+            )
             self._finalize_group_step_metrics(group, metrics)
 
         return loss
