@@ -71,6 +71,8 @@ def test_get_lr_uses_saddle_point_boost_when_relative_step():
     ratio = max(opt.param_groups[0]["eps"][0], 0.0)
     expected_relative = (1 + 1e-6 * ratio) * 1.5
     assert lr == pytest.approx(base * expected_relative)
+    # lr is a base multiplier, not a cap: saddle boost can push effective LR above group lr
+    assert lr > opt.param_groups[0]["lr"]
 
 
 def test_get_lr_ignores_boost_when_not_relative_step():

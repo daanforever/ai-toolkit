@@ -27,7 +27,11 @@ class Adafactor(torch.optim.Optimizer):
         params (`Iterable[nn.parameter.Parameter]`):
             Iterable of parameters to optimize or dictionaries defining parameter groups.
         lr (`float`, *optional*, defaults to `1e-4`):
-            When `relative_step=True`, acts as maximum learning rate cap (upper bound). When `relative_step=False`, the manual learning rate.
+            Base learning rate (`base_lr`). Effective LR is ``base_lr * scale * relative``
+            (see `_get_lr`). Not an upper bound: with `relative_step=True`, `relative` can exceed 1
+            (e.g. saddle boost). If `lr=None`, `_get_lr` treats `base_lr` as `1.0` (footgun for the
+            raw API; toolkit `get_optimizer` always passes a float). Hard upper bound exists only when
+            `emergency_brake` is set: ``rms_max * 0.001`` (with zero-init fallback ``base_lr * 0.1``).
         eps (`Tuple[float, float]`, *optional*, defaults to `(1e-30, 0.001)`):
             Regularization constants for square gradient and parameter scale respectively
         clip_threshold (`float`, *optional*, defaults to 1.0):
@@ -68,7 +72,9 @@ class Adafactor(torch.optim.Optimizer):
             If True, learning rate is scaled by root mean square.
             Scaling is stronger when update magnitude is large (to protect small parameters).
         relative_step (`bool`, *optional*, defaults to `False`):
-            If True, time-dependent learning rate is computed instead of external learning rate
+            If True, apply this fork's adaptive relative LR factors (``min_lr * ratio``, optional
+            emergency brakes, saddle boost) on top of `base_lr * scale`. Not Hugging Face's
+            time/step-decay schedule.
         warmup_init (`bool`, *optional*, defaults to `False`):
             When True, the group learning rate `lr` is approached smoothly: one interpolation segment per change of
             `lr`, progress tracked once per group per step (see `_global_lr`). Works with both `relative_step=True` and
@@ -86,8 +92,10 @@ class Adafactor(torch.optim.Optimizer):
             If True, use factored second-moment (row/col) for all parameters. If False, use full second-moment.
             If None, auto-detect: use factored for parameters with 2+ dimensions (current default behavior).
         emergency_brake (`float | None`, *optional*, defaults to `None`):
-            When set, enables an adaptive "brake" on the internal relative LR and uses this value as the minimum
-            floor for both `brake` and `soft_brake`. `None` disables the mechanism.
+            When set, enables two layers: (1) instant/soft brake multipliers on relative LR — require
+            `relative_step=True` and `scale_parameter=True`, and use this value as the floor for
+            `brake` / `soft_brake`; (2) a hard LR cap ``rms_max * 0.001`` that applies whenever
+            `emergency_brake` is set (independent of those flags). `None` disables both.
 
     This implementation handles low-precision (FP16, bfloat) values, but we have not thoroughly tested.
 
@@ -107,22 +115,9 @@ class Adafactor(torch.optim.Optimizer):
     Adafactor(model.parameters(), scale_parameter=False, relative_step=False, warmup_init=False, lr=1e-3)
     ```
 
-    Others reported the following combination to work well:
-
-    ```python
-    Adafactor(model.parameters(), scale_parameter=True, relative_step=True, warmup_init=True, lr=None)
-    ```
-
-    When using `lr=None` with [`Trainer`] you will most likely need to use [`~optimization.AdafactorSchedule`]
-    scheduler as following:
-
-    ```python
-    from transformers.optimization import Adafactor, AdafactorSchedule
-
-    optimizer = Adafactor(model.parameters(), scale_parameter=True, relative_step=True, warmup_init=True, lr=None)
-    lr_scheduler = AdafactorSchedule(optimizer)
-    trainer = Trainer(..., optimizers=(optimizer, lr_scheduler))
-    ```
+    Note: Hugging Face docs sometimes show ``lr=None`` with ``AdafactorSchedule``. That combination is
+    **not** equivalent here: this fork has no HF time-based relative schedule, and ``lr=None`` becomes
+    ``base_lr=1.0`` in `_get_lr`. Prefer an explicit float ``lr``.
 
     Usage:
 
@@ -445,6 +440,42 @@ class Adafactor(torch.optim.Optimizer):
             return float(eps[0]), float(eps[1])
         return float(eps), float(fallback_eps1)
 
+    @staticmethod
+    def _ensure_second_moment_state(state, factored, param_shape, like):
+        """Create/reshape factored or full second-moment buffers; drop the opposite keys."""
+        if factored:
+            row_shape = param_shape[:-1]
+            col_shape = param_shape[:-2] + param_shape[-1:]
+            if (
+                "exp_avg_sq_row" not in state
+                or state["exp_avg_sq_row"].shape != row_shape
+            ):
+                state["exp_avg_sq_row"] = torch.zeros(
+                    row_shape, device=like.device, dtype=like.dtype
+                )
+            else:
+                state["exp_avg_sq_row"] = state["exp_avg_sq_row"].to(like)
+            if (
+                "exp_avg_sq_col" not in state
+                or state["exp_avg_sq_col"].shape != col_shape
+            ):
+                state["exp_avg_sq_col"] = torch.zeros(
+                    col_shape, device=like.device, dtype=like.dtype
+                )
+            else:
+                state["exp_avg_sq_col"] = state["exp_avg_sq_col"].to(like)
+            state.pop("exp_avg_sq", None)
+        else:
+            if (
+                "exp_avg_sq" not in state
+                or state["exp_avg_sq"].shape != like.shape
+            ):
+                state["exp_avg_sq"] = torch.zeros_like(like)
+            else:
+                state["exp_avg_sq"] = state["exp_avg_sq"].to(like)
+            state.pop("exp_avg_sq_row", None)
+            state.pop("exp_avg_sq_col", None)
+
     def _migrate_optimizer_state_buffers(self):
         """Add or reset momentum buffers after load when optimizer_params changed."""
         for group in self.param_groups:
@@ -455,8 +486,6 @@ class Adafactor(torch.optim.Optimizer):
 
                 factored, use_first_moment = self._get_options(group, p.shape)
                 ref = p.data if p.dtype == torch.float32 else p.data.float()
-                device = ref.device
-                dtype = ref.dtype
 
                 if use_first_moment:
                     if (
@@ -467,32 +496,7 @@ class Adafactor(torch.optim.Optimizer):
                 else:
                     state.pop("exp_avg", None)
 
-                if factored:
-                    row_shape = p.shape[:-1]
-                    col_shape = p.shape[:-2] + p.shape[-1:]
-                    if (
-                        "exp_avg_sq_row" not in state
-                        or state["exp_avg_sq_row"].shape != row_shape
-                    ):
-                        state["exp_avg_sq_row"] = torch.zeros(
-                            row_shape, device=device, dtype=dtype
-                        )
-                    if (
-                        "exp_avg_sq_col" not in state
-                        or state["exp_avg_sq_col"].shape != col_shape
-                    ):
-                        state["exp_avg_sq_col"] = torch.zeros(
-                            col_shape, device=device, dtype=dtype
-                        )
-                    state.pop("exp_avg_sq", None)
-                else:
-                    if (
-                        "exp_avg_sq" not in state
-                        or state["exp_avg_sq"].shape != ref.shape
-                    ):
-                        state["exp_avg_sq"] = torch.zeros_like(ref)
-                    state.pop("exp_avg_sq_row", None)
-                    state.pop("exp_avg_sq_col", None)
+                self._ensure_second_moment_state(state, factored, p.shape, ref)
 
     def enable_parameter_swapping(self, parameter_swapping_factor=0.1):
         self.do_parameter_swapping = True
@@ -651,7 +655,8 @@ class Adafactor(torch.optim.Optimizer):
           If scale_parameter=True, multiplies by max(eps1, param_rms).
 
         Adaptive mode (relative_step=True):
-          Same group-lr handling; additional relative LR factors from gradients and group statistics.
+          Same group-lr handling; additional relative LR factors from parameter RMS ratio,
+          optional emergency brakes, and saddle boost (not a HF time-based schedule).
 
         Returns:
             float: learning rate for this parameter
@@ -690,10 +695,7 @@ class Adafactor(torch.optim.Optimizer):
             scale = max(eps1, param_rms)
 
         if param_group["relative_step"]:
-            # Adaptive LR mode: compute LR from gradient and parameter statistics
-            grad_rms      = param_state["grad_rms"].item()        # Current gradient RMS
-            if not math.isfinite(grad_rms):
-                grad_rms = eps0
+            # Adaptive LR mode: relative factors from param RMS ratio / brakes / saddle
             # Running max of parameter RMS over the group (decayed each step, then max with each p).
             group_param_rms_max = param_group.get("rms_max", torch.tensor(eps1)).item()
             if not math.isfinite(group_param_rms_max):
@@ -1185,8 +1187,12 @@ class Adafactor(torch.optim.Optimizer):
                 group, "dir_consistency", default=0.0, reduction="mean"
             )
 
-            # Soft Brake: accumulate instability score when emergency_brake is enabled
-            if group.get("emergency_brake", None) is not None:
+            # Soft Brake: accumulate only when soft brakes can affect LR
+            if (
+                group.get("emergency_brake", None) is not None
+                and group.get("scale_parameter")
+                and group.get("relative_step")
+            ):
                 dc_mean = prev_dir_consistency
                 score = group.get("instability_score") or 0.0
 
@@ -1253,13 +1259,9 @@ class Adafactor(torch.optim.Optimizer):
                         else:
                             state["exp_avg"] = state["exp_avg"].to(grad)
 
-                    if factored:
-                        state["exp_avg_sq_row"] = state["exp_avg_sq_row"].to(
-                            grad)
-                        state["exp_avg_sq_col"] = state["exp_avg_sq_col"].to(
-                            grad)
-                    else:
-                        state["exp_avg_sq"] = state["exp_avg_sq"].to(grad)
+                    self._ensure_second_moment_state(
+                        state, factored, grad_shape, grad
+                    )
 
                 state["step"] += 1
 
