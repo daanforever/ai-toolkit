@@ -71,7 +71,8 @@ class Adafactor(torch.optim.Optimizer):
             `weight_decay` is clamped to `[0, 1]`.
         weight_decay_mode (`str`, *optional*, defaults to `"absolute"`):
             Weight decay mode: `"update_rms"` uses update RMS, `"param_rms"` uses parameter RMS,
-            `"absolute"` uses decoupled factor `(1 - weight_decay * lr)`.
+            `"absolute"` uses decoupled factor `(1 - weight_decay * lr)`,
+            `"constant"` uses factor `(1 - weight_decay)` (no `lr`).
             Note: `"update_rms"` and `"param_rms"` intentionally do not multiply by `lr` because
             they are designed as RMS-conditioned shrinkage modes with their own scale semantics.
         scale_parameter (`bool`, *optional*, defaults to `False`):
@@ -170,7 +171,7 @@ class Adafactor(torch.optim.Optimizer):
     ```
     """
 
-    _WEIGHT_DECAY_MODES = ("update_rms", "param_rms", "absolute")
+    _WEIGHT_DECAY_MODES = ("update_rms", "param_rms", "absolute", "constant")
 
     def __init__(
         self,
@@ -1428,6 +1429,9 @@ class Adafactor(torch.optim.Optimizer):
                         # Intentionally no `lr` here: this mode is RMS-conditioned shrinkage by design.
                         # For param_rms mode under the same defaults and RMS~1, (1 - wd * rms) ~= 0.9999 (>0).
                         effective_wd = self._clamp_effective_wd(wd * rms_t)
+                        p_data_fp32.mul_(1.0 - effective_wd)
+                    elif weight_decay_mode == "constant":
+                        effective_wd = self._clamp_effective_wd(wd)
                         p_data_fp32.mul_(1.0 - effective_wd)
                     else:
                         effective_wd = self._clamp_effective_wd(wd * lr)

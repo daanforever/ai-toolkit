@@ -280,6 +280,17 @@ def test_scale_wd_by_index_param_rms():
     assert all(g["weight_decay"] == pytest.approx(0.1) for g in opt.param_groups)
 
 
+def test_scale_wd_by_index_constant():
+    opt = _make_indexed_wd_opt("constant", lr=0.2, wd=0.1)
+    _zero_grad_step(opt)
+    effective = opt.get_effective_wd()
+    # wd' = wd + (1-wd)/(max_index+1)*index; no * lr
+    assert effective[0] == pytest.approx(0.1)
+    assert effective[1] == pytest.approx(0.4)
+    assert effective[2] == pytest.approx(0.7)
+    assert all(g["weight_decay"] == pytest.approx(0.1) for g in opt.param_groups)
+
+
 def test_scale_wd_by_index_absolute():
     lr = 0.2
     wd = 0.1

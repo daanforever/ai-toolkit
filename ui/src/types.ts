@@ -114,7 +114,7 @@ export interface EMAConfig {
   ema_decay: number;
 }
 
-export type WeightDecayMode = 'update_rms' | 'param_rms' | 'absolute';
+export type WeightDecayMode = 'update_rms' | 'param_rms' | 'absolute' | 'constant';
 
 export interface TrainConfig {
   batch_size: number;
