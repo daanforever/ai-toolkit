@@ -47,9 +47,19 @@ from transformers import (
 )
 from toolkit.models.size_agnostic_feature_encoder import SAFEImageProcessor, SAFEVisionModel
 
-from transformers import ViTHybridImageProcessor, ViTHybridForImageClassification
+try:
+    from transformers import ViTHybridImageProcessor, ViTHybridForImageClassification
+except ImportError:
+    try:
+        from transformers.models.deprecated.vit_hybrid import (
+            ViTHybridImageProcessor,
+            ViTHybridForImageClassification,
+        )
+    except ImportError:
+        ViTHybridImageProcessor = None
+        ViTHybridForImageClassification = None
 
-from transformers import ViTFeatureExtractor, ViTForImageClassification
+from transformers import ViTImageProcessor, ViTForImageClassification
 
 from toolkit.models.llm_adapter import LLMAdapter
 
@@ -374,9 +384,9 @@ class CustomAdapter(torch.nn.Module):
             ).to(self.device, dtype=get_torch_dtype(self.sd_ref().dtype))
         elif self.config.image_encoder_arch == 'vit':
             try:
-                self.image_processor = ViTFeatureExtractor.from_pretrained(adapter_config.image_encoder_path)
+                self.image_processor = ViTImageProcessor.from_pretrained(adapter_config.image_encoder_path)
             except EnvironmentError:
-                self.image_processor = ViTFeatureExtractor()
+                self.image_processor = ViTImageProcessor()
             self.vision_encoder = ViTForImageClassification.from_pretrained(adapter_config.image_encoder_path).to(
                 self.device, dtype=get_torch_dtype(self.sd_ref().dtype))
         elif self.config.image_encoder_arch == 'safe':
@@ -407,6 +417,11 @@ class CustomAdapter(torch.nn.Module):
                 use_safetensors=True,
             ).to(self.device, dtype=get_torch_dtype(self.sd_ref().dtype))
         elif self.config.image_encoder_arch == 'vit-hybrid':
+            if ViTHybridImageProcessor is None or ViTHybridForImageClassification is None:
+                raise ImportError(
+                    "vit-hybrid is not available in this transformers version "
+                    f"({__import__('transformers').__version__})"
+                )
             try:
                 self.image_processor = ViTHybridImageProcessor.from_pretrained(adapter_config.image_encoder_path)
             except EnvironmentError:
