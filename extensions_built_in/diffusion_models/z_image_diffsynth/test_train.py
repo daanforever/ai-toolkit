@@ -375,7 +375,7 @@ def _build_model(device: torch.device, phase: str = "unknown"):
             "use_diffsynth_training_loop": False,
             "disable_noise_refiner": False,
             "disable_context_refiner": False,
-            "sampling_loader": "diffusers",
+            "loader": "diffusers",
         },
     }
     if sampling_path:
@@ -702,7 +702,7 @@ def _train_lora(
                             "use_diffsynth_training_loop": False,
                             "disable_noise_refiner": False,
                             "disable_context_refiner": False,
-                            "sampling_loader": "diffusers",
+                            "loader": "diffusers",
                         },
                         "layer_offloading": False,
                         "layer_offloading_text_encoder_percent": 1,

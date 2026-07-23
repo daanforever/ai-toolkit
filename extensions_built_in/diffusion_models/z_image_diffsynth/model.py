@@ -116,8 +116,10 @@ class ZImageDiffSynthModel(BaseModel):
             device, model_config, dtype, custom_pipeline, noise_scheduler, **kwargs
         )
         self._raw_dit = None
+        self._main_is_diffusers = False
         self._sampling_transformer = None
         self._sampling_network = None
+        self._sampling_is_diffusers = False
         # When True, we are inside our generate_images(); device moves are done
         # once there (main→CPU, sampling→GPU before loop; restore in finally).
         self._sampling_in_batch_generate = False
@@ -258,7 +260,7 @@ class ZImageDiffSynthModel(BaseModel):
 
         with memory_debug(self.print_and_status_update, "Load components"):
             model_kwargs = getattr(self.model_config, "model_kwargs", None) or {}
-            sampling_loader_mode = model_kwargs.get("sampling_loader", "auto")
+            loader_mode = model_kwargs.get("loader", "auto")
             components = loader_mod.load_components(
                 model_path,
                 base_path,
@@ -270,26 +272,29 @@ class ZImageDiffSynthModel(BaseModel):
                 sampling_transformer_path=sampling_path,
                 quantize_transformer=getattr(self.model_config, "quantize", False),
                 base_model=self,
-                sampling_loader_mode=sampling_loader_mode,
+                loader_mode=loader_mode,
             )
 
         # Optionally disable refiner stacks via model.model_kwargs to reduce VRAM
         # (noise_refiner ~10 GB, context_refiner ~4 GB). Replace with empty ModuleList
         # so code that iterates over them (e.g. model_fn_z_image_turbo) still runs.
+        # Only applies to DiffSynth DiT (not Diffusers ZImageTransformer2DModel).
         kwargs = getattr(self.model_config, "model_kwargs", None) or {}
         self._disable_noise_refiner = kwargs.get("disable_noise_refiner", True)
         self._disable_context_refiner = kwargs.get("disable_context_refiner", True)
         self._raw_dit = components["dit"]
-        for _ref_name, _do_disable in (
-            ("noise_refiner", self._disable_noise_refiner),
-            ("context_refiner", self._disable_context_refiner),
-        ):
-            if _do_disable and hasattr(self._raw_dit, _ref_name):
-                try:
-                    setattr(self._raw_dit, _ref_name, torch.nn.ModuleList([]))
-                    self.print_and_status_update(f"Disabled DiT module: {_ref_name}")
-                except Exception:
-                    pass
+        self._main_is_diffusers = components.get("dit_is_diffusers", False)
+        if not self._main_is_diffusers:
+            for _ref_name, _do_disable in (
+                ("noise_refiner", self._disable_noise_refiner),
+                ("context_refiner", self._disable_context_refiner),
+            ):
+                if _do_disable and hasattr(self._raw_dit, _ref_name):
+                    try:
+                        setattr(self._raw_dit, _ref_name, torch.nn.ModuleList([]))
+                        self.print_and_status_update(f"Disabled DiT module: {_ref_name}")
+                    except Exception:
+                        pass
         self.model = _DiTUnetWrapper(self._raw_dit)
         self.vae = components["vae_wrapper"]
         # For zimage_diffsynth VAE is needed on GPU during both training and sampling.
@@ -303,7 +308,7 @@ class ZImageDiffSynthModel(BaseModel):
         self.tokenizer = [components["tokenizer"]]
         self._sampling_is_diffusers = components.get("sampling_is_diffusers", False)
         sampling_dit = components.get("sampling_dit")
-        if sampling_dit is not None:
+        if sampling_dit is not None and not self._sampling_is_diffusers:
             # Apply same refiner disabling as main DiT so structure and LoRA names match.
             for _ref_name, _do_disable in (
                 ("noise_refiner", self._disable_noise_refiner),
@@ -374,7 +379,7 @@ class ZImageDiffSynthModel(BaseModel):
             # If for some reason .to(...) is not supported on the inner DiT,
             # fall back to its current placement and let the error surface.
             pass
-        # Z-Image DiffSynth DiT is trained on latent-space tensors with a fixed
+        # Z-Image DiT is trained on latent-space tensors with a fixed
         # channel count (e.g. 16). If we accidentally receive 3‑channel BCHW
         # tensors here (RGB-like), they will eventually hit dit.all_x_embedder
         # with the wrong input dimension and cause an opaque Quanto matmul error.
@@ -396,21 +401,60 @@ class ZImageDiffSynthModel(BaseModel):
                         "regenerate latents using the current zimage_diffsynth model."
                     )
 
-        use_gradient_checkpointing = getattr(
-            self, "gradient_checkpointing", False
-        )
         text_embeds = text_embeddings.text_embeds
         attention_mask = text_embeddings.attention_mask
         if isinstance(text_embeds, torch.Tensor) and len(text_embeds.shape) == 3:
             if attention_mask is not None:
-                text_embeds = [text_embeds[i][attention_mask[i].bool()] for i in range(text_embeds.shape[0])]
+                text_embeds = [
+                    text_embeds[i][attention_mask[i].bool()]
+                    for i in range(text_embeds.shape[0])
+                ]
             else:
                 text_embeds = [text_embeds[i] for i in range(text_embeds.shape[0])]
+        elif isinstance(text_embeds, list) and text_embeds and len(text_embeds[0].shape) == 3:
+            new_text_embeds = []
+            for i, t in enumerate(text_embeds):
+                if t is None:
+                    continue
+                if attention_mask is not None:
+                    if isinstance(attention_mask, (list, tuple)):
+                        mask = attention_mask[i]
+                    else:
+                        mask = (
+                            attention_mask[i]
+                            if attention_mask.dim() == 3
+                            else attention_mask
+                        )
+                    if isinstance(mask, torch.Tensor) and mask.dim() == 2:
+                        new_text_embeds += [
+                            t[j][mask[j].bool()] for j in range(t.shape[0])
+                        ]
+                    elif isinstance(mask, torch.Tensor):
+                        new_text_embeds += [
+                            t[j][mask.bool()] for j in range(t.shape[0])
+                        ]
+                    else:
+                        new_text_embeds += [t[j][mask] for j in range(t.shape[0])]
+                else:
+                    new_text_embeds += list(t.unbind(dim=0))
+            text_embeds = new_text_embeds
+
+        # Diffusers ZImageTransformer2DModel: official DreamBooth / z_image convention.
+        if getattr(self, "_main_is_diffusers", False):
+            latent_list = list(latent_model_input.unsqueeze(2).unbind(dim=0))
+            timestep_model_input = (1000 - timestep) / 1000
+            model_out_list = self._raw_dit(
+                latent_list,
+                timestep_model_input,
+                text_embeds,
+                return_dict=False,
+            )[0]
+            noise_pred = torch.stack([t.float() for t in model_out_list], dim=0)
+            return -noise_pred.squeeze(2)
+
+        use_gradient_checkpointing = getattr(self, "gradient_checkpointing", False)
         train_dtype = getattr(self, "train_torch_dtype", None) or self.torch_dtype
         # Pass raw DiT to DiffSynth model_fn (expects real DiT with t_embedder, etc.).
-        # When debug logging is enabled, wrap the forward call in a memory_debug
-        # context so that VRAM usage can be compared with the baseline z_image
-        # implementation without affecting behaviour otherwise.
         noise_pred = forward_mod.run_forward(
             self._raw_dit,
             latent_model_input,
@@ -629,15 +673,21 @@ class ZImageDiffSynthModel(BaseModel):
         return False
 
     def save_model(self, output_path, meta, save_dtype):
-        import torch
         dit = unwrap_model(self.model)
-        if hasattr(dit, "dit"):
+        if hasattr(dit, "_inner_dit"):
+            dit = dit._inner_dit
+        elif hasattr(dit, "dit"):
             dit = dit.dit
         save_dir = os.path.join(output_path, "transformer")
         os.makedirs(save_dir, exist_ok=True)
-        from safetensors.torch import save_file
-        state = dit.state_dict()
-        save_file(state, os.path.join(save_dir, "model.safetensors"))
+        if getattr(self, "_main_is_diffusers", False) and hasattr(
+            dit, "save_pretrained"
+        ):
+            dit.save_pretrained(save_directory=save_dir, safe_serialization=True)
+        else:
+            from safetensors.torch import save_file
+
+            save_file(dit.state_dict(), os.path.join(save_dir, "model.safetensors"))
         meta_path = os.path.join(output_path, "aitk_meta.yaml")
         with open(meta_path, "w") as f:
             yaml.dump(meta, f)
@@ -668,7 +718,11 @@ class ZImageDiffSynthModel(BaseModel):
             for k in totals:
                 totals[k] += stats.get(k, 0)
 
-        if self._raw_dit is not None and names:
+        if (
+            self._raw_dit is not None
+            and names
+            and not getattr(self, "_main_is_diffusers", False)
+        ):
             log("[zimage_diffsynth] Compiling main DiT blocks (torch.compile dynamic=True)")
             _accumulate(compile_dit_module_lists(self._raw_dit, names, log_fn=log))
 

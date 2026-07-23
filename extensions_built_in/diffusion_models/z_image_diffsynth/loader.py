@@ -93,6 +93,57 @@ def load_dit_from_folder(
     return model
 
 
+def _normalize_loader_mode(loader_mode: Optional[str], log) -> str:
+    mode = (loader_mode or "auto").lower()
+    if mode not in ("auto", "diffusers", "diffsynth"):
+        log(f"Unknown loader_mode='{loader_mode}', falling back to 'auto'")
+        return "auto"
+    return mode
+
+
+def _load_transformer_by_mode(
+    transformer_folder: str,
+    dtype: torch.dtype,
+    device: torch.device,
+    mode: str,
+    log,
+    label: str,
+) -> Tuple[Any, bool]:
+    """
+    Load a Z-Image transformer as Diffusers ZImageTransformer2DModel or DiffSynth ZImageDiT.
+    mode: \"auto\" | \"diffusers\" | \"diffsynth\".
+    Returns (module, is_diffusers).
+    """
+    dit = None
+    is_diffusers = False
+
+    if mode in ("auto", "diffusers"):
+        try:
+            from extensions_built_in.diffusion_models.z_image.loading import (
+                load_zimage_transformer_from_shards,
+            )
+            log(f"Loading {label} (diffusers ZImage format)")
+            dit = load_zimage_transformer_from_shards(
+                transformer_folder,
+                subfolder=None,
+                torch_dtype=dtype,
+                device=device,
+            )
+            is_diffusers = True
+        except (ValueError, FileNotFoundError, OSError, RuntimeError) as e:
+            if mode == "diffusers":
+                raise RuntimeError(
+                    f"Failed to load {label} in 'diffusers' mode from '{transformer_folder}': {e}"
+                ) from e
+            # auto: fall back to DiffSynth DiT below.
+
+    if dit is None and mode in ("auto", "diffsynth"):
+        log(f"Loading {label} (DiffSynth DiT)")
+        dit = load_dit_from_folder(transformer_folder, dtype, device)
+
+    return dit, is_diffusers
+
+
 def load_components(
     model_path: str,
     base_model_path: Optional[str],
@@ -105,12 +156,14 @@ def load_components(
     sampling_transformer_path: Optional[str] = None,
     quantize_transformer: bool = False,
     base_model: Optional[Any] = None,
-    sampling_loader_mode: str = "auto",
+    loader_mode: str = "auto",
 ) -> dict:
     """
     Load tokenizer, text_encoder, vae, dit (and optionally sampling dit) from paths.
     Paths resolved like z_image: model_path, base_model_path (extras_name_or_path), transformer in model_path/transformer.
-    Returns dict with: tokenizer, text_encoder, vae, vae_encoder, vae_decoder, dit, sampling_dit (optional).
+    loader_mode (\"auto\"|\"diffusers\"|\"diffsynth\") applies to both main and sampling transformers.
+    Returns dict with: tokenizer, text_encoder, vae, vae_encoder, vae_decoder, dit,
+    dit_is_diffusers, sampling_dit (optional), sampling_is_diffusers.
     """
     _ensure_diffsynth_path()
     model_path = normalize_path(model_path)
@@ -123,17 +176,11 @@ def load_components(
         if log_fn:
             log_fn(msg)
 
+    mode = _normalize_loader_mode(loader_mode, log)
+
     # 1) Sampling transformer first when configured (VRAM control)
-    # When sampling_name_or_path points to the same diffusers-style checkpoint as z_image uses,
-    # we can load it as ZImageTransformer2DModel and run it with ZImagePipeline (same as z_image),
-    # or fall back to DiffSynth ZImageDiT and model_fn_z_image_turbo. The behaviour is controlled
-    # by sampling_loader_mode: \"auto\" (default), \"diffusers\", or \"diffsynth\".
     sampling_dit = None
     sampling_is_diffusers = False
-    mode = (sampling_loader_mode or "auto").lower()
-    if mode not in ("auto", "diffusers", "diffsynth"):
-        log(f"Unknown sampling_loader_mode='{sampling_loader_mode}', falling back to 'auto'")
-        mode = "auto"
 
     if sampling_transformer_path:
         sampling_transformer_path = normalize_path(sampling_transformer_path)
@@ -141,33 +188,9 @@ def load_components(
         if not os.path.isdir(sp_transformer_folder):
             sp_transformer_folder = sampling_transformer_path
 
-        # diffusers path (ZImageTransformer2DModel) when allowed by mode
-        if mode in ("auto", "diffusers"):
-            try:
-                from extensions_built_in.diffusion_models.z_image.loading import (
-                    load_zimage_transformer_from_shards,
-                )
-                log("Loading sampling transformer (diffusers ZImage format)")
-                sampling_dit = load_zimage_transformer_from_shards(
-                    sp_transformer_folder,
-                    subfolder=None,
-                    torch_dtype=dtype,
-                    device=device,
-                )
-                sampling_is_diffusers = True
-            except (ValueError, FileNotFoundError, OSError, RuntimeError) as e:
-                if mode == "diffusers":
-                    # Explicit diffusers-only mode: surface a clear error instead of
-                    # silently falling back to DiffSynth.
-                    raise RuntimeError(
-                        f"Failed to load sampling transformer in 'diffusers' mode from '{sp_transformer_folder}': {e}"
-                    ) from e
-                # auto mode: fall back to DiffSynth DiT below.
-
-        # DiffSynth DiT path when requested explicitly or diffusers failed / was skipped
-        if sampling_dit is None and mode in ("auto", "diffsynth"):
-            log("Loading sampling transformer (DiT)")
-            sampling_dit = load_dit_from_folder(sp_transformer_folder, dtype, device)
+        sampling_dit, sampling_is_diffusers = _load_transformer_by_mode(
+            sp_transformer_folder, dtype, device, mode, log, "sampling transformer"
+        )
 
         if quantize_transformer and base_model is not None:
             log("Quantizing sampling transformer")
@@ -188,12 +211,13 @@ def load_components(
         sampling_dit.to("cpu")
         flush()
 
-    # 2) Main DiT
+    # 2) Main transformer (Diffusers or DiffSynth per loader_mode)
     transformer_folder = os.path.join(model_path, "transformer")
     if not os.path.isdir(transformer_folder):
         transformer_folder = model_path
-    log("Loading transformer (DiT)")
-    dit = load_dit_from_folder(transformer_folder, dtype, device)
+    dit, dit_is_diffusers = _load_transformer_by_mode(
+        transformer_folder, dtype, device, mode, log, "transformer"
+    )
     if quantize_transformer and base_model is not None:
         log("Quantizing transformer")
         if is_debug_enabled():
@@ -247,6 +271,7 @@ def load_components(
         "vae_decoder": vae,
         "vae_wrapper": vae_wrapper,
         "dit": dit,
+        "dit_is_diffusers": dit_is_diffusers,
         "sampling_dit": sampling_dit,
         "sampling_is_diffusers": sampling_is_diffusers,
     }

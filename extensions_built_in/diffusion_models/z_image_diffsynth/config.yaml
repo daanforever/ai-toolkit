@@ -89,7 +89,7 @@ config:
         arch: "zimage_diffsynth"
         low_vram: false
         model_kwargs:
-          sampling_loader: "diffsynth"
+          loader: "diffsynth"
           use_dynamic_shifting: true
           use_diffsynth_training_loop: false
           disable_noise_refiner: false

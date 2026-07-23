@@ -9,12 +9,20 @@
   - `false`: toolkit chat template (`encode_prompt`).
   - Example: `use_diffsynth_training_loop: false` with `use_diffsynth_prompt_encoding: true` keeps toolkit loss / SNR / scheduler but DiffSynth literal prompts.
 
+## `model.model_kwargs.loader`
+
+- **`loader`**: `auto` (default) | `diffusers` | `diffsynth`. Applies to **both** the main train transformer and the optional sampling transformer.
+  - `auto`: try Diffusers `ZImageTransformer2DModel` (shard loader); on failure fall back to DiffSynth `ZImageDiT`.
+  - `diffusers`: Diffusers only; raise on failure.
+  - `diffsynth`: DiffSynth `ZImageDiT` only.
+- Diffusers main uses the official train forward (`list` of CFHW latents, `t=(1000-t)/1000`, negate pred). DiffSynth main keeps `model_fn_z_image_turbo`.
+
 ## `model.compile` (per-block DiT `torch.compile`)
 
 - Set **`model.compile: true`** to JIT-compile DiffSynth DiT blocks with `torch.compile(..., dynamic=True)` (Z-Image paper §4.2 style).
 - Order: **quantize → LoRA → compile** (compile runs in `hook_before_train_loop` after the main DiT is on GPU). Gradient checkpointing stays **outside** each compiled block.
 - Works with the usual **`quantize: true`** (quanto float8) path.
-- Diffusers sampling transformer (`sampling_loader: diffusers` / `_sampling_is_diffusers`) is **not** compiled by this path; only DiffSynth `ZImageDiT` ModuleLists (`layers`, optional refiners).
+- Diffusers transformers (`loader: diffusers` / `_main_is_diffusers` / `_sampling_is_diffusers`) are **not** compiled by this path; only DiffSynth `ZImageDiT` ModuleLists (`layers`, optional refiners).
 - Device moves (sample / offload): **same-device is a no-op** (keeps compiled blocks); real moves **unwrap → Parameter/buffer replace (not `Module.to`) → recompile on GPU** so quanto + compile do not hit `Couldn't swap ... weight` / weakref errors.
 - On Windows or when inductor/Triton is unavailable, failures are soft: training continues in eager mode.
 - Expect slower first steps while JIT warms up.
