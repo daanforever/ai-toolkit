@@ -121,13 +121,12 @@ class Adafactor(torch.optim.Optimizer):
             Amount added to / subtracted from global `_saddle_point_boost` (floor `1.0`, no hard cap).
             Boost multiplies `relative` only when `relative_step=True`.
         scale_lr_by_index (`bool`, *optional*, defaults to `False`):
-            If True, scales `base_lr` in `_get_lr` by group `index` vs resolved `_max_index`
-            (requires at least one group with `index`, and `max_index > 0`). Also adjusts effective
-            weight decay when WD applies: ``wd + (1 - wd) / (max_index + 1) * index``.
+            If True, scales `base_lr` and effective weight decay by group `index` vs
+            resolved `_max_index` (requires at least one group with `index`, and
+            `max_index > 0`): lower-index groups get higher LR and lower WD.
             Independent of `relative_step`.
         scale_lr_factor (`float`, *optional*, defaults to `1.0`):
-            Exponent in
-            ``base_lr * ((max_index - index) / max_index) ** scale_lr_factor + eps[0]``.
+            Strength of index-based LR/WD scaling when `scale_lr_by_index=True`.
             Must be ``> 0``.
 
     This implementation handles low-precision (FP16, bfloat) values, but we have not thoroughly tested.
@@ -1415,7 +1414,7 @@ class Adafactor(torch.optim.Optimizer):
                     wd = group["weight_decay"]
                     if self.scale_lr_by_index and "index" in group:
                         idx = int(group["index"])
-                        wd = wd + (1.0 - wd) / (self._max_index + 1) * idx
+                        wd = wd + (1.0 - wd) / (self._max_index ** self.scale_lr_factor) * idx
                     weight_decay_mode = self._validate_weight_decay_mode(
                         group.get("weight_decay_mode", "absolute")
                     )
