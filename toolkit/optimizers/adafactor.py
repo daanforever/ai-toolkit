@@ -10,7 +10,6 @@ from toolkit.lora_utils.stagnation_detector import StagnationDetector
 
 
 class Adafactor(torch.optim.Optimizer):
-    _WEIGHT_DECAY_MODES = ("update_rms", "param_rms", "absolute")
     """
     Adafactor implementation with stochastic rounding accumulation and stochastic rounding on apply.
     Modified from transformers Adafactor implementation to support stochastic rounding accumulation and apply.
@@ -32,16 +31,27 @@ class Adafactor(torch.optim.Optimizer):
             (e.g. saddle boost). If `lr=None`, `_get_lr` treats `base_lr` as `1.0` (footgun for the
             raw API; toolkit `get_optimizer` always passes a float). Hard upper bound exists only when
             `emergency_brake` is set: ``rms_max * 0.001`` (with zero-init fallback ``base_lr * 0.1``).
-        eps (`Tuple[float, float]`, *optional*, defaults to `(1e-30, 0.001)`):
+        eps (`Tuple[float, float]`, *optional*, defaults to `(1e-30, 1e-3)`):
             Regularization constants for square gradient and parameter scale respectively
         clip_threshold (`float`, *optional*, defaults to 1.0):
             Threshold of root mean square of final gradient update
         decay_rate (`float`, *optional*, defaults to -0.8):
-            Deprecated. Previously used to compute beta2 as `1.0 + decay_rate`.
-            Now beta2 is specified directly. Kept for backward compatibility.
+            Deprecated. Accepted for signature compatibility but ignored (not stored in defaults,
+            never read). Previously used to compute beta2 as `1.0 + decay_rate`. Use `beta2` instead.
+        beta1 (`float`, *optional*, defaults to `None`):
+            Coefficient used for computing running averages of gradient
+            (first moment, like in Adam). If not None, enables momentum.
+            Suggested values when enabled: 0.9, 0.95 or 0.99 for smoother updates.
         beta2 (`float`, *optional*, defaults to 0.99):
             Coefficient used to compute running averages of square
             (second moment, like in Adam). Suggested values: 0.99 (default), 0.999.
+        beta2_adaptive (`bool`, *optional*, defaults to `False`):
+            If False, use fixed `group["beta2"]`. If True, `_effective_beta2` applies a step
+            schedule then blends with activity ``grad_rms / (grad_rms_max + eps0)`` toward that
+            beta2, floored by `beta2_min`.
+        beta2_min (`float`, *optional*, defaults to `0.9`):
+            Lower bound for adaptive beta2 mixing:
+            ``beta2_min + (beta2 - beta2_min) * activity``, clamped into ``[0, beta2]``.
         rms_max_decay_rate (`float`, *optional*, defaults to `0.97`):
             Decay rate for running max of update RMS used in activity normalization.
             Applied each step: ``update_rms_max = max(update_rms_max * rms_max_decay_rate, update_rms)``.
@@ -53,10 +63,6 @@ class Adafactor(torch.optim.Optimizer):
             (``rms_ema``, ``update_rms``, ``lr_mean``, ``gns``, ``step_efficiency``, ``dynamic_gain``,
             ``effective_lr``, ``effective_wd``, ``precond_gain``, ``momentum_gain``, ``beta2``, etc.)
             live on ``param_groups`` rather than in per-parameter ``state``.
-        beta1 (`float`, *optional*):
-            Coefficient used for computing running averages of gradient
-            (first moment, like in Adam). If not None, enables momentum.
-            Suggested values: 0.9 (default), 0.95 or 0.99 for smoother updates.
         weight_decay (`float`, *optional*, defaults to 0.0):
             Weight decay (L2 penalty)
         weight_decay_increment (`float`, *optional*, defaults to 0.0):
@@ -69,8 +75,8 @@ class Adafactor(torch.optim.Optimizer):
             Note: `"update_rms"` and `"param_rms"` intentionally do not multiply by `lr` because
             they are designed as RMS-conditioned shrinkage modes with their own scale semantics.
         scale_parameter (`bool`, *optional*, defaults to `False`):
-            If True, learning rate is scaled by root mean square.
-            Scaling is stronger when update magnitude is large (to protect small parameters).
+            If True, learning rate is scaled by parameter RMS
+            (``scale = max(eps1, param_rms)`` in `_get_lr`).
         relative_step (`bool`, *optional*, defaults to `False`):
             If True, apply this fork's adaptive relative LR factors (``min_lr * ratio``, optional
             emergency brakes, saddle boost) on top of `base_lr * scale`. Not Hugging Face's
@@ -82,12 +88,23 @@ class Adafactor(torch.optim.Optimizer):
             starts from the current interpolated level toward the new `lr` (up or down). When any param group
             completes its segment (reaches target `lr`), warmup is stopped for all groups. Runtime toggling of
             `warmup_init` is not supported.
-        warmup_steps (`int`, *optional*, defaults to `100`):
-            When `warmup_init=True`, number of optimizer steps to interpolate each warmup segment from its start
-            toward `lr`. Progress is advanced once per group per `step()` (see `_warmup_update_group`).
         min_lr (`float`, *optional*, defaults to `1e-6`):
             Term in the relative-step learning-rate factor when `relative_step=True`: ``relative`` includes
             ``(1 + min_lr * ratio)`` (see `_get_lr`).
+        warmup_steps (`int`, *optional*, defaults to `100`):
+            When `warmup_init=True`, number of optimizer steps to interpolate each warmup segment from its start
+            toward `lr`. Progress is advanced once per group per `step()` (see `_warmup_update_group`).
+        do_parameter_swapping (`bool`, *optional*, defaults to `False`):
+            If True, at init calls `enable_parameter_swapping`, which deactivates all params then
+            re-enables a random subset. Not automatic every `step()`; further reshuffles only via
+            `swap_parameters()` / `enable_parameter_swapping()`.
+        parameter_swapping_factor (`float`, *optional*, defaults to `0.1`):
+            Fraction of total `numel` kept `requires_grad=True` after a swap.
+        stochastic_accumulation (`bool`, *optional*, defaults to `True`):
+            If True, register post-accumulate grad hooks on non-fp32 trainable params
+            (stochastic grad accumulation).
+        stochastic_rounding (`bool`, *optional*, defaults to `True`):
+            If True, write updates via `copy_stochastic`; else `update_parameter`.
         factored (`bool | None`, *optional*, defaults to `None`):
             If True, use factored second-moment (row/col) for all parameters. If False, use full second-moment.
             If None, auto-detect: use factored for parameters with 2+ dimensions (current default behavior).
@@ -96,6 +113,22 @@ class Adafactor(torch.optim.Optimizer):
             `relative_step=True` and `scale_parameter=True`, and use this value as the floor for
             `brake` / `soft_brake`; (2) a hard LR cap ``rms_max * 0.001`` that applies whenever
             `emergency_brake` is set (independent of those flags). `None` disables both.
+        saddle_point_window (`int`, *optional*, defaults to `100`):
+            Window size for `StagnationDetector` on parameter RMS.
+        saddle_point_threshold (`float`, *optional*, defaults to `0.001`):
+            Max coefficient of variation below which RMS is treated as stagnant.
+        saddle_point_step (`float`, *optional*, defaults to `0.01`):
+            Amount added to / subtracted from global `_saddle_point_boost` (floor `1.0`, no hard cap).
+            Boost multiplies `relative` only when `relative_step=True`.
+        scale_lr_by_index (`bool`, *optional*, defaults to `False`):
+            If True, scales `base_lr` in `_get_lr` by group `index` vs resolved `_max_index`
+            (requires at least one group with `index`, and `max_index > 0`). Also adjusts effective
+            weight decay when WD applies: ``wd + (1 - wd) / (max_index + 1) * index``.
+            Independent of `relative_step`.
+        scale_lr_factor (`float`, *optional*, defaults to `1.0`):
+            Exponent in
+            ``base_lr * ((max_index - index) / max_index) ** scale_lr_factor + eps[0]``.
+            Must be ``> 0``.
 
     This implementation handles low-precision (FP16, bfloat) values, but we have not thoroughly tested.
 
@@ -128,14 +161,17 @@ class Adafactor(torch.optim.Optimizer):
         lr=1e-3,
         eps=(1e-30, 1e-3),
         clip_threshold=1.0,
-        decay_rate=-0.8,
         beta1=None,
+        beta2=0.99,
         weight_decay=0.0,
         relative_step=False,
         scale_parameter=False,
         warmup_init=False,
     )
-    ```"""
+    ```
+    """
+
+    _WEIGHT_DECAY_MODES = ("update_rms", "param_rms", "absolute")
 
     def __init__(
         self,
