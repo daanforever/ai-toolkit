@@ -456,6 +456,17 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
         self.train_config = train_config
         # update bucket divisibility
         self.dataset_config.bucket_tolerance = sd.get_bucket_divisibility()
+        # zimage_diffsynth: letterbox pad-to-square replaces AR bucketing
+        if sd is not None and getattr(sd, "arch", None) == "zimage_diffsynth":
+            self.dataset_config.pad_to_square = True
+            self.dataset_config.buckets = True
+            resolution = self.dataset_config.current_resolution
+            divisibility = self.dataset_config.bucket_tolerance
+            if resolution % divisibility != 0:
+                raise ValueError(
+                    f"pad_to_square requires current_resolution ({resolution}) to be "
+                    f"divisible by bucket_tolerance/divisibility ({divisibility})"
+                )
         self.is_video = dataset_config.num_frames > 1
         super().__init__()
         folder_path = dataset_config.folder_path

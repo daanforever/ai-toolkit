@@ -17,6 +17,13 @@
   - `diffsynth`: DiffSynth `ZImageDiT` only.
 - Diffusers main uses the official train forward (`list` of CFHW latents, `t=(1000-t)/1000`, negate pred). DiffSynth main keeps `model_fn_z_image_turbo`.
 
+## Pad-to-square (letterbox) batches
+
+- For **`arch: zimage_diffsynth`**, AR bucketing is replaced automatically by **letterbox pad-to-square**: each sample is fit inside `R×R` (`scale = min(R/w, R/h)`) and padded (not cropped). One square bucket per resolution-split dataset so `batch_size` can fill.
+- A binary **geometric validity mask** (content=1, pad=0) is generated for every sample. User/alpha masks are multiplied with it for **loss**; attention uses only the geometric mask (user ROI is not removed from DiT attention).
+- Fully padded DiT patches (`patch_size=2`) are excluded from attention via an extension-local adapter (DiffSynth and Diffusers). The DiffSynth-Studio submodule and `site-packages` are not modified.
+- **Latent cache:** pad mode adds `pad_to_square` / `pad_x` / `pad_y` / content size to the cache key — regenerate caches after enabling this path (or delete `_latent_cache`).
+
 ## `model.compile` (per-block DiT `torch.compile`)
 
 - Set **`model.compile: true`** to JIT-compile DiffSynth DiT blocks with `torch.compile(..., dynamic=True)` (Z-Image paper §4.2 style).
@@ -59,9 +66,9 @@ Default `use_dynamic_shifting: false` keeps current behaviour: DiffSynth static 
 
 When aligning a job with [DiffSynth-Studio/examples](DiffSynth-Studio/examples/z_image/model_training/lora/Z-Image.sh), compare at least:
 
-- Learning rate, epochs / dataset repeats, resolution / `max_pixels` (toolkit: bucket / resolution lists).
+- Learning rate, epochs / dataset repeats, resolution / `max_pixels` (toolkit: pad-to-square `R×R` buckets; raise `batch_size` freely).
 - `use_diffsynth_training_loop: true` and the forced `linear_timesteps` behaviour above.
-- Latent caching: same VAE / latent layout as Z-Image training expects.
+- Latent caching: same VAE / latent layout as Z-Image training expects; invalidate cache when switching to pad-to-square.
 - Optimizer and batch size (toolkit `train` section vs script).
 
 ## Tests
@@ -72,4 +79,6 @@ When aligning a job with [DiffSynth-Studio/examples](DiffSynth-Studio/examples/z
 - `test_smoke.py` step 4d — SNR API guard for default DiffSynth adapter (`compute_snr`; SNR disabled in default training).
 - `test_smoke.py` step 7a — trainer flags and `linear_timesteps`.
 - `test_compile_quantized_blocks.py` — per-block compile helper (CPU) + float8/quanto + checkpoint smoke (CUDA).
+- `test_spatial_attention.py` — pad validity → patch masks, adapter attn_mask, batch plumbing.
+- `testing/test_pad_to_square.py` — letterbox geometry, validity/loss masks, latent cache keys.
 - `testing/test_gaussian_full.py` — regression with `use_diffsynth_training_loop: false` (toolkit gaussian path).

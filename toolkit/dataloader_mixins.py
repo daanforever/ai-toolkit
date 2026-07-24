@@ -124,15 +124,34 @@ transforms_dict = {
 img_ext_list = ['.jpg', '.jpeg', '.png', '.webp']
 
 
-def spatial_resize_crop_pil(file_item: 'FileItemDTO', img: Image.Image) -> Image.Image:
-    """Resize and crop PIL RGB to training geometry (buckets or legacy). Caller applies flips before this."""
+def spatial_resize_crop_pil(
+    file_item: 'FileItemDTO',
+    img: Image.Image,
+    *,
+    resample=Image.BICUBIC,
+    fill=0,
+) -> Image.Image:
+    """Resize and crop/pad PIL image to training geometry (buckets or legacy). Caller applies flips before this."""
     if file_item.dataset_config.buckets:
         if file_item.scale_to_width <= 0 or file_item.scale_to_height <= 0:
             raise ValueError(
                 f"Invalid scale dimensions for image {file_item.path}: "
                 f"scale_to_width={file_item.scale_to_width}, scale_to_height={file_item.scale_to_height}"
             )
-        img = img.resize((file_item.scale_to_width, file_item.scale_to_height), Image.BICUBIC)
+        if getattr(file_item.dataset_config, "pad_to_square", False):
+            # Letterbox: resize content to scale_to_* then paste onto R×R canvas
+            content = img.resize((file_item.scale_to_width, file_item.scale_to_height), resample)
+            canvas_mode = img.mode
+            if isinstance(fill, int):
+                fill_color = fill
+            elif canvas_mode == "L":
+                fill_color = fill if isinstance(fill, int) else int(fill[0] if hasattr(fill, '__getitem__') else fill)
+            else:
+                fill_color = fill
+            canvas = Image.new(canvas_mode, (file_item.crop_width, file_item.crop_height), fill_color)
+            canvas.paste(content, (file_item.pad_x, file_item.pad_y))
+            return canvas
+        img = img.resize((file_item.scale_to_width, file_item.scale_to_height), resample)
         if img.width < file_item.crop_x + file_item.crop_width or img.height < file_item.crop_y + file_item.crop_height:
             print_acc('size mismatch')
         img = img.crop(
@@ -149,7 +168,7 @@ def spatial_resize_crop_pil(file_item: 'FileItemDTO', img: Image.Image) -> Image
                 int(img.size[0] * file_item.dataset_config.scale),
                 int(img.size[1] * file_item.dataset_config.scale),
             ),
-            Image.BICUBIC,
+            resample,
         )
         min_img_size = min(img.size)
         dc = file_item.dataset_config
@@ -166,11 +185,11 @@ def spatial_resize_crop_pil(file_item: 'FileItemDTO', img: Image.Image) -> Image
                 scaler = scale_size / min_img_size
                 scale_width = int((img.width + 5) * scaler)
                 scale_height = int((img.height + 5) * scaler)
-                img = img.resize((scale_width, scale_height), Image.BICUBIC)
+                img = img.resize((scale_width, scale_height), resample)
             img = transforms.RandomCrop(dc.current_resolution)(img)
         else:
             img = transforms.CenterCrop(min_img_size)(img)
-            img = img.resize((dc.current_resolution, dc.current_resolution), Image.BICUBIC)
+            img = img.resize((dc.current_resolution, dc.current_resolution), resample)
     return img
 
 
@@ -349,10 +368,26 @@ class BucketsMixin:
                 continue
 
             did_process_poi = False
-            if file_item.has_point_of_interest:
+            if file_item.has_point_of_interest and not self.dataset_config.pad_to_square:
                 # Attempt to process the poi if we can. It wont process if the image is smaller than the resolution
                 did_process_poi = file_item.setup_poi_bucket()
-            if self.dataset_config.square_crop:
+            if self.dataset_config.pad_to_square:
+                # Letterbox contain: fit inside R×R, pad empty borders. Overrides square_crop/POI/random_crop.
+                scale_factor = min(resolution / width, resolution / height)
+                file_item.scale_to_width = max(1, int(round(width * scale_factor)))
+                file_item.scale_to_height = max(1, int(round(height * scale_factor)))
+                # Clamp so content never exceeds canvas (rounding)
+                file_item.scale_to_width = min(file_item.scale_to_width, resolution)
+                file_item.scale_to_height = min(file_item.scale_to_height, resolution)
+                file_item.crop_width = resolution
+                file_item.crop_height = resolution
+                file_item.crop_x = 0
+                file_item.crop_y = 0
+                file_item.pad_x = (resolution - file_item.scale_to_width) // 2
+                file_item.pad_y = (resolution - file_item.scale_to_height) // 2
+                file_item.content_width = file_item.scale_to_width
+                file_item.content_height = file_item.scale_to_height
+            elif self.dataset_config.square_crop:
                 # we scale first so smallest size matches resolution
                 scale_factor_x = resolution / width
                 scale_factor_y = resolution / height
@@ -367,6 +402,10 @@ class BucketsMixin:
                 else:
                     file_item.crop_x = 0
                     file_item.crop_y = int(file_item.scale_to_height / 2 - resolution / 2)
+                file_item.pad_x = 0
+                file_item.pad_y = 0
+                file_item.content_width = file_item.crop_width
+                file_item.content_height = file_item.crop_height
             elif not did_process_poi:
                 bucket_resolution = get_bucket_for_image_size(
                     width, height,
@@ -404,6 +443,17 @@ class BucketsMixin:
 
                 if file_item.crop_y < 0 or file_item.crop_x < 0:
                     print_acc('debug')
+
+                file_item.pad_x = 0
+                file_item.pad_y = 0
+                file_item.content_width = file_item.crop_width
+                file_item.content_height = file_item.crop_height
+            else:
+                # POI path already set crop/scale; clear pad fields
+                file_item.pad_x = 0
+                file_item.pad_y = 0
+                file_item.content_width = file_item.crop_width
+                file_item.content_height = file_item.crop_height
 
             # check if bucket exists, if not, create it
             bucket_key = f'{file_item.crop_width}x{file_item.crop_height}'
@@ -735,16 +785,8 @@ class ImageProcessingDTOMixin:
                 if self.flip_y:
                     img = img.transpose(Image.FLIP_TOP_BOTTOM)
                 
-                # Apply bucketing
-                if self.scale_to_width <= 0 or self.scale_to_height <= 0:
-                    raise ValueError(f"Invalid scale dimensions for video {self.path}: scale_to_width={self.scale_to_width}, scale_to_height={self.scale_to_height}")
-                img = img.resize((self.scale_to_width, self.scale_to_height), Image.BICUBIC)
-                img = img.crop((
-                    self.crop_x,
-                    self.crop_y,
-                    self.crop_x + self.crop_width,
-                    self.crop_y + self.crop_height
-                ))
+                # Apply bucketing (crop or letterbox pad)
+                img = spatial_resize_crop_pil(self, img)
                 
                 # Apply transform if provided
                 if transform:
@@ -1016,16 +1058,8 @@ class InpaintControlFileItemDTOMixin:
                 img = img.transpose(Image.FLIP_TOP_BOTTOM)
 
             if self.dataset_config.buckets:
-                # scale and crop based on file item
-                img = img.resize((self.scale_to_width, self.scale_to_height), Image.BICUBIC)
-                # img = transforms.CenterCrop((self.crop_height, self.crop_width))(img)
-                # crop
-                img = img.crop((
-                    self.crop_x,
-                    self.crop_y,
-                    self.crop_x + self.crop_width,
-                    self.crop_y + self.crop_height
-                ))
+                # scale and crop/pad based on file item
+                img = spatial_resize_crop_pil(self, img)
             else:
                 raise Exception("Inpaint images not supported for non-bucket datasets")
             
@@ -1125,16 +1159,8 @@ class ControlFileItemDTOMixin:
                     img = img.transpose(Image.FLIP_TOP_BOTTOM)
 
                 if self.dataset_config.buckets:
-                    # scale and crop based on file item
-                    img = img.resize((self.scale_to_width, self.scale_to_height), Image.BICUBIC)
-                    # img = transforms.CenterCrop((self.crop_height, self.crop_width))(img)
-                    # crop
-                    img = img.crop((
-                        self.crop_x,
-                        self.crop_y,
-                        self.crop_x + self.crop_width,
-                        self.crop_y + self.crop_height
-                    ))
+                    # scale and crop/pad based on file item
+                    img = spatial_resize_crop_pil(self, img)
                 else:
                     raise Exception("Control images not supported for non-bucket datasets")
             transform = transforms.Compose([
@@ -1497,6 +1523,7 @@ class MaskFileItemDTOMixin:
         if hasattr(super(), '__init__'):
             super().__init__(*args, **kwargs)
         self.has_mask_image = False
+        self.has_user_mask_image = False
         self.mask_path: Union[str, None] = None
         self.mask_tensor: Union[torch.Tensor, None] = None
         self.use_alpha_as_mask: bool = False
@@ -1505,6 +1532,7 @@ class MaskFileItemDTOMixin:
         if dataset_config.alpha_mask:
             self.use_alpha_as_mask = True
             self.mask_path = kwargs.get('path', None)
+            self.has_user_mask_image = True
             self.has_mask_image = True
         elif dataset_config.mask_path is not None:
             # find the control image path
@@ -1515,89 +1543,127 @@ class MaskFileItemDTOMixin:
             for ext in img_ext_list:
                 if os.path.exists(os.path.join(mask_path, file_name_no_ext + ext)):
                     self.mask_path = os.path.join(mask_path, file_name_no_ext + ext)
+                    self.has_user_mask_image = True
                     self.has_mask_image = True
                     break
+        # pad-to-square always needs geometric validity mask (and loss mask)
+        if getattr(dataset_config, "pad_to_square", False):
+            self.has_mask_image = True
+
+    def _build_pad_validity_mask(self: 'FileItemDTO') -> torch.Tensor:
+        """Binary geometric validity: 1 on content rect, 0 on pad. No blur / mask_min_value."""
+        R = self.crop_width
+        H = self.crop_height
+        pad_x = getattr(self, "pad_x", 0)
+        pad_y = getattr(self, "pad_y", 0)
+        cw = getattr(self, "content_width", R)
+        ch = getattr(self, "content_height", H)
+        # Create as PIL 'L' so spatial replay can apply identically
+        arr = np.zeros((H, R), dtype=np.uint8)
+        x0, y0 = pad_x, pad_y
+        x1, y1 = min(R, pad_x + cw), min(H, pad_y + ch)
+        if x1 > x0 and y1 > y0:
+            arr[y0:y1, x0:x1] = 255
+        img = Image.fromarray(arr, mode='L')
+        transform = transforms.Compose([transforms.ToTensor()])
+        if self.aug_replay_spatial_transforms:
+            valid = self.augment_spatial_control(img, transform=transform)
+        else:
+            valid = transform(img)
+        # Re-binarize after spatial replay (interpolation can soften edges)
+        valid = (valid > 0.5).float()
+        return valid
 
     def load_mask_image(self: 'FileItemDTO'):
-        try:
-            img = Image.open(self.mask_path)
-            img = exif_transpose(img)
-        except Exception as e:
-            print_acc(f"Error: {e}")
-            print_acc(f"Error loading image: {self.mask_path}")
+        user_mask = None
+        if self.has_user_mask_image and self.mask_path is not None:
+            try:
+                img = Image.open(self.mask_path)
+                img = exif_transpose(img)
+            except Exception as e:
+                print_acc(f"Error: {e}")
+                print_acc(f"Error loading image: {self.mask_path}")
+                img = None
 
-        if self.use_alpha_as_mask:
-            # pipeline expectws an rgb image so we need to put alpha in all channels
-            np_img = np.array(img)
-            np_img[:, :, :3] = np_img[:, :, 3:]
+            if img is not None:
+                if self.use_alpha_as_mask:
+                    # pipeline expectws an rgb image so we need to put alpha in all channels
+                    np_img = np.array(img)
+                    np_img[:, :, :3] = np_img[:, :, 3:]
 
-            np_img = np_img[:, :, :3]
-            img = Image.fromarray(np_img)
+                    np_img = np_img[:, :, :3]
+                    img = Image.fromarray(np_img)
 
-        img = img.convert('RGB')
-        if self.dataset_config.invert_mask:
-            img = ImageOps.invert(img)
-        w, h = img.size
-        fix_size = False
-        if w > h and self.scale_to_width < self.scale_to_height:
-            # throw error, they should match
-            print_acc(f"unexpected values: w={w}, h={h}, file_item.scale_to_width={self.scale_to_width}, file_item.scale_to_height={self.scale_to_height}, file_item.path={self.path}")
-            fix_size = True
-        elif h > w and self.scale_to_height < self.scale_to_width:
-            # throw error, they should match
-            print_acc(f"unexpected values: w={w}, h={h}, file_item.scale_to_width={self.scale_to_width}, file_item.scale_to_height={self.scale_to_height}, file_item.path={self.path}")
-            fix_size = True
+                img = img.convert('RGB')
+                if self.dataset_config.invert_mask:
+                    img = ImageOps.invert(img)
+                w, h = img.size
+                fix_size = False
+                if w > h and self.scale_to_width < self.scale_to_height:
+                    # throw error, they should match
+                    print_acc(f"unexpected values: w={w}, h={h}, file_item.scale_to_width={self.scale_to_width}, file_item.scale_to_height={self.scale_to_height}, file_item.path={self.path}")
+                    fix_size = True
+                elif h > w and self.scale_to_height < self.scale_to_width:
+                    # throw error, they should match
+                    print_acc(f"unexpected values: w={w}, h={h}, file_item.scale_to_width={self.scale_to_width}, file_item.scale_to_height={self.scale_to_height}, file_item.path={self.path}")
+                    fix_size = True
 
-        if fix_size:
-            # swap all the sizes
-            self.scale_to_width, self.scale_to_height = self.scale_to_height, self.scale_to_width
-            self.crop_width, self.crop_height = self.crop_height, self.crop_width
-            self.crop_x, self.crop_y = self.crop_y, self.crop_x
+                if fix_size:
+                    # swap all the sizes
+                    self.scale_to_width, self.scale_to_height = self.scale_to_height, self.scale_to_width
+                    self.crop_width, self.crop_height = self.crop_height, self.crop_width
+                    self.crop_x, self.crop_y = self.crop_y, self.crop_x
+                    if hasattr(self, "pad_x"):
+                        self.pad_x, self.pad_y = self.pad_y, self.pad_x
+                    if hasattr(self, "content_width"):
+                        self.content_width, self.content_height = self.content_height, self.content_width
 
+                if self.flip_x:
+                    # do a flip
+                    img = img.transpose(Image.FLIP_LEFT_RIGHT)
+                if self.flip_y:
+                    # do a flip
+                    img = img.transpose(Image.FLIP_TOP_BOTTOM)
 
+                # randomly apply a blur up to 0.5% of the size of the min (width, height)
+                min_size = min(img.width, img.height)
+                blur_radius = int(min_size * random.random() * 0.005)
+                img = img.filter(ImageFilter.GaussianBlur(radius=blur_radius))
 
+                # make grayscale
+                img = img.convert('L')
 
-        if self.flip_x:
-            # do a flip
-            img = img.transpose(Image.FLIP_LEFT_RIGHT)
-        if self.flip_y:
-            # do a flip
-            img = img.transpose(Image.FLIP_TOP_BOTTOM)
+                if self.dataset_config.buckets:
+                    # scale and crop/pad based on file item (pad fill=0)
+                    img = spatial_resize_crop_pil(self, img, fill=0)
+                else:
+                    raise Exception("Mask images not supported for non-bucket datasets")
 
-        # randomly apply a blur up to 0.5% of the size of the min (width, height)
-        min_size = min(img.width, img.height)
-        blur_radius = int(min_size * random.random() * 0.005)
-        img = img.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+                transform = transforms.Compose([
+                    transforms.ToTensor(),
+                ])
+                if self.aug_replay_spatial_transforms:
+                    user_mask = self.augment_spatial_control(img, transform=transform)
+                else:
+                    user_mask = transform(img)
+                user_mask = value_map(user_mask, 0, 1.0, self.mask_min_value, 1.0)
 
-        # make grayscale
-        img = img.convert('L')
-
-        if self.dataset_config.buckets:
-            # scale and crop based on file item
-            img = img.resize((self.scale_to_width, self.scale_to_height), Image.BICUBIC)
-            # img = transforms.CenterCrop((self.crop_height, self.crop_width))(img)
-            # crop
-            img = img.crop((
-                self.crop_x,
-                self.crop_y,
-                self.crop_x + self.crop_width,
-                self.crop_y + self.crop_height
-            ))
+        pad_to_square = getattr(self.dataset_config, "pad_to_square", False)
+        if pad_to_square:
+            valid = self._build_pad_validity_mask()
+            self.image_valid_mask_tensor = valid
+            if user_mask is not None:
+                # Pad regions stay strictly zero even with nonzero mask_min_value
+                self.mask_tensor = user_mask * valid
+            else:
+                self.mask_tensor = valid
         else:
-            raise Exception("Mask images not supported for non-bucket datasets")
-
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-        ])
-        if self.aug_replay_spatial_transforms:
-            self.mask_tensor = self.augment_spatial_control(img, transform=transform)
-        else:
-            self.mask_tensor = transform(img)
-        self.mask_tensor = value_map(self.mask_tensor, 0, 1.0, self.mask_min_value, 1.0)
-        # convert to grayscale
+            self.image_valid_mask_tensor = None
+            self.mask_tensor = user_mask
 
     def cleanup_mask(self: 'FileItemDTO'):
         self.mask_tensor = None
+        self.image_valid_mask_tensor = None
 
 
 class UnconditionalFileItemDTOMixin:
@@ -1648,16 +1714,8 @@ class UnconditionalFileItemDTOMixin:
             img = img.transpose(Image.FLIP_TOP_BOTTOM)
 
         if self.dataset_config.buckets:
-            # scale and crop based on file item
-            img = img.resize((self.scale_to_width, self.scale_to_height), Image.BICUBIC)
-            # img = transforms.CenterCrop((self.crop_height, self.crop_width))(img)
-            # crop
-            img = img.crop((
-                self.crop_x,
-                self.crop_y,
-                self.crop_x + self.crop_width,
-                self.crop_y + self.crop_height
-            ))
+            # scale and crop/pad based on file item
+            img = spatial_resize_crop_pil(self, img)
         else:
             raise Exception("Unconditional images are not supported for non-bucket datasets")
 
@@ -1860,6 +1918,12 @@ class LatentCachingFileItemDTOMixin:
             ("latent_version", self.latent_version),
         ])
         # when adding items, do it after so we dont change old latents
+        if getattr(self.dataset_config, "pad_to_square", False):
+            item["pad_to_square"] = True
+            item["pad_x"] = getattr(self, "pad_x", 0)
+            item["pad_y"] = getattr(self, "pad_y", 0)
+            item["content_width"] = getattr(self, "content_width", self.crop_width)
+            item["content_height"] = getattr(self, "content_height", self.crop_height)
         if self.flip_x:
             item["flip_x"] = True
         if self.flip_y:
@@ -2418,6 +2482,7 @@ class ControlCachingMixin:
             file_item.has_inpaint_image = True
         elif control_type == 'mask':
             file_item.mask_path = control_path
+            file_item.has_user_mask_image = True
             file_item.has_mask_image = True
         else:
             if file_item.control_path is None:

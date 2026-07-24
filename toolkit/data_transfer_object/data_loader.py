@@ -136,6 +136,12 @@ class FileItemDTO(
         self.crop_y: int = kwargs.get("crop_y", 0)
         self.crop_width: int = kwargs.get("crop_width", self.scale_to_width)
         self.crop_height: int = kwargs.get("crop_height", self.scale_to_height)
+        # pad-to-square letterbox offsets / content size on the R×R canvas
+        self.pad_x: int = kwargs.get("pad_x", 0)
+        self.pad_y: int = kwargs.get("pad_y", 0)
+        self.content_width: int = kwargs.get("content_width", self.crop_width)
+        self.content_height: int = kwargs.get("content_height", self.crop_height)
+        self.image_valid_mask_tensor: Union[torch.Tensor, None] = None
         self.flip_x: bool = kwargs.get("flip_x", False)
         self.flip_y: bool = kwargs.get("flip_x", False)
         self.augments: List[str] = self.dataset_config.augments
@@ -322,6 +328,24 @@ class DataLoaderBatchDTO:
                         mask_tensors.append(x.mask_tensor)
                 self.mask_tensor = torch.cat([x.unsqueeze(0) for x in mask_tensors])
 
+            self.image_valid_mask_tensor: Union[torch.Tensor, None] = None
+            if any([x.image_valid_mask_tensor is not None for x in self.file_items]):
+                base_valid = None
+                for x in self.file_items:
+                    if x.image_valid_mask_tensor is not None:
+                        base_valid = x.image_valid_mask_tensor
+                        break
+                valid_tensors = []
+                for x in self.file_items:
+                    if x.image_valid_mask_tensor is None:
+                        # missing validity → treat as all-valid (not zeros)
+                        valid_tensors.append(torch.ones_like(base_valid))
+                    else:
+                        valid_tensors.append(x.image_valid_mask_tensor)
+                self.image_valid_mask_tensor = torch.cat(
+                    [x.unsqueeze(0) for x in valid_tensors]
+                )
+
             # add unaugmented tensors for ones with augments
             if any([x.unaugmented_tensor is not None for x in self.file_items]):
                 # find one to use as a base
@@ -457,6 +481,7 @@ class DataLoaderBatchDTO:
         self.clip_image_embeds = None
         self.clip_image_embeds_unconditional = None
         self.mask_tensor = None
+        self.image_valid_mask_tensor = None
         self.unaugmented_tensor = None
         self.unconditional_tensor = None
         self.unconditional_latents = None

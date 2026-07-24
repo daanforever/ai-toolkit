@@ -362,6 +362,7 @@ class ZImageDiffSynthModel(BaseModel):
         latent_model_input: torch.Tensor,
         timestep: torch.Tensor,
         text_embeddings: PromptEmbeds,
+        batch=None,
         **kwargs,
     ):
         # Ensure DiT weights live on the same device as the latents we are
@@ -439,6 +440,33 @@ class ZImageDiffSynthModel(BaseModel):
                     new_text_embeds += list(t.unbind(dim=0))
             text_embeds = new_text_embeds
 
+        # Geometric pad validity → patch grid (attention only; not user ROI mask)
+        image_valid_patches = None
+        if (
+            batch is not None
+            and getattr(batch, "image_valid_mask_tensor", None) is not None
+            and isinstance(latent_model_input, torch.Tensor)
+            and latent_model_input.dim() == 4
+        ):
+            from .spatial_attention import pixel_valid_to_patch_valid
+
+            valid = batch.image_valid_mask_tensor
+            if valid.dim() == 3:
+                valid = valid.unsqueeze(1)
+            B, _, lh, lw = latent_model_input.shape
+            if valid.shape[0] != B:
+                raise ValueError(
+                    f"image_valid_mask_tensor batch {valid.shape[0]} != latents batch {B}"
+                )
+            valid = valid.to(device=latent_model_input.device)
+            patch_grid = pixel_valid_to_patch_valid(valid, lh, lw, patch_size=2)
+            # Only activate adapter when at least one fully padded patch exists
+            patches = [patch_grid[b] for b in range(B)]
+            if any(not p.all().item() for p in patches):
+                image_valid_patches = patches
+            else:
+                image_valid_patches = None
+
         # Diffusers ZImageTransformer2DModel: official DreamBooth / z_image convention.
         if getattr(self, "_main_is_diffusers", False):
             # Same train/model dtype gate as DiffSynth run_forward: activations may
@@ -462,17 +490,20 @@ class ZImageDiffSynthModel(BaseModel):
                 latent_model_input.device.type == "cuda"
                 and model_dtype in (torch.float16, torch.bfloat16)
             )
+            from .spatial_attention import spatial_attention_context
+
             with torch.autocast(
                 device_type="cuda",
                 dtype=model_dtype if use_autocast else torch.float32,
                 enabled=use_autocast,
             ):
-                model_out_list = self._raw_dit(
-                    latent_list,
-                    timestep_model_input,
-                    text_embeds,
-                    return_dict=False,
-                )[0]
+                with spatial_attention_context(self._raw_dit, image_valid_patches):
+                    model_out_list = self._raw_dit(
+                        latent_list,
+                        timestep_model_input,
+                        text_embeds,
+                        return_dict=False,
+                    )[0]
             noise_pred = torch.stack([t.float() for t in model_out_list], dim=0)
             noise_pred = -noise_pred.squeeze(2)
             if noise_pred.dtype != train_dtype:
@@ -490,6 +521,7 @@ class ZImageDiffSynthModel(BaseModel):
             model_dtype=self.torch_dtype,
             use_gradient_checkpointing=use_gradient_checkpointing,
             train_dtype=train_dtype,
+            image_valid_patches=image_valid_patches,
         )
         return noise_pred
 

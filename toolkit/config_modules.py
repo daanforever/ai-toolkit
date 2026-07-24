@@ -991,6 +991,8 @@ class DatasetConfig:
         self.prefetch_factor: int = kwargs.get('prefetch_factor', 2)
         self.extra_values: List[float] = kwargs.get('extra_values', [])
         self.square_crop: bool = kwargs.get('square_crop', False)
+        # Letterbox fit+pad to R×R (contain). Auto-enabled for zimage_diffsynth.
+        self.pad_to_square: bool = kwargs.get('pad_to_square', False)
         # apply same augmentations to control images. Usually want this true unless special case
         self.replay_transforms: bool = kwargs.get('replay_transforms', True)
         

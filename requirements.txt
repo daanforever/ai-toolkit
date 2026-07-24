@@ -1,5 +1,6 @@
 pytorch-cuda==12.4
-torchao
+# diffusers@8600b4c still imports torchao.dtypes.uintx.uintx_layout (removed in torchao 0.17)
+torchao>=0.15.0,<0.17
 safetensors
 git+https://github.com/huggingface/diffusers@8600b4c10d67b0ce200f664204358747bd53c775
 transformers

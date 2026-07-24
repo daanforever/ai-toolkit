@@ -1,6 +1,6 @@
-# Forward pass via DiffSynth model_fn_z_image_turbo.
+# Forward pass via DiffSynth model_fn_z_image_turbo (or direct DiT when spatial mask set).
 
-from typing import Optional
+from typing import Optional, Sequence
 import torch
 
 
@@ -13,11 +13,16 @@ def run_forward(
     use_gradient_checkpointing: bool = False,
     use_gradient_checkpointing_offload: bool = False,
     train_dtype: Optional[torch.dtype] = None,
+    image_valid_patches: Optional[Sequence[torch.Tensor]] = None,
     **kwargs,
 ) -> torch.Tensor:
     """
     Run one forward pass: latents BCHW, timestep 0..1000, prompt_embeds as expected by DiffSynth.
     Returns prediction tensor in same convention as DiffSynth-Studio (flow matching).
+
+    When image_valid_patches is provided, routes B=1 and B>1 through dit.forward under
+    the spatial-attention adapter (bypassing turbo B=1 attn_mask=None hardcode).
+    Unmasked / inference calls keep model_fn_z_image_turbo.
 
     Activations are aligned to train_dtype (fallback: latents.dtype). If that differs from
     model_dtype (YAML model.dtype), a compute gate casts inputs to model_dtype and casts
@@ -30,6 +35,8 @@ def run_forward(
     if ds_dir not in sys.path:
         sys.path.insert(0, ds_dir)
     from diffsynth.pipelines.z_image import model_fn_z_image_turbo
+
+    from .spatial_attention import run_diffsynth_forward_with_spatial_mask
 
     # model_fn_z_image_turbo expects: latents (BCHW or list), timestep 0..1000, prompt_embeds (list or tensor)
     # It unwraps list to single; timestep is 1000 - timestep inside. We pass timestep in 0..1000.
@@ -84,15 +91,26 @@ def run_forward(
         dtype=model_dtype if use_autocast else torch.float32,
         enabled=use_autocast,
     ):
-        out = model_fn_z_image_turbo(
-            dit,
-            latents=latents,
-            timestep=timestep,
-            prompt_embeds=prompt_embeds,
-            use_gradient_checkpointing=use_gradient_checkpointing,
-            use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
-            **kwargs,
-        )
+        if image_valid_patches:
+            out = run_diffsynth_forward_with_spatial_mask(
+                dit,
+                latents,
+                timestep,
+                prompt_embeds,
+                image_valid_patches,
+                use_gradient_checkpointing=use_gradient_checkpointing,
+                use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
+            )
+        else:
+            out = model_fn_z_image_turbo(
+                dit,
+                latents=latents,
+                timestep=timestep,
+                prompt_embeds=prompt_embeds,
+                use_gradient_checkpointing=use_gradient_checkpointing,
+                use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
+                **kwargs,
+            )
     if isinstance(out, torch.Tensor) and out.dtype != out_dtype:
         out = out.to(out_dtype)
     return out
