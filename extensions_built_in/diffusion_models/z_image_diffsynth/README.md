@@ -19,10 +19,11 @@
 
 ## Pad-to-square (letterbox) batches
 
-- For **`arch: zimage_diffsynth`**, AR bucketing is replaced automatically by **letterbox pad-to-square**: each sample is fit inside `R×R` (`scale = min(R/w, R/h)`) and padded (not cropped). One square bucket per resolution-split dataset so `batch_size` can fill.
-- A binary **geometric validity mask** (content=1, pad=0) is generated for every sample. User/alpha masks are multiplied with it for **loss**; attention uses only the geometric mask (user ROI is not removed from DiT attention).
+- For **`arch: zimage_diffsynth`**, letterbox pad-to-square is the capability default: each sample is fit inside `R×R` (`scale = min(R/w, R/h)`) and padded (not cropped).
+- **Active only when `batch_size > 1`.** With `batch_size: 1`, normal AR bucketing is used (no letterbox, no geometric validity mask). Runtime UI/DB batch size changes rebuild geometry accordingly.
+- When active: one square bucket per resolution-split dataset so larger batches can fill; a binary **geometric validity mask** (content=1, pad=0) is generated. User/alpha masks are multiplied with it for **loss**; attention uses only the geometric mask.
 - Fully padded DiT patches (`patch_size=2`) are excluded from attention via an extension-local adapter (DiffSynth and Diffusers). The DiffSynth-Studio submodule and `site-packages` are not modified.
-- **Latent cache:** pad mode adds `pad_to_square` / `pad_x` / `pad_y` / content size to the cache key — regenerate caches after enabling this path (or delete `_latent_cache`).
+- **Latent cache:** pad mode adds `pad_to_square` / `pad_x` / `pad_y` / content size to the cache key. Starting at `batch_size: 1` with `cache_latents_to_disk` does **not** create pad caches; raising batch size at runtime rebuilds geometry and **creates** the missing pad latents on disk.
 
 ## `model.compile` (per-block DiT `torch.compile`)
 

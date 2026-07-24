@@ -3,6 +3,8 @@
 import os
 import sys
 import tempfile
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import torch
 from PIL import Image
@@ -11,7 +13,11 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _REPO_ROOT)
 
 from toolkit.config_modules import DatasetConfig
-from toolkit.data_loader import AiToolkitDataset
+from toolkit.data_loader import (
+    AiToolkitDataset,
+    get_dataloader_from_datasets,
+    resize_dataloader_batch_size,
+)
 from toolkit.data_transfer_object.data_loader import DataLoaderBatchDTO, FileItemDTO
 from toolkit.dataloader_mixins import spatial_resize_crop_pil
 
@@ -34,12 +40,26 @@ class FakeSD:
         self.is_flux = False
         self.te_padding_side = "right"
         self._div = div
+        self.device = "cpu"
+        self.device_torch = torch.device("cpu")
+        self.torch_dtype = torch.float32
 
     def get_bucket_divisibility(self):
         return self._div
 
     def encode_control_in_text_embeddings(self, *args, **kwargs):
         return False
+
+    def set_device_state_preset(self, *args, **kwargs):
+        pass
+
+    def restore_device_state(self):
+        pass
+
+    def encode_images(self, imgs):
+        # imgs: B,C,H,W → fake latents B,4,H/8,W/8
+        b, _, h, w = imgs.shape
+        return torch.zeros(b, 4, max(1, h // 8), max(1, w // 8), dtype=imgs.dtype, device=imgs.device)
 
 
 def _make_image_dir(sizes):
@@ -71,9 +91,11 @@ def test_auto_enable_pad_to_square_for_zimage_diffsynth():
         default_caption="x",
     )
     assert ds_cfg.pad_to_square is False
-    _ = AiToolkitDataset(ds_cfg, batch_size=1, sd=FakeSD(), train_config=None)
+    ds = AiToolkitDataset(ds_cfg, batch_size=1, sd=FakeSD(), train_config=None)
     assert ds_cfg.pad_to_square is True
     assert ds_cfg.buckets is True
+    # Capability on, but inactive at batch_size==1
+    assert ds.is_pad_to_square_active() is False
 
 
 def test_pad_to_square_not_auto_for_other_arch():
@@ -87,6 +109,34 @@ def test_pad_to_square_not_auto_for_other_arch():
     )
     _ = AiToolkitDataset(ds_cfg, batch_size=1, sd=FakeSD(arch="sd1"), train_config=None)
     assert ds_cfg.pad_to_square is False
+
+
+def test_batch_size_1_uses_ar_buckets_not_letterbox():
+    d = _make_image_dir(
+        [
+            ("land.png", 128, 64),
+            ("port.png", 64, 128),
+        ]
+    )
+    ds_cfg = DatasetConfig(
+        dataset_path=d,
+        resolution=64,
+        buckets=True,
+        bucket_tolerance=32,
+        default_caption="x",
+        pad_to_square=True,
+    )
+    dataset = AiToolkitDataset(ds_cfg, batch_size=1, sd=FakeSD(), train_config=None)
+    assert dataset.is_pad_to_square_active() is False
+    # Mixed AR → more than one bucket key (not forced 64x64 letterbox)
+    assert "64x64" not in dataset.buckets or len(dataset.buckets) >= 1
+    by_name = {os.path.basename(fi.path): fi for fi in dataset.file_list}
+    land = by_name["land.png"]
+    assert land.pad_to_square_active is False
+    assert land.pad_x == 0 and land.pad_y == 0
+    # Landscape AR bucket is wider than tall (not letterboxed square content+pad)
+    assert land.crop_width != land.crop_height or land.scale_to_width == land.crop_width
+    assert land.has_mask_image is False
 
 
 def test_single_square_bucket_landscape_portrait_square():
@@ -111,6 +161,7 @@ def test_single_square_bucket_landscape_portrait_square():
 
     by_name = {os.path.basename(fi.path): fi for fi in dataset.file_list}
     land = by_name["land.png"]
+    assert land.pad_to_square_active is True
     assert land.scale_to_width == 64
     assert land.scale_to_height == 32
     assert land.pad_x == 0
@@ -140,7 +191,7 @@ def test_spatial_resize_letterbox_pil_output():
         default_caption="x",
         pad_to_square=True,
     )
-    dataset = AiToolkitDataset(ds_cfg, batch_size=1, sd=FakeSD(), train_config=None)
+    dataset = AiToolkitDataset(ds_cfg, batch_size=2, sd=FakeSD(), train_config=None)
     fi = dataset.file_list[0]
     img = Image.new("RGB", (100, 50), color=(255, 0, 0))
     out = spatial_resize_crop_pil(fi, img)
@@ -169,7 +220,7 @@ def test_validity_mask_and_user_mask_product():
         mask_path=mask_dir,
         mask_min_value=0.25,
     )
-    dataset = AiToolkitDataset(ds_cfg, batch_size=1, sd=FakeSD(), train_config=None)
+    dataset = AiToolkitDataset(ds_cfg, batch_size=2, sd=FakeSD(), train_config=None)
     fi = dataset.file_list[0]
     fi.load_mask_image()
     assert fi.image_valid_mask_tensor is not None
@@ -196,7 +247,7 @@ def test_validity_only_without_user_mask():
         default_caption="x",
         pad_to_square=True,
     )
-    dataset = AiToolkitDataset(ds_cfg, batch_size=1, sd=FakeSD(), train_config=None)
+    dataset = AiToolkitDataset(ds_cfg, batch_size=2, sd=FakeSD(), train_config=None)
     fi = dataset.file_list[0]
     assert fi.has_mask_image is True
     fi.load_mask_image()
@@ -240,34 +291,18 @@ def test_latent_cache_key_includes_pad_fields():
         default_caption="x",
         pad_to_square=True,
     )
-    dataset = AiToolkitDataset(ds_cfg, batch_size=1, sd=FakeSD(), train_config=None)
+    dataset = AiToolkitDataset(ds_cfg, batch_size=2, sd=FakeSD(), train_config=None)
     fi = dataset.file_list[0]
     info = fi.get_latent_info_dict()
     assert info.get("pad_to_square") is True
     assert "pad_x" in info and "pad_y" in info
     assert "content_width" in info and "content_height" in info
 
-    # Without pad flag, keys absent (invalidate vs old AR cache)
-    ds_cfg2 = DatasetConfig(
-        dataset_path=d,
-        resolution=64,
-        buckets=True,
-        bucket_tolerance=32,
-        default_caption="x",
-        pad_to_square=False,
-    )
-    fi2 = _file_item(
-        fi.path,
-        ds_cfg2,
-        scale_to_width=fi.scale_to_width,
-        scale_to_height=fi.scale_to_height,
-        crop_x=0,
-        crop_y=0,
-        crop_width=64,
-        crop_height=64,
-    )
-    info2 = fi2.get_latent_info_dict()
-    assert "pad_to_square" not in info2
+    # Inactive pad (batch_size 1 geometry) → no pad keys
+    ds1 = AiToolkitDataset(ds_cfg, batch_size=1, sd=FakeSD(), train_config=None)
+    fi_b1 = ds1.file_list[0]
+    info_b1 = fi_b1.get_latent_info_dict()
+    assert "pad_to_square" not in info_b1
 
 
 def test_resolution_divisibility_check():
@@ -286,3 +321,81 @@ def test_resolution_divisibility_check():
         raised = True
         assert "divisible" in str(e).lower() or "pad_to_square" in str(e)
     assert raised
+
+
+def test_resize_batch_size_toggles_letterbox_geometry():
+    d = _make_image_dir(
+        [
+            ("land.png", 128, 64),
+            ("port.png", 64, 128),
+        ]
+    )
+    ds_cfg = DatasetConfig(
+        dataset_path=d,
+        resolution=64,
+        buckets=True,
+        bucket_tolerance=32,
+        default_caption="x",
+        pad_to_square=True,
+    )
+    sd = FakeSD()
+    dataloader = get_dataloader_from_datasets([ds_cfg], batch_size=1, sd=sd)
+    ds = dataloader.dataset.datasets[0]
+    assert ds.is_pad_to_square_active() is False
+    land = next(fi for fi in ds.file_list if fi.path.endswith("land.png"))
+    assert land.pad_to_square_active is False
+    ar_crop = (land.crop_width, land.crop_height)
+
+    resize_dataloader_batch_size(dataloader, 2)
+    assert ds.batch_size == 2
+    assert ds.is_pad_to_square_active() is True
+    assert list(ds.buckets.keys()) == ["64x64"]
+    land = next(fi for fi in ds.file_list if fi.path.endswith("land.png"))
+    assert land.pad_to_square_active is True
+    assert land.pad_y == 16
+    assert (land.crop_width, land.crop_height) == (64, 64)
+    assert (land.crop_width, land.crop_height) != ar_crop or ar_crop == (64, 64)
+
+    resize_dataloader_batch_size(dataloader, 1)
+    assert ds.is_pad_to_square_active() is False
+    land = next(fi for fi in ds.file_list if fi.path.endswith("land.png"))
+    assert land.pad_to_square_active is False
+    assert land.pad_x == 0 and land.pad_y == 0
+
+
+def test_resize_creates_pad_latent_cache_when_starting_at_batch_size_1():
+    d = _make_image_dir([("land.png", 128, 64), ("sq.png", 64, 64)])
+    ds_cfg = DatasetConfig(
+        dataset_path=d,
+        resolution=64,
+        buckets=True,
+        bucket_tolerance=32,
+        default_caption="x",
+        pad_to_square=True,
+        cache_latents_to_disk=True,
+    )
+    sd = FakeSD()
+    dataloader = get_dataloader_from_datasets([ds_cfg], batch_size=1, sd=sd)
+    ds = dataloader.dataset.datasets[0]
+    # At B=1, AR cache may exist; pad keys must not be in hash
+    for fi in ds.file_list:
+        info = fi.get_latent_info_dict()
+        assert "pad_to_square" not in info
+        assert fi.is_latent_cached is True
+
+    cache_dir = os.path.join(d, "_latent_cache")
+    before = set(os.listdir(cache_dir)) if os.path.isdir(cache_dir) else set()
+
+    resize_dataloader_batch_size(dataloader, 2)
+
+    assert ds.is_pad_to_square_active() is True
+    after = set(os.listdir(cache_dir))
+    # New pad-geometry cache files created
+    assert after - before
+    for fi in ds.file_list:
+        assert fi.pad_to_square_active is True
+        assert fi.is_latent_cached is True
+        info = fi.get_latent_info_dict()
+        assert info.get("pad_to_square") is True
+        path = fi.get_latent_path(recalculate=True)
+        assert os.path.exists(path)

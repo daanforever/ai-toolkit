@@ -88,8 +88,8 @@ config:
         quantize_te: true
         qtype_te: "qfloat8"
         arch: "zimage_diffsynth"
-        # pad-to-square (letterbox R×R) is auto-enabled for this arch; AR buckets are replaced.
-        # Raise train.batch_size freely — all samples share one square bucket per resolution.
+        # pad-to-square (letterbox R×R) auto-enabled for this arch when batch_size > 1.
+        # With batch_size: 1, AR buckets are used; raising batch_size at runtime enables letterbox.
         low_vram: false
         model_kwargs:
           loader: "diffsynth"

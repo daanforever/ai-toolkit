@@ -650,6 +650,12 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
 
         self.setup_epoch()
 
+    def is_pad_to_square_active(self) -> bool:
+        """Letterbox pad-to-square only when capability is on and batch_size > 1."""
+        return bool(
+            getattr(self.dataset_config, "pad_to_square", False) and self.batch_size > 1
+        )
+
     def setup_epoch(self):
         if self.epoch_num == 0:
             # initial setup
@@ -818,7 +824,9 @@ def resize_dataloader_batch_size(
     """
     Update batch_size on an existing dataloader without recreating AiToolkitDataset objects.
 
-    Bucket mode: UnifiedBucketManager.update_batch_size() only rebuilds batch_indices.
+    Bucket mode: updates UnifiedBucketManager batch size; for pad_to_square datasets also
+    rebuilds per-dataset bucket geometry (letterbox vs AR) and ensures latent disk cache
+    matches the new geometry.
     Non-bucket mode: rebuilds the DataLoader wrapper around the same ConcatDataset.
     """
     if dataloader is None:
@@ -826,9 +834,24 @@ def resize_dataloader_batch_size(
 
     if hasattr(dataloader.dataset, 'bucket_manager'):
         bucket_manager = dataloader.dataset.bucket_manager
-        bucket_manager.update_batch_size(batch_size)
         for ds in dataloader.dataset.datasets:
             ds.batch_size = batch_size
+            if getattr(ds.dataset_config, "pad_to_square", False):
+                # Rebuild letterbox vs AR geometry when batch_size crosses 1
+                ds.setup_buckets(quiet=True, force=True)
+                # Invalidate stale latent path / in-memory tensors for new hash
+                for file_item in ds.file_list:
+                    file_item._latent_path = None
+                    file_item._encoded_latent = None
+                    file_item._cached_first_frame_latent = None
+                    file_item._cached_audio_latent = None
+                    file_item.is_latent_cached = False
+                if getattr(ds, "is_caching_latents", False):
+                    # Create missing cache for new geometry (e.g. B=1 start → B>1 pad)
+                    ds.cache_latents_all_latents()
+        bucket_manager.batch_size = batch_size
+        bucket_manager.build_unified_buckets(quiet=True)
+        bucket_manager.shuffle_and_build_batches(quiet=True)
         dataloader.dataset.len = None
         dataloader.len = None
     else:
@@ -839,6 +862,18 @@ def resize_dataloader_batch_size(
             prefetch_factor = getattr(dataloader, 'prefetch_factor', None)
             if prefetch_factor is not None:
                 dataloader_kwargs['prefetch_factor'] = prefetch_factor
+        for ds in _iter_ai_toolkit_datasets(dataloader):
+            ds.batch_size = batch_size
+            if getattr(ds.dataset_config, "pad_to_square", False) and getattr(ds, "buckets", None) is not None:
+                ds.setup_buckets(quiet=True, force=True)
+                for file_item in ds.file_list:
+                    file_item._latent_path = None
+                    file_item._encoded_latent = None
+                    file_item._cached_first_frame_latent = None
+                    file_item._cached_audio_latent = None
+                    file_item.is_latent_cached = False
+                if getattr(ds, "is_caching_latents", False):
+                    ds.cache_latents_all_latents()
         dataloader = _build_non_bucket_dataloader(
             dataloader.dataset,
             batch_size=batch_size,

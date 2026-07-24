@@ -138,7 +138,7 @@ def spatial_resize_crop_pil(
                 f"Invalid scale dimensions for image {file_item.path}: "
                 f"scale_to_width={file_item.scale_to_width}, scale_to_height={file_item.scale_to_height}"
             )
-        if getattr(file_item.dataset_config, "pad_to_square", False):
+        if getattr(file_item, "pad_to_square_active", False):
             # Letterbox: resize content to scale_to_* then paste onto R×R canvas
             content = img.resize((file_item.scale_to_width, file_item.scale_to_height), resample)
             canvas_mode = img.mode
@@ -338,13 +338,13 @@ class BucketsMixin:
         for key, bucket in self.buckets.items():
             random.shuffle(bucket.file_list_idx)
 
-    def setup_buckets(self: 'AiToolkitDataset', quiet=False):
+    def setup_buckets(self: 'AiToolkitDataset', quiet=False, force=False):
         if not hasattr(self, 'file_list'):
             raise Exception(f'file_list not found on class instance {self.__class__.__name__}')
         if not hasattr(self, 'dataset_config'):
             raise Exception(f'dataset_config not found on class instance {self.__class__.__name__}')
 
-        if self.epoch_num > 0 and self.dataset_config.poi is None:
+        if not force and self.epoch_num > 0 and self.dataset_config.poi is None:
             # no need to rebuild buckets for now
             # todo handle random cropping for buckets
             return
@@ -354,6 +354,11 @@ class BucketsMixin:
         resolution = config.current_resolution
         bucket_tolerance = config.bucket_tolerance
         file_list: List['FileItemDTO'] = self.file_list
+        pad_active = (
+            self.is_pad_to_square_active()
+            if hasattr(self, "is_pad_to_square_active")
+            else bool(getattr(config, "pad_to_square", False) and getattr(self, "batch_size", 1) > 1)
+        )
 
         # for file_item in enumerate(file_list):
         for idx, file_item in enumerate(file_list):
@@ -368,10 +373,10 @@ class BucketsMixin:
                 continue
 
             did_process_poi = False
-            if file_item.has_point_of_interest and not self.dataset_config.pad_to_square:
+            if file_item.has_point_of_interest and not pad_active:
                 # Attempt to process the poi if we can. It wont process if the image is smaller than the resolution
                 did_process_poi = file_item.setup_poi_bucket()
-            if self.dataset_config.pad_to_square:
+            if pad_active:
                 # Letterbox contain: fit inside R×R, pad empty borders. Overrides square_crop/POI/random_crop.
                 scale_factor = min(resolution / width, resolution / height)
                 file_item.scale_to_width = max(1, int(round(width * scale_factor)))
@@ -454,6 +459,13 @@ class BucketsMixin:
                 file_item.pad_y = 0
                 file_item.content_width = file_item.crop_width
                 file_item.content_height = file_item.crop_height
+
+            file_item.pad_to_square_active = pad_active
+            # Geometric validity mask only when letterbox is active (or user mask exists)
+            if pad_active or getattr(file_item, "has_user_mask_image", False):
+                file_item.has_mask_image = True
+            elif not getattr(file_item, "has_user_mask_image", False):
+                file_item.has_mask_image = False
 
             # check if bucket exists, if not, create it
             bucket_key = f'{file_item.crop_width}x{file_item.crop_height}'
@@ -1546,9 +1558,8 @@ class MaskFileItemDTOMixin:
                     self.has_user_mask_image = True
                     self.has_mask_image = True
                     break
-        # pad-to-square always needs geometric validity mask (and loss mask)
-        if getattr(dataset_config, "pad_to_square", False):
-            self.has_mask_image = True
+        # Geometric pad mask is enabled per-item in setup_buckets when pad is active.
+        # Do not force has_mask_image from config alone (batch_size==1 disables pad).
 
     def _build_pad_validity_mask(self: 'FileItemDTO') -> torch.Tensor:
         """Binary geometric validity: 1 on content rect, 0 on pad. No blur / mask_min_value."""
@@ -1648,8 +1659,8 @@ class MaskFileItemDTOMixin:
                     user_mask = transform(img)
                 user_mask = value_map(user_mask, 0, 1.0, self.mask_min_value, 1.0)
 
-        pad_to_square = getattr(self.dataset_config, "pad_to_square", False)
-        if pad_to_square:
+        pad_active = getattr(self, "pad_to_square_active", False)
+        if pad_active:
             valid = self._build_pad_validity_mask()
             self.image_valid_mask_tensor = valid
             if user_mask is not None:
@@ -1918,7 +1929,7 @@ class LatentCachingFileItemDTOMixin:
             ("latent_version", self.latent_version),
         ])
         # when adding items, do it after so we dont change old latents
-        if getattr(self.dataset_config, "pad_to_square", False):
+        if getattr(self, "pad_to_square_active", False):
             item["pad_to_square"] = True
             item["pad_x"] = getattr(self, "pad_x", 0)
             item["pad_y"] = getattr(self, "pad_y", 0)

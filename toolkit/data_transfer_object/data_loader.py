@@ -141,6 +141,8 @@ class FileItemDTO(
         self.pad_y: int = kwargs.get("pad_y", 0)
         self.content_width: int = kwargs.get("content_width", self.crop_width)
         self.content_height: int = kwargs.get("content_height", self.crop_height)
+        # Set by setup_buckets: True only when pad_to_square is active for current batch_size
+        self.pad_to_square_active: bool = kwargs.get("pad_to_square_active", False)
         self.image_valid_mask_tensor: Union[torch.Tensor, None] = None
         self.flip_x: bool = kwargs.get("flip_x", False)
         self.flip_y: bool = kwargs.get("flip_x", False)
@@ -329,19 +331,25 @@ class DataLoaderBatchDTO:
                 self.mask_tensor = torch.cat([x.unsqueeze(0) for x in mask_tensors])
 
             self.image_valid_mask_tensor: Union[torch.Tensor, None] = None
-            if any([x.image_valid_mask_tensor is not None for x in self.file_items]):
+            if any(
+                [
+                    getattr(x, "image_valid_mask_tensor", None) is not None
+                    for x in self.file_items
+                ]
+            ):
                 base_valid = None
                 for x in self.file_items:
-                    if x.image_valid_mask_tensor is not None:
+                    if getattr(x, "image_valid_mask_tensor", None) is not None:
                         base_valid = x.image_valid_mask_tensor
                         break
                 valid_tensors = []
                 for x in self.file_items:
-                    if x.image_valid_mask_tensor is None:
+                    iv = getattr(x, "image_valid_mask_tensor", None)
+                    if iv is None:
                         # missing validity → treat as all-valid (not zeros)
                         valid_tensors.append(torch.ones_like(base_valid))
                     else:
-                        valid_tensors.append(x.image_valid_mask_tensor)
+                        valid_tensors.append(iv)
                 self.image_valid_mask_tensor = torch.cat(
                     [x.unsqueeze(0) for x in valid_tensors]
                 )
