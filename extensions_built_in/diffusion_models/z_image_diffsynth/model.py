@@ -441,16 +441,43 @@ class ZImageDiffSynthModel(BaseModel):
 
         # Diffusers ZImageTransformer2DModel: official DreamBooth / z_image convention.
         if getattr(self, "_main_is_diffusers", False):
+            # Same train/model dtype gate as DiffSynth run_forward: activations may
+            # be train.dtype (fp32) while float8-quantized DiT dequantizes to model.dtype (bf16).
+            train_dtype = getattr(self, "train_torch_dtype", None) or self.torch_dtype
+            model_dtype = self.torch_dtype
+            if isinstance(latent_model_input, torch.Tensor) and latent_model_input.dtype != model_dtype:
+                latent_model_input = latent_model_input.to(model_dtype)
+            if isinstance(text_embeds, torch.Tensor):
+                if text_embeds.dtype != model_dtype:
+                    text_embeds = text_embeds.to(model_dtype)
+            elif isinstance(text_embeds, list):
+                text_embeds = [
+                    p.to(model_dtype) if isinstance(p, torch.Tensor) and p.dtype != model_dtype else p
+                    for p in text_embeds
+                ]
+
             latent_list = list(latent_model_input.unsqueeze(2).unbind(dim=0))
             timestep_model_input = (1000 - timestep) / 1000
-            model_out_list = self._raw_dit(
-                latent_list,
-                timestep_model_input,
-                text_embeds,
-                return_dict=False,
-            )[0]
+            use_autocast = (
+                latent_model_input.device.type == "cuda"
+                and model_dtype in (torch.float16, torch.bfloat16)
+            )
+            with torch.autocast(
+                device_type="cuda",
+                dtype=model_dtype if use_autocast else torch.float32,
+                enabled=use_autocast,
+            ):
+                model_out_list = self._raw_dit(
+                    latent_list,
+                    timestep_model_input,
+                    text_embeds,
+                    return_dict=False,
+                )[0]
             noise_pred = torch.stack([t.float() for t in model_out_list], dim=0)
-            return -noise_pred.squeeze(2)
+            noise_pred = -noise_pred.squeeze(2)
+            if noise_pred.dtype != train_dtype:
+                noise_pred = noise_pred.to(train_dtype)
+            return noise_pred
 
         use_gradient_checkpointing = getattr(self, "gradient_checkpointing", False)
         train_dtype = getattr(self, "train_torch_dtype", None) or self.torch_dtype

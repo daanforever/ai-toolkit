@@ -470,5 +470,51 @@ class TestCudaModelDtypeAutocast(unittest.TestCase):
         self.assertEqual(latents_dtype, torch.float16)
 
 
+class TestDiffusersGetNoisePredictionDtypeGate(unittest.TestCase):
+    """Diffusers _raw_dit path must cast fp32 train activations to model_dtype."""
+
+    def test_diffusers_path_casts_latents_and_embeds_to_model_dtype(self):
+        from extensions_built_in.diffusion_models.z_image_diffsynth.model import (
+            ZImageDiffSynthModel,
+        )
+        from toolkit.prompt_utils import PromptEmbeds
+
+        test_case = self
+
+        class FakeDiT(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.in_channels = 4
+                self.w = nn.Parameter(torch.zeros(1, dtype=torch.bfloat16))
+
+            def forward(self, latent_list, timestep, text_embeds, return_dict=False):
+                test_case.assertIsInstance(latent_list, list)
+                for x in latent_list:
+                    test_case.assertEqual(x.dtype, torch.bfloat16)
+                test_case.assertIsInstance(text_embeds, list)
+                for emb in text_embeds:
+                    test_case.assertEqual(emb.dtype, torch.bfloat16)
+                return ([torch.zeros_like(x) for x in latent_list],)
+
+        obj = object.__new__(ZImageDiffSynthModel)
+        obj._main_is_diffusers = True
+        obj.torch_dtype = torch.bfloat16
+        obj.train_torch_dtype = torch.float32
+        obj.device_torch = torch.device("cpu")
+        obj.gradient_checkpointing = False
+        obj._raw_dit = FakeDiT()
+        obj.model = nn.Identity()
+
+        latents = torch.randn(2, 4, 2, 2, dtype=torch.float32)
+        embeds = PromptEmbeds(torch.randn(2, 8, 8, dtype=torch.float32))
+        timestep = torch.tensor([500.0, 400.0])
+
+        out = ZImageDiffSynthModel.get_noise_prediction(
+            obj, latents, timestep, embeds
+        )
+        self.assertEqual(out.dtype, torch.float32)
+        self.assertEqual(out.shape, latents.shape)
+
+
 if __name__ == "__main__":
     unittest.main()
