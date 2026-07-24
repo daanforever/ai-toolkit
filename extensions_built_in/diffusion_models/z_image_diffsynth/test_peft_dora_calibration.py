@@ -44,7 +44,7 @@ class FeedForward(nn.Module):
         return self.w2(torch.nn.functional.silu(self.w1(x)) + self.w3(x))
 
 
-class _BlockStub(nn.Module):
+class ZImageTransformerBlock(nn.Module):
     def __init__(self, d: int = 8):
         super().__init__()
         self.attention = Attention(d)
@@ -54,7 +54,7 @@ class _BlockStub(nn.Module):
 class _InnerDiTStub(nn.Module):
     def __init__(self, d: int = 8, n_blocks: int = 2):
         super().__init__()
-        self.layers = nn.ModuleList([_BlockStub(d) for _ in range(n_blocks)])
+        self.layers = nn.ModuleList([ZImageTransformerBlock(d) for _ in range(n_blocks)])
 
     def forward(self, x):
         for blk in self.layers:
@@ -73,7 +73,7 @@ class _UnetWrapperStub(nn.Module):
 
 class _StubBaseModel:
     arch = "zimage_diffsynth"
-    target_lora_modules = ["Attention", "FeedForward"]
+    target_lora_modules = ["ZImageTransformerBlock"]
 
     def convert_lora_weights_before_save(self, sd):
         return sd

@@ -1,5 +1,6 @@
 # LoRA target modules and weight conversion for Z-Image DiffSynth (DiffSynth-Studio convention).
-# Attention: to_q, to_k, to_v, to_out.0; FeedForward: w1, w2, w3 (see diffsynth/models/z_image_dit.py).
+# ZImageTransformerBlock Linear children: Attention (to_q/to_k/to_v/to_out.0), FeedForward (w1/w2/w3),
+# and adaLN_modulation.0 when modulation=True (see diffsynth/models/z_image_dit.py).
 # Load convention: prefix "diffusion_model" (diffsynth/utils/lora/general.py).
 
 import re
@@ -7,7 +8,9 @@ from collections import OrderedDict
 from typing import Dict, Any, List, Optional, Tuple
 
 # Class names that contain the linear layers we want for LoRA (toolkit matches by __class__.__name__).
-TARGET_LORA_MODULES = ["Attention", "FeedForward"]
+# Use the block parent (not Attention/FeedForward alone) so adaLN_modulation Linears are included
+# without duplicate LoRAs from nested parents.
+TARGET_LORA_MODULES = ["ZImageTransformerBlock"]
 
 _DIT_BLOCK_KEY_PATTERNS = (
     re.compile(

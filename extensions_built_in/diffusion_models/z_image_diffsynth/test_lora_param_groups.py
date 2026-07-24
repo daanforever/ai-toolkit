@@ -266,7 +266,7 @@ class FeedForward(torch.nn.Module):
         return self.w2(torch.nn.functional.silu(self.w1(x)) + self.w3(x))
 
 
-class _BlockStub(torch.nn.Module):
+class ZImageTransformerBlock(torch.nn.Module):
     def __init__(self, d=4):
         super().__init__()
         self.attention = Attention(d)
@@ -276,9 +276,9 @@ class _BlockStub(torch.nn.Module):
 class _InnerDiTStub(torch.nn.Module):
     def __init__(self, d=4, n_blocks=2, n_noise_refiner=1, n_context_refiner=1):
         super().__init__()
-        self.layers = torch.nn.ModuleList([_BlockStub(d) for _ in range(n_blocks)])
-        self.noise_refiner = torch.nn.ModuleList([_BlockStub(d) for _ in range(n_noise_refiner)])
-        self.context_refiner = torch.nn.ModuleList([_BlockStub(d) for _ in range(n_context_refiner)])
+        self.layers = torch.nn.ModuleList([ZImageTransformerBlock(d) for _ in range(n_blocks)])
+        self.noise_refiner = torch.nn.ModuleList([ZImageTransformerBlock(d) for _ in range(n_noise_refiner)])
+        self.context_refiner = torch.nn.ModuleList([ZImageTransformerBlock(d) for _ in range(n_context_refiner)])
 
     def forward(self, x):
         for blk in self.layers:
@@ -298,7 +298,7 @@ class _UnetWrapperStub(torch.nn.Module):
 class _StubBaseModel:
     """Minimal stand-in for ZImageDiffSynthModel for PeftNetwork construction."""
     arch = "zimage_diffsynth"
-    target_lora_modules = ["Attention", "FeedForward"]
+    target_lora_modules = ["ZImageTransformerBlock"]
 
     def convert_lora_weights_before_save(self, sd):
         return lora_mod.convert_lora_weights_before_save(sd)
