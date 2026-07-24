@@ -84,7 +84,7 @@ config:
         sampling_name_or_path: "e:/Backup/huggingface/hub/models--Tongyi-MAI--Z-Image-Turbo/snapshots/0e36c2b379e66fa531d01cc531c44919e5f1c6fd/"
         quantize: true
         qtype: "qfloat8"
-        quantize_te: false
+        quantize_te: true
         qtype_te: "qfloat8"
         arch: "zimage_diffsynth"
         low_vram: false
