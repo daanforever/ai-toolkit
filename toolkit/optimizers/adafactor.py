@@ -1415,7 +1415,7 @@ class Adafactor(torch.optim.Optimizer):
                     wd = group["weight_decay"]
                     if self.scale_lr_by_index and "index" in group:
                         idx = int(group["index"])
-                        wd = wd - wd * (idx / self._max_index)
+                        wd = wd + wd * (idx / self._max_index) ** self.scale_lr_factor
                     weight_decay_mode = self._validate_weight_decay_mode(
                         group.get("weight_decay_mode", "absolute")
                     )

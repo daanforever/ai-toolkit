@@ -273,10 +273,10 @@ def test_scale_wd_by_index_param_rms():
     opt = _make_indexed_wd_opt("param_rms", lr=0.2, wd=0.1)
     _zero_grad_step(opt)
     effective = opt.get_effective_wd()
-    # wd' = wd * (1 - index/max_index); max_index=2
+    # wd' = wd + wd * (index/max_index)**scale_lr_factor; max_index=2, factor=1
     assert effective[0] == pytest.approx(0.1)
-    assert effective[1] == pytest.approx(0.05)
-    assert effective[2] == pytest.approx(0.0)
+    assert effective[1] == pytest.approx(0.15)
+    assert effective[2] == pytest.approx(0.2)
     assert all(g["weight_decay"] == pytest.approx(0.1) for g in opt.param_groups)
 
 
@@ -284,10 +284,10 @@ def test_scale_wd_by_index_constant():
     opt = _make_indexed_wd_opt("constant", lr=0.2, wd=0.1)
     _zero_grad_step(opt)
     effective = opt.get_effective_wd()
-    # wd' = wd * (1 - index/max_index); no * lr
+    # wd' = wd + wd * (index/max_index)**scale_lr_factor; no * lr
     assert effective[0] == pytest.approx(0.1)
-    assert effective[1] == pytest.approx(0.05)
-    assert effective[2] == pytest.approx(0.0)
+    assert effective[1] == pytest.approx(0.15)
+    assert effective[2] == pytest.approx(0.2)
     assert all(g["weight_decay"] == pytest.approx(0.1) for g in opt.param_groups)
 
 
@@ -313,8 +313,8 @@ def test_scale_wd_by_index_absolute():
     )
     _zero_grad_step(opt)
     # lr_scaled: index 0 -> lr+eps0, index 1 -> 0.5*lr+eps0, index 2 -> eps0
-    # wd' = wd * (1 - index/max_index); max_index=2
-    wd_scaled = [0.1, 0.05, 0.0]
+    # wd' = wd + wd * (index/max_index)**scale_lr_factor; max_index=2, factor=1
+    wd_scaled = [0.1, 0.15, 0.2]
     expected = [
         wd_scaled[0] * (lr + eps[0]),
         wd_scaled[1] * (0.5 * lr + eps[0]),
@@ -337,10 +337,10 @@ def test_scale_wd_skips_unindexed_group():
     )
     _zero_grad_step(opt)
     effective = opt.get_effective_wd()
-    # index 0 -> 0.1; unindexed -> wd * rms; index 2 -> 0.0
+    # index 0 -> 0.1; unindexed -> wd * rms; index 2 -> 0.2
     assert effective[0] == pytest.approx(0.1)
     assert effective[1] == pytest.approx(0.1)
-    assert effective[2] == pytest.approx(0.0)
+    assert effective[2] == pytest.approx(0.2)
 
 
 def test_scale_wd_disabled_when_mode_off():
