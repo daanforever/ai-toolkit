@@ -96,3 +96,43 @@ def test_step_advances_boost_when_detector_stagnant(monkeypatch):
     opt.step()
     assert opt._saddle_point_boost == pytest.approx(1.2)
     assert opt.get_mean_saddle_point_boost() == pytest.approx(1.2)
+
+
+def test_stagnation_history_round_trips_via_state_dict():
+    opt_src, _ = _minimal_adafactor(saddle_point_window=5, saddle_point_step=0.1)
+    for v in (1.0, 1.01, 0.99, 1.0, 1.0):
+        opt_src._saddle_point_detector.check(v)
+    opt_src._saddle_point_boost = 1.5
+    hist_src = list(opt_src._saddle_point_detector.history)
+    assert len(hist_src) == 5
+
+    state = opt_src.state_dict()
+    assert "adafactor_stagnation" in state
+
+    opt_dst, _ = _minimal_adafactor(saddle_point_window=5, saddle_point_step=0.1)
+    opt_dst._saddle_point_boost = 2.0
+    opt_dst.load_state_dict(state)
+
+    assert opt_dst._saddle_point_boost == pytest.approx(1.0)
+    assert list(opt_dst._saddle_point_detector.history) == pytest.approx(hist_src)
+
+
+def test_stagnation_history_truncated_to_destination_window():
+    opt_src, _ = _minimal_adafactor(saddle_point_window=5)
+    for v in (1.0, 2.0, 3.0, 4.0, 5.0):
+        opt_src._saddle_point_detector.check(v)
+    state = opt_src.state_dict()
+
+    opt_dst, _ = _minimal_adafactor(saddle_point_window=3)
+    opt_dst.load_state_dict(state)
+    assert list(opt_dst._saddle_point_detector.history) == pytest.approx([3.0, 4.0, 5.0])
+
+
+def test_load_state_dict_without_stagnation_key_is_ok():
+    opt_src, _ = _minimal_adafactor()
+    state = opt_src.state_dict()
+    state.pop("adafactor_stagnation", None)
+    opt_dst, _ = _minimal_adafactor()
+    opt_dst.load_state_dict(state)
+    assert opt_dst._saddle_point_boost == pytest.approx(1.0)
+

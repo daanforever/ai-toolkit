@@ -33,3 +33,14 @@ class StagnationDetector:
         is_stagnant = cv < self.threshold
         return is_stagnant, float(cv)
 
+    def state_dict(self):
+        """Serialize history (oldest → newest). Threshold/window stay on the instance."""
+        return {"history": list(self.history)}
+
+    def load_state_dict(self, d):
+        """Restore history; truncate to current maxlen (keep newest). Does not change threshold/epsilon/window."""
+        hist = d.get("history", [])
+        maxlen = self.history.maxlen
+        if maxlen is not None and len(hist) > maxlen:
+            hist = hist[-maxlen:]
+        self.history = deque(hist, maxlen=maxlen)

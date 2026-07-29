@@ -148,5 +148,5 @@ def test_clamp_effective_wd_tensor_and_scalar():
 
 def test_effective_beta2_returns_min_on_non_finite_grad_rms():
     group = {"beta2": 0.99, "beta2_adaptive": True, "beta2_min": 0.9, "grad_rms_max": torch.tensor(1.0)}
-    beta2 = Adafactor._effective_beta2(group, torch.tensor(float("nan")), eps0=1e-30, step=10)
+    beta2 = Adafactor._effective_beta2(group, torch.tensor(float("nan")), eps0=1e-30)
     assert beta2 == pytest.approx(0.9)

@@ -46,14 +46,17 @@ class Adafactor(torch.optim.Optimizer):
             Coefficient used to compute running averages of square
             (second moment, like in Adam). Suggested values: 0.99 (default), 0.999.
         beta2_adaptive (`bool`, *optional*, defaults to `False`):
-            If False, use fixed `group["beta2"]`. If True, `_effective_beta2` applies a step
-            schedule then blends with activity ``grad_rms / (grad_rms_max + eps0)`` toward that
-            beta2, floored by `beta2_min`.
+            If False, use fixed `group["beta2"]`. If True, `_effective_beta2` blends with
+            activity ``grad_rms / (grad_rms_max + eps0)`` between `beta2_min` and configured
+            `group["beta2"]` (honors ctor / `set_beta2`).
         beta2_min (`float`, *optional*, defaults to `0.9`):
             Lower bound for adaptive beta2 mixing:
-            ``beta2_min + (beta2 - beta2_min) * activity``, clamped into ``[0, beta2]``.
+            ``beta2_min + (beta2 - beta2_min) * activity``, with `beta2` clamped to ``[0, 1)``
+            and `beta2_min` clamped into ``[0, beta2]``. If ``beta2 <= beta2_min``, returns
+            `beta2_min`.
         rms_max_decay_rate (`float`, *optional*, defaults to `0.97`):
             Decay rate for running max of update RMS used in activity normalization.
+            Must satisfy ``0 < rms_max_decay_rate <= 1``.
             Applied each step: ``update_rms_max = max(update_rms_max * rms_max_decay_rate, update_rms)``.
             The same decay is used for group-level gradient RMS running max (``grad_rms_max`` on each
             param group) for consistency.
@@ -207,6 +210,12 @@ class Adafactor(torch.optim.Optimizer):
     ):
         weight_decay_mode = self._validate_weight_decay_mode(weight_decay_mode)
         eps = self._normalize_eps(eps)
+        rms_max_decay_rate = float(rms_max_decay_rate)
+        if not (0.0 < rms_max_decay_rate <= 1.0):
+            raise ValueError(
+                f"rms_max_decay_rate must satisfy 0 < rms_max_decay_rate <= 1, "
+                f"got rms_max_decay_rate={rms_max_decay_rate}"
+            )
         defaults = {
             "lr": lr,
             "eps": eps,
@@ -268,15 +277,23 @@ class Adafactor(torch.optim.Optimizer):
         self.is_stochastic_rounding_accumulation = False
         self.stochastic_rounding = stochastic_rounding
 
-        # setup stochastic grad accum hooks
-        if stochastic_accumulation:
-            for group in self.param_groups:
-                for param in group['params']:
-                    if param.requires_grad and param.dtype != torch.float32:
-                        self.is_stochastic_rounding_accumulation = True
-                        param.register_post_accumulate_grad_hook(
-                            stochastic_grad_accummulation
-                        )
+        # Clear any prior Adafactor stochastic accum hooks on these params, then
+        # optionally register fresh ones (avoids stacking on optimizer rebuild).
+        for group in self.param_groups:
+            for param in group["params"]:
+                prev = getattr(param, "_adafactor_stoch_hook", None)
+                if prev is not None:
+                    prev.remove()
+                    delattr(param, "_adafactor_stoch_hook")
+                if (
+                    stochastic_accumulation
+                    and param.requires_grad
+                    and param.dtype != torch.float32
+                ):
+                    self.is_stochastic_rounding_accumulation = True
+                    param._adafactor_stoch_hook = param.register_post_accumulate_grad_hook(
+                        stochastic_grad_accummulation
+                    )
     
         self.do_parameter_swapping = do_parameter_swapping
         self.parameter_swapping_factor = parameter_swapping_factor
@@ -293,10 +310,20 @@ class Adafactor(torch.optim.Optimizer):
             self.enable_parameter_swapping(self.parameter_swapping_factor)
 
     def set_lr(self, value: float) -> None:
-        """Update lr at runtime (e.g. from UI)."""
-        self._lr = value
+        """Update lr at runtime (e.g. from UI). Preserves per-group lr ratios."""
+        old = self._lr
+        if old is None or old == 0:
+            nums = [float(g["lr"]) for g in self.param_groups if g.get("lr") is not None]
+            old = max(nums) if nums else 1.0
+        if old == 0:
+            old = 1.0  # e.g. prior set_lr(0) left all groups at 0
+        scale = value / old
         for group in self.param_groups:
-            group["lr"] = value
+            if group.get("lr") is not None:
+                group["lr"] = group["lr"] * scale
+            else:
+                group["lr"] = value
+        self._lr = value
         if is_debug_enabled():
             print_acc(f"Adafactor: applied runtime lr={value}")
 
@@ -404,6 +431,11 @@ class Adafactor(torch.optim.Optimizer):
         if is_debug_enabled():
             print_acc(f"Adafactor: applied runtime beta2_min={self._beta2_min}")
 
+    def state_dict(self):
+        sd = super().state_dict()
+        sd["adafactor_stagnation"] = self._saddle_point_detector.state_dict()
+        return sd
+
     def load_state_dict(self, state_dict):
         config_keys = (
             "lr",
@@ -433,10 +465,16 @@ class Adafactor(torch.optim.Optimizer):
                     cfg[key] = group[key]
             current_group_configs.append(cfg)
 
-        super().load_state_dict(state_dict)
+        sd = dict(state_dict)  # do not mutate caller
+        stag = sd.pop("adafactor_stagnation", None)
 
-        # saddle_point_boost is not checkpointed; always start fresh after load.
+        super().load_state_dict(sd)
+
+        # Boost is not checkpointed; always start fresh after load.
+        # Detector history is restored when present (current window/threshold win).
         self._saddle_point_boost = 1.0
+        if stag is not None:
+            self._saddle_point_detector.load_state_dict(stag)
 
         # Reapply current run config with per-group priority over checkpoint values.
         for idx, group in enumerate(self.param_groups):
@@ -1019,17 +1057,18 @@ class Adafactor(torch.optim.Optimizer):
         group[key] = torch.minimum(current, candidate)
 
     @staticmethod
-    def _effective_beta2(group, grad_rms: torch.Tensor, eps0: float, step: int) -> float:
+    def _effective_beta2(group, grad_rms: torch.Tensor, eps0: float) -> float:
         beta2 = float(group["beta2"])
 
         if not group.get("beta2_adaptive", False):
             return beta2
 
-        scheduled_beta2 = 1.0 - (0.5 / max(1, int(step)))
-        beta2 = min(max(scheduled_beta2, 0.9), 0.999)
-            
+        # Configured beta2 is the activity-blend high end (honors ctor / set_beta2).
+        beta2 = max(0.0, min(beta2, 1.0 - 1e-12))
         beta2_min = float(group.get("beta2_min", 0.9))
         beta2_min = max(0.0, min(beta2, beta2_min))
+        if beta2 <= beta2_min:
+            return beta2_min
 
         grad_rms_max = group.get("grad_rms_max")
         if grad_rms_max is None:
@@ -1322,7 +1361,7 @@ class Adafactor(torch.optim.Optimizer):
                 gr = state["grad_rms"]
                 self._maybe_group_running_max_update(group, "grad_rms_max", gr)
 
-                beta2 = self._effective_beta2(group, gr, eps0, state["step"])
+                beta2 = self._effective_beta2(group, gr, eps0)
                 update = (grad**2) + eps0
                 if factored:
                     exp_avg_sq_row = state["exp_avg_sq_row"]
@@ -1448,7 +1487,12 @@ class Adafactor(torch.optim.Optimizer):
                 self._maybe_group_running_max_update(group, "update_rms_max", update_rms)
 
                 if p.dtype != torch.float32 or is_quantized:
-                    if self.stochastic_rounding:
+                    use_stochastic = (
+                        self.stochastic_rounding
+                        and p.device.type != "cpu"
+                        and p_data_fp32.device.type != "cpu"
+                    )
+                    if use_stochastic:
                         copy_stochastic(p, p_data_fp32)
                     else:
                         update_parameter(p, p_data_fp32)

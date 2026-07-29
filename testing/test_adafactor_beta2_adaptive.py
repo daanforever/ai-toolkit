@@ -69,3 +69,44 @@ def test_adaptive_beta2_recovers_from_stale_second_moment():
     assert adaptive_beta2_mean < 0.95
     assert adaptive_v < static_v * 0.2
     assert adaptive_update > static_update * 1.4
+
+
+def test_effective_beta2_high_activity_uses_configured_beta2():
+    group = {
+        "beta2": 0.99,
+        "beta2_adaptive": True,
+        "beta2_min": 0.9,
+        "grad_rms_max": torch.tensor(1.0),
+    }
+    beta2 = Adafactor._effective_beta2(group, torch.tensor(1.0), eps0=1e-30)
+    assert beta2 == pytest.approx(0.99, rel=1e-6)
+
+
+def test_effective_beta2_low_activity_near_beta2_min():
+    group = {
+        "beta2": 0.99,
+        "beta2_adaptive": True,
+        "beta2_min": 0.9,
+        "grad_rms_max": torch.tensor(1.0),
+    }
+    beta2 = Adafactor._effective_beta2(group, torch.tensor(1e-12), eps0=1e-30)
+    assert beta2 == pytest.approx(0.9, abs=1e-4)
+
+
+def test_effective_beta2_honors_set_beta2_high_end():
+    p = torch.nn.Parameter(torch.ones(2, 2))
+    opt = Adafactor(
+        [p],
+        lr=1e-4,
+        beta2=0.99,
+        beta2_adaptive=True,
+        beta2_min=0.9,
+        scale_parameter=False,
+        relative_step=False,
+        weight_decay=0.0,
+    )
+    opt.set_beta2(0.95)
+    group = opt.param_groups[0]
+    group["grad_rms_max"] = torch.tensor(1.0)
+    beta2 = Adafactor._effective_beta2(group, torch.tensor(1.0), eps0=1e-30)
+    assert beta2 == pytest.approx(0.95, rel=1e-6)

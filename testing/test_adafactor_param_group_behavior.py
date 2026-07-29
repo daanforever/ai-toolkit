@@ -267,3 +267,95 @@ def test_instability_score_accumulates_when_brakes_can_apply():
     p.grad = torch.ones_like(p)
     opt.step()
     assert opt.param_groups[0]["instability_score"] == pytest.approx(0.1)
+
+
+def test_set_lr_preserves_per_group_ratios():
+    """Runtime set_lr scales all groups; relative ratios stay the same."""
+    p1 = torch.nn.Parameter(torch.ones(2))
+    p2 = torch.nn.Parameter(torch.ones(2))
+    opt = Adafactor(
+        [
+            {"params": [p1], "lr": 1e-4},
+            {"params": [p2], "lr": 5e-5},
+        ],
+        lr=1e-4,
+        relative_step=False,
+        scale_parameter=False,
+        beta1=None,
+        weight_decay=0.0,
+    )
+    assert opt.param_groups[0]["lr"] == pytest.approx(1e-4)
+    assert opt.param_groups[1]["lr"] == pytest.approx(5e-5)
+    ratio_before = opt.param_groups[0]["lr"] / opt.param_groups[1]["lr"]
+
+    opt.set_lr(2e-4)
+
+    assert opt._lr == pytest.approx(2e-4)
+    assert opt.param_groups[0]["lr"] == pytest.approx(2e-4)
+    assert opt.param_groups[1]["lr"] == pytest.approx(1e-4)
+    assert opt.param_groups[0]["lr"] / opt.param_groups[1]["lr"] == pytest.approx(ratio_before)
+
+
+def test_rms_max_decay_rate_rejects_invalid_values():
+    p = torch.nn.Parameter(torch.ones(2))
+    for bad in (0.0, -0.1, 1.01):
+        with pytest.raises(ValueError, match="rms_max_decay_rate"):
+            Adafactor(
+                [p],
+                lr=1e-3,
+                rms_max_decay_rate=bad,
+                relative_step=False,
+                scale_parameter=False,
+                beta1=None,
+                weight_decay=0.0,
+            )
+
+
+def test_stochastic_accum_hooks_do_not_stack_on_rebuild():
+    p = torch.nn.Parameter(torch.ones(2, dtype=torch.bfloat16))
+    opt1 = Adafactor(
+        [p],
+        lr=1e-3,
+        stochastic_accumulation=True,
+        relative_step=False,
+        scale_parameter=False,
+        beta1=None,
+        weight_decay=0.0,
+    )
+    handle1 = getattr(p, "_adafactor_stoch_hook", None)
+    assert handle1 is not None
+    opt2 = Adafactor(
+        [p],
+        lr=1e-3,
+        stochastic_accumulation=True,
+        relative_step=False,
+        scale_parameter=False,
+        beta1=None,
+        weight_decay=0.0,
+    )
+    handle2 = getattr(p, "_adafactor_stoch_hook", None)
+    assert handle2 is not None
+    assert handle2 is not handle1
+    # Prior handle must have been removed (idempotent remove is fine; identity changed).
+    assert opt1 is not opt2
+
+
+def test_cpu_bf16_stochastic_rounding_falls_back_without_assert():
+    """CPU non-fp32 + stochastic_rounding must use update_parameter (no copy_stochastic assert)."""
+    p = torch.nn.Parameter(torch.ones(4, dtype=torch.bfloat16))
+    opt = Adafactor(
+        [p],
+        lr=1e-2,
+        stochastic_rounding=True,
+        stochastic_accumulation=False,
+        relative_step=False,
+        scale_parameter=False,
+        beta1=None,
+        weight_decay=0.0,
+        factored=False,
+    )
+    before = p.detach().float().clone()
+    p.grad = torch.ones_like(p, dtype=torch.bfloat16)
+    opt.step()
+    assert not torch.allclose(p.detach().float(), before)
+
