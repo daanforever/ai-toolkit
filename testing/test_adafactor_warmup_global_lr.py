@@ -138,3 +138,135 @@ def test_warmup_stops_all_groups_when_any_reaches_target():
     assert not g1.get("warmup_active", False)
     assert "warmup_lr" not in g1
     assert "warmup_progress" not in g1
+
+
+def test_warmup_boost_up_overshoots_then_snaps_to_target():
+    """Upward segment ramps toward lr * boost; cleanup snaps to real lr."""
+    w1 = torch.nn.Parameter(torch.ones(1))
+    lr = 1e-4
+    boost = 2.0
+    steps = 4
+    opt = Adafactor(
+        [w1],
+        lr=lr,
+        relative_step=False,
+        scale_parameter=False,
+        warmup_init=True,
+        warmup_steps=steps,
+        warmup_boost=boost,
+        beta1=None,
+        weight_decay=0.0,
+        factored=False,
+    )
+    g = opt.param_groups[0]
+    eps1 = g["eps"][1]
+    lr_start = lr * eps1
+    lr_interp = lr * boost
+    expected_delta = (lr_interp - lr_start) / steps
+
+    w1.grad = torch.zeros_like(w1)
+    opt.step()
+    assert g["warmup_target"] == lr
+    assert g["warmup_delta"] == pytest.approx(expected_delta)
+    assert g["warmup_lr"] == pytest.approx(lr_start)
+
+    for _ in range(steps - 1):
+        w1.grad = torch.zeros_like(w1)
+        opt.step()
+
+    assert g.get("warmup_complete_pending_cleanup") is True
+    last_warmup_lr = lr_start + (steps - 1) * expected_delta
+    assert g["warmup_lr"] == pytest.approx(last_warmup_lr)
+    assert last_warmup_lr > lr
+
+    w1.grad = torch.zeros_like(w1)
+    opt.step()
+    assert "warmup_lr" not in g
+    assert g["lr_mean"].item() == pytest.approx(lr)
+    assert g["warmup_lr_previous"] == pytest.approx(lr)
+
+
+def test_warmup_boost_down_undershoots_then_snaps_to_target():
+    """Downward segment ramps toward lr / boost; cleanup snaps to real lr."""
+    w1 = torch.nn.Parameter(torch.ones(1))
+    lr_high = 1e-4
+    lr_low = 1e-5
+    boost = 2.0
+    # Need enough steps so last intermediate (p=N-1) crosses below real lr_low.
+    steps = 20
+    opt = Adafactor(
+        [w1],
+        lr=lr_high,
+        relative_step=False,
+        scale_parameter=False,
+        warmup_init=True,
+        warmup_steps=steps,
+        warmup_boost=boost,
+        beta1=None,
+        weight_decay=0.0,
+        factored=False,
+    )
+    g = opt.param_groups[0]
+
+    # Complete initial upward segment and cleanup so previous == lr_high.
+    for _ in range(steps + 1):
+        w1.grad = torch.zeros_like(w1)
+        opt.step()
+    assert g["warmup_lr_previous"] == pytest.approx(lr_high)
+
+    g["lr"] = lr_low
+    lr_interp = lr_low / boost
+    expected_delta = (lr_interp - lr_high) / steps
+
+    w1.grad = torch.zeros_like(w1)
+    opt.step()
+    assert g["warmup_target"] == lr_low
+    assert g["warmup_delta"] == pytest.approx(expected_delta)
+    assert g["warmup_lr"] == pytest.approx(lr_high)
+
+    for _ in range(steps - 1):
+        w1.grad = torch.zeros_like(w1)
+        opt.step()
+
+    assert g.get("warmup_complete_pending_cleanup") is True
+    last_warmup_lr = lr_high + (steps - 1) * expected_delta
+    assert g["warmup_lr"] == pytest.approx(last_warmup_lr)
+    assert last_warmup_lr < lr_low
+
+    w1.grad = torch.zeros_like(w1)
+    opt.step()
+    assert "warmup_lr" not in g
+    assert g["lr_mean"].item() == pytest.approx(lr_low)
+    assert g["warmup_lr_previous"] == pytest.approx(lr_low)
+
+
+def test_warmup_boost_force_stop_syncs_previous_to_real_lr():
+    """Force-stopped group snaps warmup_lr_previous to real lr, not overshot intermediate."""
+    p1 = torch.nn.Parameter(torch.ones(2))
+    p2 = torch.nn.Parameter(torch.ones(2))
+    lr = 1.0
+    boost = 2.0
+    opt = Adafactor(
+        [{"params": [p1]}, {"params": [p2]}],
+        lr=lr,
+        relative_step=False,
+        scale_parameter=False,
+        warmup_init=True,
+        warmup_steps=10,
+        warmup_boost=boost,
+        beta1=None,
+        weight_decay=0.0,
+    )
+    g0, g1 = opt.param_groups
+    g0["warmup_steps"] = 2
+    g1["warmup_steps"] = 10
+
+    for _ in range(2):
+        p1.grad = torch.zeros_like(p1)
+        p2.grad = torch.zeros_like(p2)
+        opt.step()
+
+    assert g0.get("warmup_complete_pending_cleanup") is True
+    assert not g1.get("warmup_active", False)
+    assert "warmup_lr" not in g1
+    assert g1["warmup_lr_previous"] == pytest.approx(lr)

@@ -98,6 +98,11 @@ class Adafactor(torch.optim.Optimizer):
         warmup_steps (`int`, *optional*, defaults to `100`):
             When `warmup_init=True`, number of optimizer steps to interpolate each warmup segment from its start
             toward `lr`. Progress is advanced once per group per `step()` (see `_warmup_update_group`).
+        warmup_boost (`float`, *optional*, defaults to `1.0`):
+            When `warmup_init=True`, overshoot factor for the warmup interpolation target. Must be ``> 0``.
+            For an upward segment the ramp aims at ``lr * warmup_boost``; for a downward segment at
+            ``lr / warmup_boost``. When the segment ends (``stop_warmup``), the applied LR snaps to the
+            real scheduled ``lr``. With ``warmup_boost=1`` behavior matches an unboosted ramp.
         do_parameter_swapping (`bool`, *optional*, defaults to `False`):
             If True, at init calls `enable_parameter_swapping`, which deactivates all params then
             re-enables a random subset. Not automatic every `step()`; further reshuffles only via
@@ -201,6 +206,7 @@ class Adafactor(torch.optim.Optimizer):
         warmup_init=False,
         min_lr=1e-6,
         warmup_steps: int = 100,
+        warmup_boost: float = 1.0,
         do_parameter_swapping=False,
         parameter_swapping_factor=0.1,
         stochastic_accumulation=True,
@@ -222,6 +228,11 @@ class Adafactor(torch.optim.Optimizer):
                 f"rms_max_decay_rate must satisfy 0 < rms_max_decay_rate <= 1, "
                 f"got rms_max_decay_rate={rms_max_decay_rate}"
             )
+        warmup_boost = float(warmup_boost)
+        if not (warmup_boost > 0.0):
+            raise ValueError(
+                f"warmup_boost must be > 0, got warmup_boost={warmup_boost}"
+            )
         defaults = {
             "lr": lr,
             "eps": eps,
@@ -238,6 +249,7 @@ class Adafactor(torch.optim.Optimizer):
             "relative_step": relative_step,
             "warmup_init": warmup_init,
             "warmup_steps": warmup_steps,
+            "warmup_boost": warmup_boost,
             "min_lr": min_lr,
             "factored": factored,
             "emergency_brake": emergency_brake,
@@ -276,6 +288,7 @@ class Adafactor(torch.optim.Optimizer):
         self._relative_step = relative_step
         self._warmup_init = warmup_init
         self._warmup_steps = warmup_steps
+        self._warmup_boost = warmup_boost
         self._beta1 = beta1
         self._beta2 = beta2
         self._beta2_adaptive = beta2_adaptive
@@ -466,6 +479,7 @@ class Adafactor(torch.optim.Optimizer):
             "relative_step",
             "warmup_init",
             "warmup_steps",
+            "warmup_boost",
             "beta1",
             "beta2",
             "beta2_adaptive",
@@ -670,6 +684,10 @@ class Adafactor(torch.optim.Optimizer):
         ):
             param_group.pop(k, None)
 
+        lr = param_group.get("lr")
+        if lr is not None:
+            param_group["warmup_lr_previous"] = lr
+
         if is_debug_enabled():
             print_acc(f"Adafactor: warmup stopped")
 
@@ -678,8 +696,11 @@ class Adafactor(torch.optim.Optimizer):
 
         Starts a new segment when ``group["lr"]`` or ``warmup_steps`` changes.
         Segment: linear ramp stored in ``warmup_lr``; start level is prior ``warmup_lr`` if
-        present, else ``group["lr"] * eps[1]``. After ``warmup_steps`` updates, marks warmup
-        complete and performs cleanup on the next step (so the last warmup_lr is applied once).
+        present, else ``group["lr"] * eps[1]``. Interpolation aims at a boosted target
+        (``lr * warmup_boost`` upward, ``lr / warmup_boost`` downward); ``warmup_target``
+        stays the real scheduled ``lr``. After ``warmup_steps`` updates, marks warmup
+        complete and performs cleanup on the next step (so the last warmup_lr is applied once),
+        snapping applied LR to the real scheduled ``lr``.
         Completing a segment triggers a global stop for all other groups via ``_global_lr``.
         """
         if group.pop("warmup_complete_pending_cleanup", False):
@@ -709,17 +730,26 @@ class Adafactor(torch.optim.Optimizer):
             else:
                 lr_start = lr_target * group["eps"][1]
 
+            boost = float(group["warmup_boost"])
+            if lr_target > lr_start:
+                lr_interp = lr_target * boost
+            elif lr_target < lr_start:
+                lr_interp = lr_target / boost
+            else:
+                lr_interp = lr_target
+
             group["warmup_active"]    = True
             group["warmup_start"]     = lr_start
             group["warmup_target"]    = lr_target
             group["warmup_progress"]  = 0
-            group["warmup_delta"]     = (lr_target - lr_start) / warmup_steps
+            group["warmup_delta"]     = (lr_interp - lr_start) / warmup_steps
             group["warmup_steps_old"] = warmup_steps
 
             if is_debug_enabled():
-                direction = "up" if lr_target > lr_target_old else "down"
+                direction = "up" if lr_target > lr_start else "down"
                 print_acc(
-                    f"Adafactor: base_lr changed ({lr_start:.2e} -> {lr_target:.2e}, {direction}), starting warmup"
+                    f"Adafactor: base_lr changed ({lr_start:.2e} -> interp {lr_interp:.2e}, "
+                    f"target {lr_target:.2e}, {direction}), starting warmup"
                 )
 
         if group.get("warmup_active", False):
