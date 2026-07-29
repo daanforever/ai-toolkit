@@ -201,6 +201,22 @@ def test_scale_lr_factor_errors_when_non_positive():
         )
 
 
+def test_weight_decay_max_errors_when_non_positive():
+    p = torch.nn.Parameter(torch.ones(2))
+    with pytest.raises(ValueError, match="weight_decay_max must be > 0"):
+        Adafactor(
+            [{"params": [p]}],
+            lr=1e-3,
+            relative_step=False,
+            scale_parameter=False,
+            warmup_init=False,
+            beta1=None,
+            weight_decay=0.0,
+            scale_lr_by_index=False,
+            weight_decay_max=0.0,
+        )
+
+
 def test_scale_lr_factor_ignored_when_mode_off():
     p0 = torch.nn.Parameter(torch.ones(2))
     p1 = torch.nn.Parameter(torch.ones(2))
@@ -231,6 +247,7 @@ def _make_indexed_wd_opt(
     scale_lr_by_index: bool = True,
     lr: float = 0.2,
     wd: float = 0.1,
+    weight_decay_max: float = 0.5,
     include_unindexed: bool = False,
 ):
     p0 = torch.nn.Parameter(torch.ones(4, dtype=torch.float32))
@@ -258,6 +275,7 @@ def _make_indexed_wd_opt(
         weight_decay=wd,
         weight_decay_mode=weight_decay_mode,
         scale_lr_by_index=scale_lr_by_index,
+        weight_decay_max=weight_decay_max,
     )
     return opt
 
@@ -273,11 +291,12 @@ def test_scale_wd_by_index_param_rms():
     opt = _make_indexed_wd_opt("param_rms", lr=0.2, wd=0.1)
     _zero_grad_step(opt)
     effective = opt.get_effective_wd()
-    # wd' = wd ** (1 - (index/max_index)**scale_lr_factor); max_index=2, factor=1
-    # idx=2 -> 1.0, then clamped by _clamp_effective_wd to 1 - 1e-6
+    # wd' = wd**(1-t) * weight_decay_max**t; t=(index/max)**factor
+    # max_index=2, factor=1, weight_decay_max=0.5
+    assert opt.weight_decay_max == pytest.approx(0.5)
     assert effective[0] == pytest.approx(0.1)
-    assert effective[1] == pytest.approx(0.1**0.5)
-    assert effective[2] == pytest.approx(1.0 - 1e-6)
+    assert effective[1] == pytest.approx((0.1 * 0.5) ** 0.5)
+    assert effective[2] == pytest.approx(0.5)
     assert all(g["weight_decay"] == pytest.approx(0.1) for g in opt.param_groups)
 
 
@@ -285,10 +304,10 @@ def test_scale_wd_by_index_constant():
     opt = _make_indexed_wd_opt("constant", lr=0.2, wd=0.1)
     _zero_grad_step(opt)
     effective = opt.get_effective_wd()
-    # wd' = wd ** (1 - (index/max_index)**scale_lr_factor); no * lr
+    # wd' = wd**(1-t) * weight_decay_max**t; no * lr
     assert effective[0] == pytest.approx(0.1)
-    assert effective[1] == pytest.approx(0.1**0.5)
-    assert effective[2] == pytest.approx(1.0 - 1e-6)
+    assert effective[1] == pytest.approx((0.1 * 0.5) ** 0.5)
+    assert effective[2] == pytest.approx(0.5)
     assert all(g["weight_decay"] == pytest.approx(0.1) for g in opt.param_groups)
 
 
@@ -314,8 +333,8 @@ def test_scale_wd_by_index_absolute():
     )
     _zero_grad_step(opt)
     # lr_scaled: index 0 -> lr+eps0, index 1 -> 0.5*lr+eps0, index 2 -> eps0
-    # wd' = wd ** (1 - (index/max_index)**scale_lr_factor); max_index=2, factor=1
-    wd_scaled = [0.1, 0.1**0.5, 1.0]
+    # wd' = wd**(1-t) * weight_decay_max**t; max_index=2, factor=1, max=0.5
+    wd_scaled = [0.1, (0.1 * 0.5) ** 0.5, 0.5]
     expected = [
         wd_scaled[0] * (lr + eps[0]),
         wd_scaled[1] * (0.5 * lr + eps[0]),
@@ -324,6 +343,16 @@ def test_scale_wd_by_index_absolute():
     effective = opt.get_effective_wd()
     for got, exp in zip(effective, expected):
         assert got == pytest.approx(exp)
+
+
+def test_scale_wd_by_index_custom_weight_decay_max():
+    opt = _make_indexed_wd_opt("constant", lr=0.2, wd=0.1, weight_decay_max=0.25)
+    _zero_grad_step(opt)
+    effective = opt.get_effective_wd()
+    assert opt.weight_decay_max == pytest.approx(0.25)
+    assert effective[0] == pytest.approx(0.1)
+    assert effective[1] == pytest.approx((0.1 * 0.25) ** 0.5)
+    assert effective[2] == pytest.approx(0.25)
 
 
 def test_scale_wd_by_index_update_rms_zero_grad():
@@ -338,10 +367,10 @@ def test_scale_wd_skips_unindexed_group():
     )
     _zero_grad_step(opt)
     effective = opt.get_effective_wd()
-    # index 0 -> 0.1; unindexed -> wd * rms; index 2 -> 1.0 (clamped)
+    # index 0 -> 0.1; unindexed -> wd * rms; index 2 -> weight_decay_max=0.5
     assert effective[0] == pytest.approx(0.1)
     assert effective[1] == pytest.approx(0.1)
-    assert effective[2] == pytest.approx(1.0 - 1e-6)
+    assert effective[2] == pytest.approx(0.5)
 
 
 def test_scale_wd_disabled_when_mode_off():

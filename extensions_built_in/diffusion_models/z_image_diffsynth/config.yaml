@@ -49,6 +49,7 @@ config:
           beta2_adaptive: false
           beta2_min: 0.9
           weight_decay: 0.03
+          weight_decay_max: 0.5
           scale_parameter: false
           relative_step: false
           warmup_init: true

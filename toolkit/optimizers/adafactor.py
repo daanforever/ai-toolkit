@@ -132,6 +132,11 @@ class Adafactor(torch.optim.Optimizer):
         scale_lr_factor (`float`, *optional*, defaults to `1.0`):
             Strength of index-based LR/WD scaling when `scale_lr_by_index=True`.
             Must be ``> 0``.
+        weight_decay_max (`float`, *optional*, defaults to `0.5`):
+            Target for index-scaled weight decay when `scale_lr_by_index=True`.
+            Geometric interpolate toward this value:
+            ``wd' = wd**(1-t) * weight_decay_max**t`` with
+            ``t = (index/max_index)**scale_lr_factor``. Must be ``> 0``.
 
     This implementation handles low-precision (FP16, bfloat) values, but we have not thoroughly tested.
 
@@ -207,6 +212,7 @@ class Adafactor(torch.optim.Optimizer):
         saddle_point_step: float = 0.01,
         scale_lr_by_index: bool = False,
         scale_lr_factor: float = 1.0,
+        weight_decay_max: float = 0.5,
     ):
         weight_decay_mode = self._validate_weight_decay_mode(weight_decay_mode)
         eps = self._normalize_eps(eps)
@@ -243,7 +249,9 @@ class Adafactor(torch.optim.Optimizer):
             group["eps"] = self._normalize_eps(group.get("eps", eps), fallback_eps1=eps[1])
             group.setdefault("warmup_active", False)
 
-        self._init_scale_lr_by_index(scale_lr_by_index, scale_lr_factor)
+        self._init_scale_lr_by_index(
+            scale_lr_by_index, scale_lr_factor, weight_decay_max
+        )
 
         # Create stagnation detector for RMS(parameter) based heuristic.
         self._saddle_point_detector = StagnationDetector(
@@ -328,7 +336,10 @@ class Adafactor(torch.optim.Optimizer):
             print_acc(f"Adafactor: applied runtime lr={value}")
 
     def _init_scale_lr_by_index(
-        self, scale_lr_by_index: bool, scale_lr_factor: float = 1.0
+        self,
+        scale_lr_by_index: bool,
+        scale_lr_factor: float = 1.0,
+        weight_decay_max: float = 0.5,
     ) -> None:
         """Enable index-based LR scaling and resolve max_index from param groups."""
         scale_lr_factor = float(scale_lr_factor)
@@ -336,7 +347,13 @@ class Adafactor(torch.optim.Optimizer):
             raise ValueError(
                 f"scale_lr_factor must be > 0, got scale_lr_factor={scale_lr_factor}"
             )
+        weight_decay_max = float(weight_decay_max)
+        if weight_decay_max <= 0:
+            raise ValueError(
+                f"weight_decay_max must be > 0, got weight_decay_max={weight_decay_max}"
+            )
         self.scale_lr_factor = scale_lr_factor
+        self.weight_decay_max = weight_decay_max
         self.scale_lr_by_index = bool(scale_lr_by_index)
         self._max_index = None
         if not self.scale_lr_by_index:
@@ -1454,9 +1471,10 @@ class Adafactor(torch.optim.Optimizer):
                     wd = group["weight_decay"]
                     if self.scale_lr_by_index and "index" in group:
                         idx = int(group["index"])
-                        # Exponential (geometric) growth toward 1 as idx -> max_index:
-                        # idx=0 -> wd, idx=max_index -> 1
-                        wd = wd ** (1.0 - (idx / self._max_index) ** self.scale_lr_factor)
+                        # Geometric interpolate toward weight_decay_max as idx -> max_index:
+                        # idx=0 -> wd, idx=max_index -> weight_decay_max
+                        t = (idx / self._max_index) ** self.scale_lr_factor
+                        wd = wd ** (1.0 - t) * self.weight_decay_max ** t
                     weight_decay_mode = self._validate_weight_decay_mode(
                         group.get("weight_decay_mode", "absolute")
                     )
