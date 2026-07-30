@@ -64,12 +64,23 @@ def test_hfadafactor_lr_none_relative_schedule():
     _step_once(opt, p)
 
 
-def test_hfadafactor_rejects_local_only_beta2():
-    p = torch.nn.Parameter(torch.ones(2))
-    with pytest.raises(TypeError):
-        get_optimizer(
-            [p],
-            optimizer_type="hfadafactor",
-            learning_rate=1e-3,
-            optimizer_params={"beta2": 0.99},
-        )
+def test_hfadafactor_drops_local_only_keys():
+    """UI leftover Adafactor-local keys must not crash HFAdafactor."""
+    p = torch.nn.Parameter(torch.ones(4, 4))
+    opt = get_optimizer(
+        [p],
+        optimizer_type="hfadafactor",
+        learning_rate=1e-3,
+        optimizer_params={
+            "weight_decay": 0.0001,
+            "weight_decay_increment": 0,
+            "weight_decay_mode": "absolute",
+            "warmup_steps": 100,
+            "beta2": 0.99,
+        },
+    )
+    assert isinstance(opt, HFAdafactor)
+    assert opt.param_groups[0]["weight_decay"] == pytest.approx(0.0001)
+    assert "beta2" not in opt.param_groups[0]
+    _step_once(opt, p)
+    assert torch.isfinite(p).all()

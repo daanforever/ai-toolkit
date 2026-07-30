@@ -139,10 +139,13 @@ export interface TrainConfig {
   unload_text_encoder: boolean;
   cache_text_embeddings: boolean;
   optimizer_params: {
-    weight_decay: number;
-    weight_decay_increment: number;
-    weight_decay_mode: WeightDecayMode;
-    warmup_steps: number;
+    weight_decay?: number;
+    weight_decay_increment?: number;
+    weight_decay_mode?: WeightDecayMode;
+    warmup_steps?: number;
+    beta1?: number | null;
+    beta2?: number;
+    min_lr?: number;
   };
   skip_first_sample: boolean;
   force_first_sample: boolean;

@@ -88,16 +88,10 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
   const timestepWeighting =
     train?.timestep_weighting ?? defaultJobConfig.config.process[0].train.timestep_weighting ?? 'none';
   const contentOrStyle = train?.content_or_style ?? defaultJobConfig.config.process[0].train.content_or_style;
-  const weightDecay = optimizerParams?.weight_decay ?? defaultJobConfig.config.process[0].train.optimizer_params.weight_decay;
-  const weightDecayIncrement =
-    optimizerParams?.weight_decay_increment ??
-    defaultJobConfig.config.process[0].train.optimizer_params.weight_decay_increment;
-  const weightDecayMode =
-    optimizerParams?.weight_decay_mode ??
-    defaultJobConfig.config.process[0].train.optimizer_params.weight_decay_mode;
-  const warmupSteps =
-    optimizerParams?.warmup_steps ??
-    defaultJobConfig.config.process[0].train.optimizer_params.warmup_steps;
+  const weightDecay = optimizerParams?.weight_decay ?? 1e-4;
+  const weightDecayIncrement = optimizerParams?.weight_decay_increment ?? 0.0;
+  const weightDecayMode = optimizerParams?.weight_decay_mode ?? 'absolute';
+  const warmupSteps = optimizerParams?.warmup_steps ?? 100;
   const beta1 = optimizerParams?.beta1 != null
     ? Number(optimizerParams.beta1)
     : null;
@@ -198,26 +192,37 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
       return;
     }
     if (!process.train.optimizer_params) {
-      process.train.optimizer_params = {
-        weight_decay: 1e-4,
-        weight_decay_increment: 0.0,
-        weight_decay_mode: 'absolute',
-        warmup_steps: 100,
-      };
+      process.train.optimizer_params = {};
     }
     process.train.timestep_type = timestepType;
     process.train.timestep_weighting = timestepWeighting;
     process.train.content_or_style = contentOrStyle;
-    process.train.optimizer_params.weight_decay = weightDecay;
-    process.train.optimizer_params.weight_decay_increment = weightDecayIncrement;
-    process.train.optimizer_params.weight_decay_mode = weightDecayMode;
-    process.train.optimizer_params.warmup_steps = warmupSteps;
-    (process.train.optimizer_params as Record<string, number | null>).beta1 = beta1;
-    (process.train.optimizer_params as Record<string, number>).beta2 = beta2;
-    (process.train as Record<string, number>).lr = lr;
-    if (hasMinLr) {
-      (process.train.optimizer_params as Record<string, number>).min_lr = minLr ?? 1e-6;
+    const optimizerName = (process.train.optimizer || '').toLowerCase();
+    const isHfAdafactor = optimizerName === 'hfadafactor' || optimizerName === 'hf_adafactor';
+    const op = process.train.optimizer_params as Record<string, number | string | null>;
+    op.weight_decay = weightDecay;
+    if (isHfAdafactor) {
+      delete op.weight_decay_increment;
+      delete op.weight_decay_mode;
+      delete op.warmup_steps;
+      delete op.beta2;
+      delete op.min_lr;
+      if (beta1 != null) {
+        op.beta1 = beta1;
+      } else {
+        delete op.beta1;
+      }
+    } else {
+      op.weight_decay_increment = weightDecayIncrement;
+      op.weight_decay_mode = weightDecayMode;
+      op.warmup_steps = warmupSteps;
+      op.beta1 = beta1;
+      op.beta2 = beta2;
+      if (hasMinLr) {
+        op.min_lr = minLr ?? 1e-6;
+      }
     }
+    (process.train as Record<string, number>).lr = lr;
     (process.train as Record<string, number>).gaussian_mean = gaussianMean;
     (process.train as Record<string, number>).gaussian_std = gaussianStd;
     (process.train as Record<string, number>).gaussian_mean_2 = gaussianMean2;

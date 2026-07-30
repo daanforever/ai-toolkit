@@ -517,7 +517,7 @@ export default function SimpleJob({
                   <NumberInput
                     label="Weight Decay"
                     className="flex-1"
-                    value={jobConfig.config.process[0].train.optimizer_params.weight_decay}
+                    value={jobConfig.config.process[0].train.optimizer_params.weight_decay ?? 1e-4}
                     onChange={value => setJobConfig(value, 'config.process[0].train.optimizer_params.weight_decay')}
                     placeholder="eg. 0.0001"
                     min={0}

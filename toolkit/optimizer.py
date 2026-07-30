@@ -104,7 +104,25 @@ def get_optimizer(
         optimizer = Adafactor(params, lr=float(learning_rate), **optimizer_params)
     elif lower_type in ('hfadafactor', 'hf_adafactor'):
         from toolkit.optimizers.hf_adafactor import HFAdafactor
+        _HF_ADAFACTOR_KEYS = frozenset({
+            'eps',
+            'clip_threshold',
+            'decay_rate',
+            'beta1',
+            'weight_decay',
+            'scale_parameter',
+            'relative_step',
+            'warmup_init',
+        })
         op = dict(optimizer_params)
+        dropped = [k for k in op if k not in _HF_ADAFACTOR_KEYS]
+        if dropped:
+            for k in dropped:
+                op.pop(k, None)
+            print(
+                f"HFAdafactor: ignoring unsupported optimizer_params keys: "
+                f"{', '.join(sorted(dropped))}"
+            )
         if learning_rate is None or float(learning_rate) == 0.0:
             effective_lr = None
             op.setdefault('relative_step', True)

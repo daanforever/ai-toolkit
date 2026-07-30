@@ -75,9 +75,6 @@ export const defaultJobConfig: JobConfig = {
           content_or_style: 'balanced',
           optimizer_params: {
             weight_decay: 1e-4,
-            weight_decay_increment: 0.0,
-            weight_decay_mode: 'absolute',
-            warmup_steps: 100,
           },
           unload_text_encoder: false,
           cache_text_embeddings: false,
@@ -205,17 +202,7 @@ export const migrateJobConfig = (jobConfig: JobConfig): JobConfig => {
   }
 
   if (!jobConfig.config.process[0].train.optimizer_params) {
-    jobConfig.config.process[0].train.optimizer_params = {
-      weight_decay: 1e-4,
-      weight_decay_increment: 0.0,
-      weight_decay_mode: 'absolute',
-      warmup_steps: 100,
-    };
-  } else if (!('weight_decay_increment' in jobConfig.config.process[0].train.optimizer_params)) {
-    jobConfig.config.process[0].train.optimizer_params.weight_decay_increment = 0.0;
-  }
-  if (!('warmup_steps' in jobConfig.config.process[0].train.optimizer_params)) {
-    jobConfig.config.process[0].train.optimizer_params.warmup_steps = 100;
+    jobConfig.config.process[0].train.optimizer_params = {};
   }
   return jobConfig;
 };
