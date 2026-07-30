@@ -71,6 +71,8 @@ When aligning a job with [DiffSynth-Studio/examples](DiffSynth-Studio/examples/z
 - `use_diffsynth_training_loop: true` and the forced `linear_timesteps` behaviour above.
 - Latent caching: same VAE / latent layout as Z-Image training expects; invalidate cache when switching to pad-to-square.
 - Optimizer and batch size (toolkit `train` section vs script).
+  - Local toolkit Adafactor: `optimizer: "adafactor"`.
+  - Stock HF Adafactor: `optimizer: "hfadafactor"` — use nonzero `lr` with `relative_step: false` (manual), or `lr: 0` / `null` for paper relative schedule (`relative_step: true`).
 
 ## Tests
 

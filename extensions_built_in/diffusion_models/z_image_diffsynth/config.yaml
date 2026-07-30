@@ -42,6 +42,20 @@ config:
         train_text_encoder: false
         gradient_checkpointing: true
         optimizer: "adafactor"
+        # HFAdafactor (stock transformers Adafactor) alternatives:
+        # Manual LR (HF T5-style):
+        #   lr: 1e-3
+        #   optimizer: "hfadafactor"
+        #   optimizer_params:
+        #     relative_step: false
+        #     scale_parameter: false
+        #     decay_rate: -0.8
+        # Paper relative schedule (no external lr):
+        #   lr: 0
+        #   optimizer: "hfadafactor"
+        #   optimizer_params:
+        #     relative_step: true
+        #     scale_parameter: true
         optimizer_params:
           scale_lr_by_index: true
           scale_lr_factor: 3

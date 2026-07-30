@@ -102,6 +102,17 @@ def get_optimizer(
     elif lower_type == 'adafactor':
         from toolkit.optimizers.adafactor import Adafactor
         optimizer = Adafactor(params, lr=float(learning_rate), **optimizer_params)
+    elif lower_type in ('hfadafactor', 'hf_adafactor'):
+        from toolkit.optimizers.hf_adafactor import HFAdafactor
+        op = dict(optimizer_params)
+        if learning_rate is None or float(learning_rate) == 0.0:
+            effective_lr = None
+            op.setdefault('relative_step', True)
+        else:
+            effective_lr = float(learning_rate)
+            # HF forbids lr is not None and relative_step=True
+            op.setdefault('relative_step', False)
+        optimizer = HFAdafactor(params, lr=effective_lr, **op)
     elif lower_type == 'automagic':
         from toolkit.optimizers.automagic import Automagic
         optimizer = Automagic(params, lr=float(learning_rate), **optimizer_params)

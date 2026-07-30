@@ -498,6 +498,7 @@ export default function SimpleJob({
                     { value: 'adamw8bit', label: 'AdamW8Bit' },
                     { value: 'adamw', label: 'AdamW' },
                     { value: 'adafactor', label: 'Adafactor' },
+                    { value: 'hfadafactor', label: 'HF Adafactor' },
                     { value: 'prodigy', label: 'Prodigy' },
                     { value: 'prodigy8bit', label: 'Prodigy 8-bit' },
                     { value: 'prodigy_schedulefree', label: 'Prodigy Schedule Free' },

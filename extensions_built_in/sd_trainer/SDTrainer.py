@@ -2433,7 +2433,7 @@ class SDTrainer(BaseSDTrainProcess):
             #             f"Expected fp32 trainable gradients before optimizer.step(), got {bad_grad}."
             #         )
             # fix this for multi params
-            if self.train_config.optimizer != 'adafactor':
+            if self.train_config.optimizer.lower() not in ('adafactor', 'hfadafactor', 'hf_adafactor'):
                 if isinstance(self.params[0], dict):
                     for i in range(len(self.params)):
                         self.accelerator.clip_grad_norm_(self.params[i]['params'], self.train_config.max_grad_norm)
