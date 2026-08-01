@@ -2441,7 +2441,12 @@ class SDTrainer(BaseSDTrainProcess):
                     self.accelerator.clip_grad_norm_(self.params, self.train_config.max_grad_norm)
             # only step if we are not accumulating
             with self.timer('optimizer_step'):
+                step_metrics = getattr(self, "_step_metrics", None)
+                if step_metrics is not None:
+                    step_metrics.before_step(self.optimizer)
                 self.optimizer.step()
+                if step_metrics is not None:
+                    step_metrics.after_step(self.optimizer)
 
                 self.optimizer.zero_grad(set_to_none=True)
                 if self.adapter and isinstance(self.adapter, CustomAdapter):

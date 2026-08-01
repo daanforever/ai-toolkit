@@ -7,8 +7,9 @@ LR contract (wired in ``toolkit.optimizer.get_optimizer``):
   - nonzero ``train.lr`` → float lr; ``relative_step`` defaults to False
     (HF forbids ``lr is not None`` with ``relative_step=True``).
 
-For toolkit extras (stochastic rounding, fixed beta2, metrics), use local
-``adafactor`` instead.
+For toolkit extras (stochastic rounding, fixed beta2, Adafactor-specific metrics),
+use local ``adafactor`` instead. Generic param/grad/Δp RMS metrics are collected
+outside the optimizer via ``toolkit.optimizers.optimizer_metrics.OptimizerStepMetrics``.
 """
 
 from transformers.optimization import Adafactor as _HFAdafactor

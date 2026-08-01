@@ -40,6 +40,7 @@ from toolkit.lycoris_special import LycorisSpecialNetwork
 from toolkit.models.decorator import Decorator
 from toolkit.network_mixins import Network
 from toolkit.optimizer import get_optimizer
+from toolkit.optimizers.optimizer_metrics import OptimizerStepMetrics
 from toolkit.paths import CONFIG_ROOT
 from toolkit.progress_bar import ToolkitProgressBar
 from toolkit.reference_adapter import ReferenceAdapter
@@ -138,6 +139,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
         set_debug_config(self.logging_config)
         self.logger = create_logger(self.logging_config, config, self.save_root)
         self.optimizer: torch.optim.Optimizer = None
+        self._step_metrics: OptimizerStepMetrics = None
         self.lr_scheduler = None
         self.data_loader: Union[DataLoader, None] = None
         self.data_loader_reg: Union[DataLoader, None] = None
@@ -1743,6 +1745,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
         optimizer = get_optimizer(self.params, optimizer_type, learning_rate=self.train_config.lr,
                                   optimizer_params=self.train_config.optimizer_params)
         self.optimizer = optimizer
+        decay = 0.97
+        if isinstance(self.train_config.optimizer_params, dict):
+            decay = float(self.train_config.optimizer_params.get("rms_max_decay_rate", 0.97))
+        self._step_metrics = OptimizerStepMetrics(rms_max_decay_rate=decay)
         
         # set it to do paramiter swapping
         if self.train_config.do_paramiter_swapping:
@@ -2119,26 +2125,28 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         except Exception:
                             weight_decay = 0.0
                     
-                    # Get average weight update RMS if optimizer supports it (e.g., Adafactor)
-                    update_rms = _safe_get(optimizer, 'get_mean_update_rms', 0.0)
-                    update_rms_max = _safe_get(optimizer, 'get_mean_update_rms_max', 0.0)
-                    param_rms = _safe_get(optimizer, 'get_mean_rms', 0.0)
-                    if hasattr(optimizer, 'get_max_rms'):
+                    # Generic metrics from OptimizerStepMetrics (works for any optimizer)
+                    step_metrics = getattr(self, "_step_metrics", None)
+                    update_rms = _safe_get(step_metrics, 'get_mean_update_rms', 0.0)
+                    update_rms_max = _safe_get(step_metrics, 'get_mean_update_rms_max', 0.0)
+                    param_rms = _safe_get(step_metrics, 'get_mean_rms', 0.0)
+                    if step_metrics is not None and hasattr(step_metrics, 'get_max_rms'):
                         try:
-                            rms_max_val = optimizer.get_max_rms()
+                            rms_max_val = step_metrics.get_max_rms()
                             if isinstance(rms_max_val, dict):
                                 param_rms_max_by_layer = rms_max_val
                         except Exception:
                             pass
-                    param_rms_min = _safe_get(optimizer, 'get_min_rms', 0.0)
-                    grad_rms = _safe_get(optimizer, 'get_mean_grad_rms', 0.0)
-                    grad_rms_max = _safe_get(optimizer, 'get_mean_grad_rms_max', 0.0)
+                    param_rms_min = _safe_get(step_metrics, 'get_min_rms', 0.0)
+                    grad_rms = _safe_get(step_metrics, 'get_mean_grad_rms', 0.0)
+                    grad_rms_max = _safe_get(step_metrics, 'get_mean_grad_rms_max', 0.0)
+                    step_efficiency = _safe_get(step_metrics, 'get_mean_step_efficiency', 0.0)
+                    dynamic_gain = _safe_get(step_metrics, 'get_mean_dynamic_gain', 0.0)
+                    # Adafactor-specific metrics from optimizer
                     gns = _safe_get(optimizer, 'get_mean_gns', 0.0)
                     dir_consistency_mean = _safe_get(optimizer, 'get_mean_dir_consistency', 0.0)
                     instability_score = _safe_get(optimizer, 'get_mean_instability_score', 0.0)
                     saddle_point_boost = _safe_get(optimizer, 'get_mean_saddle_point_boost', 1.0)
-                    step_efficiency = _safe_get(optimizer, 'get_mean_step_efficiency', 0.0)
-                    dynamic_gain = _safe_get(optimizer, 'get_mean_dynamic_gain', 0.0)
                     effective_lr = _safe_get(optimizer, 'get_mean_effective_lr', 0.0)
                     effective_wd = _safe_get(optimizer, 'get_mean_effective_wd', 0.0)
                     precond_gain = _safe_get(optimizer, 'get_mean_precond_gain', 0.0)

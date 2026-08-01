@@ -127,15 +127,12 @@ def test_group_running_max_not_poisoned_by_non_finite_rms():
     decay_rate = group["rms_max_decay_rate"]
     group["rms_max"] = torch.tensor(2.0)
     group["grad_rms_max"] = torch.tensor(1.5)
-    group["update_rms_max"] = torch.tensor(0.5)
     param.grad = torch.zeros_like(param)
     opt.step()
     assert math.isfinite(group["rms_max"].item())
     assert group["rms_max"].item() == pytest.approx(2.0 * decay_rate)
     assert math.isfinite(group["grad_rms_max"].item())
     assert group["grad_rms_max"].item() == pytest.approx(1.5 * decay_rate)
-    assert math.isfinite(group["update_rms_max"].item())
-    assert group["update_rms_max"].item() == pytest.approx(0.5 * decay_rate)
 
 
 def test_clamp_effective_wd_tensor_and_scalar():

@@ -57,15 +57,13 @@ class Adafactor(torch.optim.Optimizer):
         rms_max_decay_rate (`float`, *optional*, defaults to `0.97`):
             Decay rate for running max of update RMS used in activity normalization.
             Must satisfy ``0 < rms_max_decay_rate <= 1``.
-            Applied each step: ``update_rms_max = max(update_rms_max * rms_max_decay_rate, update_rms)``.
-            The same decay is used for group-level gradient RMS running max (``grad_rms_max`` on each
-            param group) for consistency.
+            Applied each step to group-level gradient RMS running max (``grad_rms_max``).
             When scale_parameter=True and relative_step=True, also used for the group-level running max
             of parameter RMS (``rms_max`` on each param group) and running min (``rms_min``), which normalizes each parameter's scale
-            to (0, 1] for LR (useful for mixed-scale groups e.g. LoRA). Group-level metrics
-            (``rms_ema``, ``update_rms``, ``lr_mean``, ``gns``, ``step_efficiency``, ``dynamic_gain``,
-            ``effective_lr``, ``effective_wd``, ``precond_gain``, ``momentum_gain``, ``beta2``, etc.)
-            live on ``param_groups`` rather than in per-parameter ``state``.
+            to (0, 1] for LR (useful for mixed-scale groups e.g. LoRA). Adafactor-specific group metrics
+            (``rms_ema``, ``lr_mean``, ``gns``, ``effective_lr``, ``effective_wd``, ``precond_gain``,
+            ``momentum_gain``, ``beta2_effective``, etc.) live on ``param_groups``. Generic param/grad/Δp
+            RMS metrics are collected outside via ``OptimizerStepMetrics``.
         weight_decay (`float`, *optional*, defaults to 0.0):
             Weight decay (L2 penalty)
         weight_decay_increment (`float`, *optional*, defaults to 0.0):
@@ -998,8 +996,8 @@ class Adafactor(torch.optim.Optimizer):
     ):
         """
         Collect per-parameter scalars from state for a group, reduce in tensor space, return float.
-        Used for unified metric aggregation (RMS, update_rms, update_rms_max) so get_* use the same
-        path. Only params that have state_key in state are included (same as get_update_rms/get_update_rms_max).
+        Used for unified metric aggregation so get_* use the same path.
+        Only params that have state_key in state are included.
         If ``params`` is given, only those parameters are considered (same reduction pattern).
         Returns ``default`` when no parameters have ``state_key`` in state.
         """
@@ -1135,7 +1133,7 @@ class Adafactor(torch.optim.Optimizer):
         group,
         metrics: List[Tuple[torch.nn.Parameter, torch.Tensor, float, Optional[torch.Tensor]]],
     ) -> None:
-        """Aggregate per-param ``state`` (``RMS``, ``grad_rms``) and per-step rows into group scalars."""
+        """Aggregate Adafactor-specific per-param state and per-step rows into group scalars."""
         params_list = [p for p, _, _, _ in metrics if self.state.get(p) is not None]
         if not params_list:
             return
@@ -1146,27 +1144,6 @@ class Adafactor(torch.optim.Optimizer):
         avg_rms = self._get_group_scalars(
             group, "RMS", default=0.0, reduction='mean', params=params_list
         )
-        avg_gr = self._get_group_scalars(
-            group, "grad_rms", default=0.0, reduction='mean', params=params_list
-        )
-
-        # Weighted mean of ur (same tensor pattern as _get_group_scalars; one .item() at end).
-        ur_values = []
-        ur_weights = []
-        device = None
-        for p, ur, _, _ in metrics:
-            if self.state.get(p) is None:
-                continue
-            v_t = torch.as_tensor(ur, device=p.device, dtype=torch.float32).reshape(())
-            if device is None:
-                device = v_t.device
-            ur_values.append(v_t.to(device))
-            ur_weights.append(p.numel())
-        if not ur_values:
-            return
-        ur_stacked = torch.stack(ur_values)
-        w_stacked = torch.tensor(ur_weights, device=device, dtype=torch.float32)
-        avg_ur = (torch.sum(ur_stacked * w_stacked) / (torch.sum(w_stacked) + 1e-12)).item()
 
         sum_lr_weighted = sum(
             lr * p.numel() for p, _, lr, _ in metrics if self.state.get(p) is not None
@@ -1192,11 +1169,9 @@ class Adafactor(torch.optim.Optimizer):
             group["rms_ema"] = torch.tensor(
                 prev * dr + avg_rms * (1.0 - dr), dtype=torch.float32, device=ref_device
             )
-        group["update_rms"] = torch.tensor(avg_ur, dtype=torch.float32, device=ref_device)
         group["lr_mean"] = torch.tensor(
             sum_lr_weighted / total_numel, dtype=torch.float32, device=ref_device
         )
-        group["grad_rms"] = torch.tensor(avg_gr, dtype=torch.float32, device=ref_device)
         if gns_values:
             gv = torch.stack(gns_values)
             gw = torch.tensor(gns_weights, device=device_g, dtype=torch.float32)
@@ -1204,20 +1179,6 @@ class Adafactor(torch.optim.Optimizer):
             group["gns"] = torch.tensor(avg_gns, dtype=torch.float32, device=ref_device)
         else:
             group["gns"] = torch.tensor(0.0, dtype=torch.float32, device=ref_device)
-
-        eps0 = group["eps"][0]
-        eps_t = torch.tensor(float(eps0), dtype=torch.float32, device=ref_device)
-        u_rms_t = group["update_rms"]
-        u_max = group.get("update_rms_max")
-        if u_max is None:
-            u_max = u_rms_t
-        elif isinstance(u_max, torch.Tensor):
-            u_max = u_max.to(ref_device)
-        else:
-            u_max = torch.tensor(float(u_max), dtype=torch.float32, device=ref_device)
-        g_mean_t = group["grad_rms"]
-        group["step_efficiency"] = u_rms_t / (u_max + eps_t)
-        group["dynamic_gain"] = u_rms_t / (g_mean_t + eps_t)
 
         for key in ("effective_lr", "effective_wd", "precond_gain", "momentum_gain", "beta2_effective"):
             val = self._get_group_scalars(
@@ -1300,8 +1261,6 @@ class Adafactor(torch.optim.Optimizer):
                 group["rms_max"] = group["rms_max"] * decay_rate
             if "rms_min" in group:
                 group["rms_min"] = group["rms_min"] / decay_rate
-            if "update_rms_max" in group:
-                group["update_rms_max"] = group["update_rms_max"] * decay_rate
             if "grad_rms_max" in group:
                 group["grad_rms_max"] = group["grad_rms_max"] * decay_rate
 
@@ -1534,8 +1493,6 @@ class Adafactor(torch.optim.Optimizer):
 
                 p_data_fp32.add_(-update)
 
-                self._maybe_group_running_max_update(group, "update_rms_max", update_rms)
-
                 if p.dtype != torch.float32 or is_quantized:
                     use_stochastic = (
                         self.stochastic_rounding
@@ -1565,120 +1522,13 @@ class Adafactor(torch.optim.Optimizer):
         return loss
         
     def get_mean_learning_rate(self):
-        """Mean learning rate across groups (unified tensor reduction, same as get_mean_update_rms*)."""
+        """Mean learning rate across groups (unified tensor reduction)."""
         return self._scalars_per_group_to_mean(self.get_learning_rates())
 
     def get_weight_decay(self):
         """Mean weight_decay across groups (unified tensor reduction)."""
         per_group = [float(group.get("weight_decay", 0.0)) for group in self.param_groups]
         return self._scalars_per_group_to_mean(per_group)
-
-    def get_update_rms(self):
-        """
-        Get RMS (root mean square) of weight updates for each parameter group (group-level ``update_rms``).
-
-        Returns:
-            List[float]: One value per group; 0.0 for groups that haven't been updated yet.
-        """
-        out = []
-        for group in self.param_groups:
-            out.append(self._group_scalar_item(group, "update_rms", 0.0))
-        return out
-
-    def get_update_rms_max(self):
-        """
-        Get running max of update RMS for each parameter group (single scalar per group on ``update_rms_max``).
-
-        Returns:
-            List[float]: One value per group; 0.0 for groups with no ``update_rms_max`` yet.
-        """
-        out = []
-        for group in self.param_groups:
-            out.append(self._group_scalar_item(group, "update_rms_max", 0.0))
-        return out
-
-    def get_rms(self):
-        """
-        Get RMS (root mean square) of parameters for each parameter group.
-        Per-group value is mean over params in group via tensor reduction (_get_group_scalars).
-
-        Returns:
-            List[float]: One value per group; 0.0 for groups that haven't been updated yet.
-        """
-        out = []
-        for group in self.param_groups:
-            v = self._get_group_scalars(group, "RMS", default=0.0, reduction='mean')
-            out.append(v)
-        return out
-
-    def get_mean_rms(self):
-        """
-        Mean RMS of parameters across all parameter groups (unified tensor reduction).
-        """
-        return self._scalars_per_group_to_mean(self.get_rms())
-
-    def get_max_rms(self):
-        """
-        Per-named-group ``rms_max`` mapping: ``{group_name: rms_max_value}``.
-        Only groups with both ``name`` and ``rms_max`` are included.
-        """
-        out = {}
-        for group in self.param_groups:
-            name = group.get("name")
-            if name is None or "rms_max" not in group:
-                continue
-            out[name] = self._group_scalar_item(group, "rms_max", 0.0)
-        return out
-
-    def get_min_rms(self):
-        """
-        Absolute min of per-group ``rms_min`` across all parameter groups.
-        Use with get_mean_rms() to monitor parameter scale vs recent min.
-        """
-        per_group = [
-            self._group_scalar_item(group, "rms_min", 0.0)
-            for group in self.param_groups
-            if "rms_min" in group
-        ]
-        if len(per_group) == 0:
-            return 0.0
-        return torch.tensor(per_group, dtype=torch.float64).min().item()
-
-    def get_mean_update_rms(self):
-        """
-        Mean RMS of weight updates across all parameter groups (unified tensor reduction).
-        Useful for monitoring training stability and convergence.
-        """
-        return self._scalars_per_group_to_mean(self.get_update_rms())
-
-    def get_mean_update_rms_max(self):
-        """
-        Mean of per-group update_rms_max across groups (unified tensor reduction).
-        Use with get_mean_update_rms() to monitor normalization scale and update magnitude vs recent max.
-        """
-        return self._scalars_per_group_to_mean(self.get_update_rms_max())
-
-    def get_dynamic_gain(self):
-        """
-        Get dynamic gain for each parameter group (``dynamic_gain`` on the param group:
-        group update_rms / (weighted mean grad_rms + eps)).
-
-        If dynamic_gain falls below 0.01 - you are barely learning.
-        If it is above 1.0 - you are flying blind.
-
-        Returns:
-            List[float]: One value per group; 0.0 for groups that haven't been updated yet.
-        """
-        out = []
-        for group in self.param_groups:
-            out.append(self._group_scalar_item(group, "dynamic_gain", 0.0))
-        return out
-
-    def get_mean_dynamic_gain(self):
-        """
-        Mean dynamic gain across all parameter groups (unified tensor reduction).
-        """
-        return self._scalars_per_group_to_mean(self.get_dynamic_gain())
 
     def get_effective_lr(self):
         """
@@ -1733,43 +1583,6 @@ class Adafactor(torch.optim.Optimizer):
         """Mean momentum_gain across all parameter groups."""
         return self._scalars_per_group_to_mean(self.get_momentum_gain())
 
-    def get_grad_rms(self):
-        """
-        Get weighted mean gradient RMS for each parameter group (``grad_rms`` on the param group).
-
-        Returns:
-            List[float]: One value per group; 0.0 for groups that haven't been updated yet.
-        """
-        out = []
-        for group in self.param_groups:
-            out.append(self._group_scalar_item(group, "grad_rms", 0.0))
-        return out
-
-    def get_grad_rms_max(self):
-        """
-        Get running max of gradient RMS for each parameter group (``grad_rms_max`` on the param group).
-
-        Returns:
-            List[float]: One value per group; 0.0 for groups with no ``grad_rms_max`` yet.
-        """
-        out = []
-        for group in self.param_groups:
-            out.append(self._group_scalar_item(group, "grad_rms_max", 0.0))
-        return out
-
-    def get_mean_grad_rms(self):
-        """
-        Mean RMS of gradients across all parameter groups (unified tensor reduction).
-        """
-        return self._scalars_per_group_to_mean(self.get_grad_rms())
-
-    def get_mean_grad_rms_max(self):
-        """
-        Mean of per-group grad_rms_max across groups (unified tensor reduction).
-        Use with get_mean_grad_rms() to monitor gradient scale vs recent max.
-        """
-        return self._scalars_per_group_to_mean(self.get_grad_rms_max())
-
     def get_gns(self):
         """Get Gradient Noise Scale per group (``gns`` on the param group)."""
         out = []
@@ -1783,13 +1596,6 @@ class Adafactor(torch.optim.Optimizer):
         for group in self.param_groups:
             v = self._get_group_scalars(group, "dir_consistency", default=0.0, reduction='mean')
             out.append(v)
-        return out
-
-    def get_step_efficiency(self):
-        """Get Step Efficiency per group (``step_efficiency`` on the param group)."""
-        out = []
-        for group in self.param_groups:
-            out.append(self._group_scalar_item(group, "step_efficiency", 0.0))
         return out
 
     def get_mean_gns(self):
@@ -1820,10 +1626,6 @@ class Adafactor(torch.optim.Optimizer):
     def get_mean_saddle_point_boost(self):
         """Global saddle_point_boost (identical across groups)."""
         return float(self._saddle_point_boost)
-
-    def get_mean_step_efficiency(self):
-        """Mean Step Efficiency across all parameter groups."""
-        return self._scalars_per_group_to_mean(self.get_step_efficiency())
 
     def get_beta1(self):
         """Get beta1 (momentum coefficient) for each parameter group (legacy metric)."""
