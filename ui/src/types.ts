@@ -143,6 +143,7 @@ export interface TrainConfig {
     weight_decay_increment?: number;
     weight_decay_mode?: WeightDecayMode;
     warmup_steps?: number;
+    warmup_boost?: number;
     beta1?: number | null;
     beta2?: number;
     min_lr?: number;

@@ -636,6 +636,17 @@ class Adafactor(torch.optim.Optimizer):
         if is_debug_enabled():
             print_acc(f"Adafactor: applied runtime warmup_steps={value}")
 
+    def set_warmup_boost(self, value: float) -> None:
+        """Update warmup_boost at runtime (e.g. from UI)."""
+        value = float(value)
+        if not (value > 0.0):
+            raise ValueError(f"warmup_boost must be > 0, got warmup_boost={value}")
+        self._warmup_boost = value
+        for group in self.param_groups:
+            group["warmup_boost"] = value
+        if is_debug_enabled():
+            print_acc(f"Adafactor: applied runtime warmup_boost={value}")
+
     def _global_lr(self) -> None:
         """Once per optimizer step: group-level warmup before any per-parameter _get_lr.
 
@@ -692,7 +703,7 @@ class Adafactor(torch.optim.Optimizer):
     def _warmup_update_group(self, group) -> None:
         """Advance group warmup by one optimizer step.
 
-        Starts a new segment when ``group["lr"]`` or ``warmup_steps`` changes.
+        Starts a new segment when ``group["lr"]``, ``warmup_steps``, or ``warmup_boost`` changes.
         Segment: linear ramp stored in ``warmup_lr``; start level is prior ``warmup_lr`` if
         present, else ``group["lr"] * eps[1]``. Interpolation aims at a boosted target
         (``lr * warmup_boost`` upward, ``lr / warmup_boost`` downward); ``warmup_target``
@@ -721,14 +732,20 @@ class Adafactor(torch.optim.Optimizer):
             return
 
         warmup_steps_old = group.get("warmup_steps_old", 0)
+        boost = float(group["warmup_boost"])
+        boost_old = group.get("warmup_boost_old", None)
 
-        if self.scheduled_lr_changed(lr_target, lr_target_old) or warmup_steps != warmup_steps_old:
+        if (
+            self.scheduled_lr_changed(lr_target, lr_target_old)
+            or warmup_steps != warmup_steps_old
+            or boost_old is None
+            or boost != boost_old
+        ):
             if "warmup_lr_previous" in group:
                 lr_start = group["warmup_lr_previous"]
             else:
                 lr_start = lr_target * group["eps"][1]
 
-            boost = float(group["warmup_boost"])
             if lr_target > lr_start:
                 lr_interp = lr_target * boost
             elif lr_target < lr_start:
@@ -742,6 +759,7 @@ class Adafactor(torch.optim.Optimizer):
             group["warmup_progress"]  = 0
             group["warmup_delta"]     = (lr_interp - lr_start) / warmup_steps
             group["warmup_steps_old"] = warmup_steps
+            group["warmup_boost_old"] = boost
 
             if is_debug_enabled():
                 direction = "up" if lr_target > lr_start else "down"

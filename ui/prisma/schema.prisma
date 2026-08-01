@@ -68,6 +68,7 @@ model RuntimeParams {
   runtime_save_every       Int?
   runtime_sample_every     Int?
   runtime_warmup_steps     Int?
+  runtime_warmup_boost     Float?
   runtime_min_snr_gamma    Float?
   runtime_debug            Boolean?
   updated_at               DateTime @updatedAt

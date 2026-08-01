@@ -92,6 +92,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
   const weightDecayIncrement = optimizerParams?.weight_decay_increment ?? 0.0;
   const weightDecayMode = optimizerParams?.weight_decay_mode ?? 'absolute';
   const warmupSteps = optimizerParams?.warmup_steps ?? 100;
+  const warmupBoost = optimizerParams?.warmup_boost ?? 1.0;
   const beta1 = optimizerParams?.beta1 != null
     ? Number(optimizerParams.beta1)
     : null;
@@ -205,6 +206,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
       delete op.weight_decay_increment;
       delete op.weight_decay_mode;
       delete op.warmup_steps;
+      delete op.warmup_boost;
       delete op.beta2;
       delete op.min_lr;
       if (beta1 != null) {
@@ -216,6 +218,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
       op.weight_decay_increment = weightDecayIncrement;
       op.weight_decay_mode = weightDecayMode;
       op.warmup_steps = warmupSteps;
+      op.warmup_boost = warmupBoost;
       op.beta1 = beta1;
       op.beta2 = beta2;
       if (hasMinLr) {
@@ -333,6 +336,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         save_every?: number;
         sample_every?: number;
         warmup_steps?: number;
+        warmup_boost?: number;
         min_snr_gamma?: number;
         debug?: boolean;
         fixed_cycle_timesteps?: number[];
@@ -357,6 +361,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         save_every: saveEvery,
         sample_every: sampleEvery,
         warmup_steps: warmupSteps,
+        warmup_boost: warmupBoost,
         min_snr_gamma: minSnrGamma,
         debug,
       };
@@ -417,6 +422,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     saveEvery,
     sampleEvery,
     warmupSteps,
+    warmupBoost,
     minSnrGamma,
     debug,
     datasets,
@@ -577,93 +583,123 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         </div>
 
         <div className="flex items-end gap-4 flex-wrap">
-          <div className="space-y-2">
-            <p className="text-xs text-gray-400">Timestep Type / Weighting / Bias</p>
-            <div className="flex items-center gap-2 flex-wrap">
-              <select
-                value={timestepType}
-                onChange={(e) => {
-                  setValue(e.target.value, `${TRAIN_PATH}.timestep_type`);
-                  setApplyStatus('idle');
-                }}
-                className="rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none min-w-[120px]"
-              >
-                {TIMESTEP_TYPE_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>{opt.label}</option>
-                ))}
-              </select>
-              <select
-                value={timestepWeighting}
-                onChange={(e) => {
-                  setValue(e.target.value, `${TRAIN_PATH}.timestep_weighting`);
-                  setApplyStatus('idle');
-                }}
-                className="rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none min-w-[120px]"
-              >
-                {TIMESTEP_WEIGHTING_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>{opt.label}</option>
-                ))}
-              </select>
-              <select
-                value={contentOrStyle}
-                onChange={(e) => {
-                  setValue(e.target.value, `${TRAIN_PATH}.content_or_style`);
-                  setApplyStatus('idle');
-                }}
-                className="rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none min-w-[140px]"
-              >
-                {CONTENT_OR_STYLE_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>{opt.label}</option>
-                ))}
-              </select>
-            </div>
+          <div className="space-y-2 flex-1 min-w-[140px]">
+            <p className="text-xs text-gray-400">Timestep Type</p>
+            <select
+              value={timestepType}
+              onChange={(e) => {
+                setValue(e.target.value, `${TRAIN_PATH}.timestep_type`);
+                setApplyStatus('idle');
+              }}
+              className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none"
+            >
+              {TIMESTEP_TYPE_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
           </div>
-          <div className="space-y-2">
-            <p className="text-xs text-gray-400">Save every / Sample every / Warmup steps</p>
-            <div className="flex items-center gap-2 flex-wrap">
-              <input
-                type="number" step={1}
-                placeholder="e.g. 250"
-                value={saveEvery}
-                onChange={(e) => {
-                  const v = e.target.value.trim();
-                  const num = v === '' ? 250 : parseInt(v, 10);
-                  if (Number.isInteger(num)) {
-                    setValue(num, 'config.process[0].save.save_every');
-                    setApplyStatus('idle');
-                  }
-                }}
-                className="rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none min-w-[120px]"
-              />
-              <input
-                type="number" step={1}
-                placeholder="e.g. 250"
-                value={sampleEvery}
-                onChange={(e) => {
-                  const v = e.target.value.trim();
-                  const num = v === '' ? 250 : parseInt(v, 10);
-                  if (Number.isInteger(num)) {
-                    setValue(num, 'config.process[0].sample.sample_every');
-                    setApplyStatus('idle');
-                  }
-                }}
-                className="rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none min-w-[120px]"
-              />
-              <input
-                type="number" step={1}
-                placeholder="e.g. 100"
-                value={warmupSteps}
-                onChange={(e) => {
-                  const v = e.target.value.trim();
-                  const num = v === '' ? 0 : parseInt(v, 10);
-                  if (Number.isInteger(num)) {
-                    setValue(num, `${OPTIMIZER_PARAMS_PATH}.warmup_steps`);
-                    setApplyStatus('idle');
-                  }
-                }}
-                className="rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none min-w-[120px]"
-              />
-            </div>
+          <div className="space-y-2 flex-1 min-w-[140px]">
+            <p className="text-xs text-gray-400">Weighting</p>
+            <select
+              value={timestepWeighting}
+              onChange={(e) => {
+                setValue(e.target.value, `${TRAIN_PATH}.timestep_weighting`);
+                setApplyStatus('idle');
+              }}
+              className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none"
+            >
+              {TIMESTEP_WEIGHTING_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+          </div>
+          <div className="space-y-2 flex-1 min-w-[140px]">
+            <p className="text-xs text-gray-400">Bias</p>
+            <select
+              value={contentOrStyle}
+              onChange={(e) => {
+                setValue(e.target.value, `${TRAIN_PATH}.content_or_style`);
+                setApplyStatus('idle');
+              }}
+              className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none"
+            >
+              {CONTENT_OR_STYLE_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        <div className="flex items-end gap-4 flex-wrap">
+          <div className="space-y-2 flex-1 min-w-[140px]">
+            <p className="text-xs text-gray-400">Warmup steps</p>
+            <input
+              type="number" step={1}
+              placeholder="e.g. 100"
+              value={warmupSteps}
+              onChange={(e) => {
+                const v = e.target.value.trim();
+                const num = v === '' ? 0 : parseInt(v, 10);
+                if (Number.isInteger(num)) {
+                  setValue(num, `${OPTIMIZER_PARAMS_PATH}.warmup_steps`);
+                  setApplyStatus('idle');
+                }
+              }}
+              className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+            />
+          </div>
+          <div className="space-y-2 flex-1 min-w-[140px]">
+            <p className="text-xs text-gray-400">Warmup Boost</p>
+            <input
+              type="number" step="any"
+              placeholder="e.g. 1.0"
+              value={warmupBoost}
+              onChange={(e) => {
+                const v = parseFloat(e.target.value);
+                if (Number.isFinite(v)) {
+                  setValue(v, `${OPTIMIZER_PARAMS_PATH}.warmup_boost`);
+                  setApplyStatus('idle');
+                }
+              }}
+              className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+            />
+          </div>
+        </div>
+
+        <div className="flex items-end gap-4 flex-wrap">
+          <div className="space-y-2 flex-1 min-w-[140px]">
+            <p className="text-xs text-gray-400">Save every</p>
+            <input
+              type="number" step={1}
+              placeholder="e.g. 250"
+              value={saveEvery}
+              onChange={(e) => {
+                const v = e.target.value.trim();
+                const num = v === '' ? 250 : parseInt(v, 10);
+                if (Number.isInteger(num)) {
+                  setValue(num, 'config.process[0].save.save_every');
+                  setApplyStatus('idle');
+                }
+              }}
+              className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+            />
+          </div>
+          <div className="space-y-2 flex-1 min-w-[140px]">
+            <p className="text-xs text-gray-400">Sample every</p>
+            <input
+              type="number" step={1}
+              placeholder="e.g. 250"
+              value={sampleEvery}
+              onChange={(e) => {
+                const v = e.target.value.trim();
+                const num = v === '' ? 250 : parseInt(v, 10);
+                if (Number.isInteger(num)) {
+                  setValue(num, 'config.process[0].sample.sample_every');
+                  setApplyStatus('idle');
+                }
+              }}
+              className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+            />
           </div>
         </div>
 

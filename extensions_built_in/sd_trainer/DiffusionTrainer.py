@@ -60,6 +60,7 @@ class DiffusionTrainer(SDTrainer):
             self._last_applied_runtime_save_every = None
             self._last_applied_runtime_sample_every = None
             self._last_applied_runtime_warmup_steps = None
+            self._last_applied_runtime_warmup_boost = None
             self._last_applied_runtime_min_snr_gamma = None
             self._last_applied_runtime_debug = None
             self._last_applied_runtime_fc_key: Optional[
@@ -460,6 +461,10 @@ class DiffusionTrainer(SDTrainer):
         """Read runtime_warmup_steps from DB (only when is_ui_trainer). Returns int or None."""
         return self._get_runtime_scalar("runtime_warmup_steps", int)
 
+    def get_runtime_warmup_boost(self):
+        """Read runtime_warmup_boost from DB (only when is_ui_trainer). Returns float or None."""
+        return self._get_runtime_scalar("runtime_warmup_boost", float)
+
     def get_runtime_min_snr_gamma(self):
         """Read runtime_min_snr_gamma from DB (only when is_ui_trainer). Returns float or None."""
         return self._get_runtime_scalar("runtime_min_snr_gamma", float)
@@ -553,6 +558,33 @@ class DiffusionTrainer(SDTrainer):
                     f"\nruntime_warmup_steps from DB not applied: optimizer has no set_warmup_steps (type: {type(optimizer).__name__})"
                 )
         self._last_applied_runtime_warmup_steps = value
+
+    def apply_runtime_warmup_boost(self):
+        """If runtime_warmup_boost is set in DB, apply it to optimizer (e.g. Adafactor)."""
+        if not self.is_ui_trainer:
+            return
+        value = self.get_runtime_warmup_boost()
+        if value is None:
+            return
+        if value == self._last_applied_runtime_warmup_boost:
+            return
+        optimizer = unwrap_model(self.optimizer)
+        while getattr(optimizer, "optimizer", None) is not None:
+            optimizer = optimizer.optimizer
+        if hasattr(optimizer, "set_warmup_boost"):
+            pg0 = optimizer.param_groups[0] if optimizer.param_groups else {}
+            if pg0.get("warmup_boost", None) == value:
+                self._last_applied_runtime_warmup_boost = value
+                return
+            if is_debug_enabled():
+                print_acc(f"\nruntime_warmup_boost from UI/DB: {value}")
+            optimizer.set_warmup_boost(value)
+        else:
+            if is_debug_enabled():
+                print_acc(
+                    f"\nruntime_warmup_boost from DB not applied: optimizer has no set_warmup_boost (type: {type(optimizer).__name__})"
+                )
+        self._last_applied_runtime_warmup_boost = value
 
     def apply_runtime_min_snr_gamma(self):
         """If runtime_min_snr_gamma is set in DB, apply it to train_config."""
@@ -1034,6 +1066,7 @@ class DiffusionTrainer(SDTrainer):
         self._last_applied_runtime_save_every = None
         self._last_applied_runtime_sample_every = None
         self._last_applied_runtime_warmup_steps = None
+        self._last_applied_runtime_warmup_boost = None
         self._last_applied_runtime_min_snr_gamma = None
         self._last_applied_runtime_debug = None
         self._last_applied_runtime_fc_key = None
@@ -1168,6 +1201,7 @@ class DiffusionTrainer(SDTrainer):
             self.apply_runtime_save_every()
             self.apply_runtime_sample_every()
             self.apply_runtime_warmup_steps()
+            self.apply_runtime_warmup_boost()
             self.apply_runtime_min_snr_gamma()
             self.apply_runtime_debug()
 
