@@ -332,13 +332,13 @@ def test_scale_wd_by_index_absolute():
         scale_lr_by_index=True,
     )
     _zero_grad_step(opt)
+    # Default weight_decay_max=0.1 (== wd) => wd' stays wd for all indices.
     # lr_scaled: index 0 -> lr+eps0, index 1 -> 0.5*lr+eps0, index 2 -> eps0
-    # wd' = wd**(1-t) * weight_decay_max**t; max_index=2, factor=1, max=0.5
-    wd_scaled = [0.1, (0.1 * 0.5) ** 0.5, 0.5]
+    assert opt.weight_decay_max == pytest.approx(0.1)
     expected = [
-        wd_scaled[0] * (lr + eps[0]),
-        wd_scaled[1] * (0.5 * lr + eps[0]),
-        wd_scaled[2] * (eps[0]),
+        wd * (lr + eps[0]),
+        wd * (0.5 * lr + eps[0]),
+        wd * eps[0],
     ]
     effective = opt.get_effective_wd()
     for got, exp in zip(effective, expected):
