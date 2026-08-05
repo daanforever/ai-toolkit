@@ -6,13 +6,33 @@ from diffusers.optimization import SchedulerType, TYPE_TO_SCHEDULER_FUNCTION, ge
 class SequentialLRWrapper(torch.optim.lr_scheduler.SequentialLR):
     """
     Wrapper for SequentialLR that ignores extra arguments to step().
-    
-    This is needed because the training code calls lr_scheduler.step(step_num),
-    but SequentialLR.step() doesn't accept any arguments.
+
+    Cosine+warmup resume uses `_seek_sequential_warmup_cosine` at create time
+    (via `resume_step`), not absolute `step(step_num)`. This wrapper remains so
+    callers that still pass args (legacy pre-loop / train loop) do not crash —
+    SequentialLR.step() accepts no arguments.
     """
     def step(self, *args, **kwargs):
         # Ignore all arguments and call parent step() without them
         super().step()
+
+
+def _seek_sequential_warmup_cosine(scheduler, target_last_epoch: int) -> None:
+    """
+    Set SequentialLR(warmup, cosine) to the state after `target_last_epoch`
+    advances from init (matches uninterrupted create + N× step()).
+    """
+    warmup_end = scheduler._milestones[0]
+    warm, main = scheduler._schedulers
+    scheduler.last_epoch = target_last_epoch
+
+    if target_last_epoch < warmup_end:
+        warm._update_lr(target_last_epoch)
+    else:
+        warm.last_epoch = warmup_end - 1
+        main._update_lr(target_last_epoch - warmup_end)
+
+    scheduler._last_lr = [group["lr"] for group in scheduler.optimizer.param_groups]
 
 
 def _create_scheduler_with_warmup(
@@ -29,6 +49,7 @@ def _create_scheduler_with_warmup(
         scheduler_kwargs: Parameters for the scheduler. Can include:
             - warmup_steps: Number of warmup steps (default: 0, no warmup)
             - total_iters: TOTAL number of iterations INCLUDING warmup (default: 1000)
+            - resume_step: Training step to seek to after create (default: 0)
             - T_0/T_max: Iterations for MAIN scheduler, overrides calculation from total_iters
             - Other scheduler parameters (T_mult, eta_min, etc.)
     
@@ -37,10 +58,15 @@ def _create_scheduler_with_warmup(
         - T_0/T_max: Main scheduler iterations (if specified, total_iters is ignored)
         - If only total_iters specified: main_iters = total_iters - warmup_steps
         - If T_0/T_max specified: main_iters = T_0/T_max (total_iters ignored)
+        - resume_step: after create, seek so SequentialLR.last_epoch == resume_step + 1
+          (same as legacy pre-loop step() once when resume_step == 0)
     
     Returns:
         A scheduler (SequentialLR if warmup_steps > 0, otherwise base scheduler)
     """
+    # Must pop before CosineAnnealingLR(**kwargs)
+    resume_step = int(scheduler_kwargs.pop('resume_step', 0))
+
     # Extract warmup_steps (default: 0, no warmup)
     warmup_steps = scheduler_kwargs.pop('warmup_steps', 0)
     
@@ -75,7 +101,7 @@ def _create_scheduler_with_warmup(
               f"The main scheduler will have very few or no iterations.")
     
     if warmup_steps <= 0:
-        # No warmup, create base scheduler directly
+        # No warmup: resume via BaseSDTrainProcess pre-loop step(step_num)
         if scheduler_type == "cosine":
             return torch.optim.lr_scheduler.CosineAnnealingLR(
                 optimizer, T_max=main_total_iters, **scheduler_kwargs
@@ -120,6 +146,10 @@ def _create_scheduler_with_warmup(
         schedulers=[warmup_scheduler, main_scheduler],
         milestones=[warmup_steps]
     )
+
+    # Seek to match start of training step `resume_step`
+    # (uninterrupted: create → step() → … → last_epoch == resume_step + 1)
+    _seek_sequential_warmup_cosine(combined_scheduler, resume_step + 1)
     
     return combined_scheduler
 

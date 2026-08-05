@@ -48,7 +48,7 @@ from toolkit.sampler import get_sampler
 from toolkit.saving import save_t2i_from_diffusers, load_t2i_model, save_ip_adapter_from_diffusers, \
     load_ip_adapter_model, load_custom_adapter_model
 
-from toolkit.scheduler import get_lr_scheduler
+from toolkit.scheduler import get_lr_scheduler, SequentialLRWrapper
 from toolkit.sd_device_states_presets import get_train_sd_device_state_preset
 from toolkit.stable_diffusion_model import StableDiffusion
 
@@ -1823,6 +1823,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
         lr_scheduler = get_lr_scheduler(
             self.train_config.lr_scheduler,
             optimizer,
+            resume_step=self.step_num,
             **lr_scheduler_params
         )
         self.lr_scheduler = lr_scheduler
@@ -1887,7 +1888,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
         # zero any gradients
         optimizer.zero_grad()
 
-        self.lr_scheduler.step(self.step_num)
+        # Cosine+warmup SequentialLRWrapper already seeked via resume_step.
+        # Other schedulers still accept absolute step(epoch).
+        if not isinstance(self.lr_scheduler, SequentialLRWrapper):
+            self.lr_scheduler.step(self.step_num)
 
         with memory_debug(print_acc, "Before train loop (after set_device_state)", kind="cuda"):
             self.sd.set_device_state(self.train_device_state_preset)
