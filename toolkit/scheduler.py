@@ -19,8 +19,11 @@ class SequentialLRWrapper(torch.optim.lr_scheduler.SequentialLR):
 
 def _seek_sequential_warmup_cosine(scheduler, target_last_epoch: int) -> None:
     """
-    Set SequentialLR(warmup, cosine) to the state after `target_last_epoch`
-    advances from init (matches uninterrupted create + N× step()).
+    Set SequentialLR(warmup, cosine|cosine_with_restarts) to the state after
+    `target_last_epoch` advances from init (matches uninterrupted create + N× step()).
+
+    CosineAnnealingLR uses closed-form `_update_lr(epoch)`.
+    CosineAnnealingWarmRestarts must use `step(epoch)` so T_cur/T_i are refreshed.
     """
     warmup_end = scheduler._milestones[0]
     warm, main = scheduler._schedulers
@@ -30,7 +33,11 @@ def _seek_sequential_warmup_cosine(scheduler, target_last_epoch: int) -> None:
         warm._update_lr(target_last_epoch)
     else:
         warm.last_epoch = warmup_end - 1
-        main._update_lr(target_last_epoch - warmup_end)
+        cosine_epoch = target_last_epoch - warmup_end
+        if isinstance(main, torch.optim.lr_scheduler.CosineAnnealingWarmRestarts):
+            main.step(cosine_epoch)
+        else:
+            main._update_lr(cosine_epoch)
 
     scheduler._last_lr = [group["lr"] for group in scheduler.optimizer.param_groups]
 
