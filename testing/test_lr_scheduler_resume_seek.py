@@ -233,3 +233,17 @@ def test_cosine_with_restarts_seek_after_restart_t_mult_2():
     # After first restart with T_mult=2: T_i should be 2 * T_0
     assert got["T_i"] == t0 * 2
     assert got["T_cur"] == 60 - t0  # epoch 60 into main → T_cur=10 after restart at 50
+
+
+def test_constant_accepts_resume_step_kwarg():
+    """resume_step is toolkit-internal; must not be forwarded to ConstantLR."""
+    model = nn.Linear(1, 1)
+    optimizer = torch.optim.SGD(model.parameters(), lr=LR)
+    scheduler = get_lr_scheduler(
+        "constant",
+        optimizer,
+        resume_step=10,
+        total_iters=100,
+        factor=1.0,
+    )
+    assert isinstance(scheduler, torch.optim.lr_scheduler.ConstantLR)

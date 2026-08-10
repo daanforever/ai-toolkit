@@ -166,15 +166,17 @@ def get_lr_scheduler(
         optimizer: torch.optim.Optimizer,
         **kwargs,
 ):
+    # Toolkit-internal; only cosine paths consume it (seek). Must not reach PyTorch ctors.
+    resume_step = int(kwargs.pop("resume_step", 0))
     if name == "cosine":
         # All parameters passed via kwargs, handled in _create_scheduler_with_warmup
         return _create_scheduler_with_warmup(
-            "cosine", optimizer, **kwargs
+            "cosine", optimizer, resume_step=resume_step, **kwargs
         )
     elif name == "cosine_with_restarts":
         # All parameters passed via kwargs, handled in _create_scheduler_with_warmup
         return _create_scheduler_with_warmup(
-            "cosine_with_restarts", optimizer, **kwargs
+            "cosine_with_restarts", optimizer, resume_step=resume_step, **kwargs
         )
     elif name == "step":
 
