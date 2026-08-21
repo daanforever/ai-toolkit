@@ -104,6 +104,8 @@ def group_loras_by_block(loras: List[Any]) -> Dict[str, Dict[str, Any]]:
 
 
 _COMPILED_MODULE_KEY_SEGMENT = "._orig_mod."
+_INNER_DIT_KEY_SEGMENT = "._inner_dit."
+_TRANSFORMER_PREFIX = "transformer."
 
 
 def convert_lora_weights_before_save(state_dict: Dict[str, Any]) -> Dict[str, Any]:
@@ -111,12 +113,16 @@ def convert_lora_weights_before_save(state_dict: Dict[str, Any]) -> Dict[str, An
     Toolkit uses prefix 'transformer' or 'lora_transformer'; DiffSynth expects 'diffusion_model'.
     Per-block torch.compile inserts ``._orig_mod.`` into module paths; strip it so checkpoints
     remain loadable after resume on an uncompiled model.
+    Strip ``._inner_dit.`` (training wrapper) so public keys match DiffSynth/diffusers
+    (``diffusion_model.layers.*``).
     """
     new_sd = {}
     for key, value in state_dict.items():
         new_key = key.replace(_COMPILED_MODULE_KEY_SEGMENT, ".")
-        new_key = new_key.replace("transformer.", "diffusion_model.").replace(
-            "lora_transformer.", "diffusion_model."
+        new_key = new_key.replace(_INNER_DIT_KEY_SEGMENT, ".")
+        # Longer prefix first: transformer. is a substring of lora_transformer.
+        new_key = new_key.replace("lora_transformer.", "diffusion_model.").replace(
+            "transformer.", "diffusion_model."
         )
         new_sd[new_key] = value
     return new_sd
@@ -124,11 +130,16 @@ def convert_lora_weights_before_save(state_dict: Dict[str, Any]) -> Dict[str, An
 
 def convert_lora_weights_before_load(state_dict: Dict[str, Any]) -> Dict[str, Any]:
     """Convert DiffSynth LoRA keys to toolkit convention for loading.
-    DiffSynth uses prefix 'diffusion_model'; toolkit expects 'transformer' / 'lora_transformer'.
+    DiffSynth uses prefix 'diffusion_model'; toolkit expects 'transformer' on the
+    wrapped DiT (``transformer._inner_dit.*``). Portable keys without ``_inner_dit``
+    get it inserted; old wrapped keys are left unchanged.
     """
     new_sd = {}
     for key, value in state_dict.items():
         new_key = key.replace("diffusion_model.", "transformer.")
+        if new_key.startswith(_TRANSFORMER_PREFIX) and _INNER_DIT_KEY_SEGMENT not in new_key:
+            rest = new_key[len(_TRANSFORMER_PREFIX) :]
+            new_key = f"{_TRANSFORMER_PREFIX}_inner_dit.{rest}"
         new_sd[new_key] = value
     return new_sd
 

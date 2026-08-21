@@ -434,7 +434,47 @@ def test_convert_lora_weights_before_save_strips_compiled_orig_mod_segment():
     }
     out = lora_mod.convert_lora_weights_before_save(sd)
     assert list(out.keys()) == [
-        "diffusion_model._inner_dit.layers.0.attention.to_q.lora_A.weight"
+        "diffusion_model.layers.0.attention.to_q.lora_A.weight"
+    ]
+
+
+def test_convert_lora_weights_before_save_strips_inner_dit_noise_refiner():
+    sd = {
+        "transformer._inner_dit.noise_refiner.0.attention.to_q.lora_A.weight": torch.randn(2, 4),
+    }
+    out = lora_mod.convert_lora_weights_before_save(sd)
+    assert list(out.keys()) == [
+        "diffusion_model.noise_refiner.0.attention.to_q.lora_A.weight"
+    ]
+
+
+def test_convert_lora_weights_before_save_already_portable_is_noop():
+    sd = {
+        "diffusion_model.layers.0.attention.to_q.lora_A.weight": torch.randn(2, 4),
+    }
+    out = lora_mod.convert_lora_weights_before_save(sd)
+    assert list(out.keys()) == [
+        "diffusion_model.layers.0.attention.to_q.lora_A.weight"
+    ]
+
+
+def test_convert_lora_weights_before_load_portable_inserts_inner_dit():
+    sd = {
+        "diffusion_model.layers.0.attention.to_q.lora_A.weight": torch.randn(2, 4),
+    }
+    out = lora_mod.convert_lora_weights_before_load(sd)
+    assert list(out.keys()) == [
+        "transformer._inner_dit.layers.0.attention.to_q.lora_A.weight"
+    ]
+
+
+def test_convert_lora_weights_before_load_old_wrapped_no_double_wrap():
+    sd = {
+        "diffusion_model._inner_dit.layers.0.attention.to_q.lora_A.weight": torch.randn(2, 4),
+    }
+    out = lora_mod.convert_lora_weights_before_load(sd)
+    assert list(out.keys()) == [
+        "transformer._inner_dit.layers.0.attention.to_q.lora_A.weight"
     ]
 
 
@@ -447,10 +487,12 @@ def test_peft_save_load_roundtrip():
 
     net1, base = _build_peft_network("peft", n_blocks=2)
     sd = net1.get_state_dict(dtype=torch.float32)
-    # Saved keys should be in DiffSynth convention (diffusion_model. prefix).
+    # Saved keys should be portable DiffSynth keys (no training wrapper).
     sample_key = next(iter(sd.keys()))
-    assert sample_key.startswith("diffusion_model."), sample_key
+    assert sample_key.startswith("diffusion_model.layers."), sample_key
+    assert "_inner_dit" not in sample_key, sample_key
     assert ".lora_A.weight" in sample_key, sample_key
+    assert not any("_inner_dit" in key for key in sd.keys())
 
     tmp = tempfile.mktemp(suffix=".safetensors")
     try:
@@ -473,7 +515,7 @@ def test_peft_save_load_roundtrip():
 
 
 def test_peft_save_load_roundtrip_after_compiled_block_wrap():
-    """Compiled DiT blocks must not leak ``._orig_mod.`` into saved LoRA keys."""
+    """Compiled DiT blocks must not leak ``._orig_mod.`` or ``_inner_dit`` into saved LoRA keys."""
     import os
     import tempfile
 
@@ -508,6 +550,7 @@ def test_peft_save_load_roundtrip_after_compiled_block_wrap():
     sd = net1.get_state_dict(dtype=torch.float32)
     assert sd, "expected non-empty LoRA state dict"
     assert not any("._orig_mod." in key for key in sd.keys())
+    assert not any("_inner_dit" in key for key in sd.keys())
 
     tmp = tempfile.mktemp(suffix=".safetensors")
     try:
