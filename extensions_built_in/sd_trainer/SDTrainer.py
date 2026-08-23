@@ -1307,14 +1307,7 @@ class SDTrainer(BaseSDTrainProcess):
         if loss.item() > 1e3:
             pass
         # Scale gradients so microbatch accumulation behaves like a mean.
-        step_num = getattr(self, "step_num", -1)
-        batch_size = int(batch.latents.shape[0]) if getattr(batch, "latents", None) is not None else -1
-        with memory_debug(
-            print_acc,
-            f"train_step.backward(step={step_num},bs={batch_size})",
-            kind="cuda",
-        ):
-            self.accelerator.backward(loss * microbatch_scale)
+        self.accelerator.backward(loss * microbatch_scale)
         return pure_loss
 
 
@@ -1507,8 +1500,6 @@ class SDTrainer(BaseSDTrainProcess):
                 if self.sd.text_encoder.dtype != self.sd.te_torch_dtype:
                     self.sd.text_encoder.to(self.sd.te_torch_dtype)
 
-            step_num = getattr(self, "step_num", -1)
-            prepare_bs = len(getattr(batch, "file_items", []) or [])
             noisy_latents, noise, timesteps, conditioned_prompts, imgs = self.process_general_training_batch(batch)
             # Save noised input preview to samples/ on same steps as validation sampling (for Web UI)
             # Only if enabled via sample_config.sample_noised (default False for backwards compatibility)
@@ -2268,20 +2259,15 @@ class SDTrainer(BaseSDTrainProcess):
                     backward_done = True
                 else:
                     with self.timer('predict_unet'):
-                        with memory_debug(
-                            print_acc,
-                            f"train_step.forward(step={step_num},bs={prepare_bs})",
-                            kind="cuda",
-                        ):
-                            noise_pred = self.predict_noise(
-                                noisy_latents=noisy_latents.to(self.device_torch, dtype=dtype),
-                                timesteps=timesteps,
-                                conditional_embeds=conditional_embeds.to(self.device_torch, dtype=dtype),
-                                unconditional_embeds=unconditional_embeds,
-                                batch=batch,
-                                is_primary_pred=True,
-                                **pred_kwargs
-                            )
+                        noise_pred = self.predict_noise(
+                            noisy_latents=noisy_latents.to(self.device_torch, dtype=dtype),
+                            timesteps=timesteps,
+                            conditional_embeds=conditional_embeds.to(self.device_torch, dtype=dtype),
+                            unconditional_embeds=unconditional_embeds,
+                            batch=batch,
+                            is_primary_pred=True,
+                            **pred_kwargs
+                        )
                     self.after_unet_predict()
 
                     with self.timer('calculate_loss'):
@@ -2292,21 +2278,16 @@ class SDTrainer(BaseSDTrainProcess):
                         doing_preservation = self.train_config.diff_output_preservation or self.train_config.blank_prompt_preservation
                         if doing_preservation and not do_inverted_masked_prior:
                             prior_to_calculate_loss = None
-                        
-                        with memory_debug(
-                            print_acc,
-                            f"train_step.loss(step={step_num},bs={prepare_bs})",
-                            kind="cuda",
-                        ):
-                            loss = self.calculate_loss(
-                                noise_pred=noise_pred,
-                                noise=noise,
-                                noisy_latents=noisy_latents,
-                                timesteps=timesteps,
-                                batch=batch,
-                                mask_multiplier=mask_multiplier,
-                                prior_pred=prior_to_calculate_loss,
-                            )
+
+                        loss = self.calculate_loss(
+                            noise_pred=noise_pred,
+                            noise=noise,
+                            noisy_latents=noisy_latents,
+                            timesteps=timesteps,
+                            batch=batch,
+                            mask_multiplier=mask_multiplier,
+                            prior_pred=prior_to_calculate_loss,
+                        )
                     
                     # Determine if we should run BPP this step
                     should_run_bpp = False
@@ -2340,12 +2321,7 @@ class SDTrainer(BaseSDTrainProcess):
                         
                         # Combine main loss and preservation loss with loss_multiplier applied
                         total_loss = loss * loss_multiplier.mean() + preservation_loss
-                        with memory_debug(
-                            print_acc,
-                            f"train_step.backward(step={step_num},bs={prepare_bs})",
-                            kind="cuda",
-                        ):
-                            self.accelerator.backward(total_loss * microbatch_scale)
+                        self.accelerator.backward(total_loss * microbatch_scale)
                         
                         # Detach total loss for logging and nan checks
                         loss = total_loss.detach()
@@ -2370,12 +2346,7 @@ class SDTrainer(BaseSDTrainProcess):
                         # if self.is_bfloat:
                         # loss.backward()
                         # else:
-                        with memory_debug(
-                            print_acc,
-                            f"train_step.backward(step={step_num},bs={prepare_bs})",
-                            kind="cuda",
-                        ):
-                            self.accelerator.backward(loss * microbatch_scale)
+                        self.accelerator.backward(loss * microbatch_scale)
 
         return loss.detach()
         # flush()

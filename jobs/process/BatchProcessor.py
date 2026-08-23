@@ -7,7 +7,7 @@ from toolkit.timestep_debug import TimestepDistributionLogger
 from toolkit.timestep_sampler import TimestepSampler
 from toolkit.train_tools import get_torch_dtype
 from toolkit.util.blended_blur_noise import get_blended_blur_noise
-from toolkit.util.debug import is_debug_enabled, memory_debug
+from toolkit.util.debug import is_debug_enabled
 
 
 class GeneralBatchProcessor:
@@ -37,22 +37,17 @@ class GeneralBatchProcessor:
         Returns:
             tuple: (noisy_latents, noise, timesteps, conditioned_prompts, imgs)
         """
-        step_num = getattr(self.p, "step_num", -1)
-        batch_size = len(getattr(batch, "file_items", []) or [])
-        label = f"train_step.prepare_batch(step={step_num},bs={batch_size})"
-        print_fn = getattr(self.p, "print_and_status_update", None) or print
-        with memory_debug(print_fn, label, kind="cuda"):
-            with torch.no_grad():
-                conditioned_prompts, do_double = self._prepare_prompts(batch)
-                latents, imgs, unaugmented_latents, dtype, is_reg = self._prepare_latents(batch)
-                timesteps, min_noise_steps, max_noise_steps, do_double = self._prepare_timesteps(
-                    batch, latents, is_reg, do_double
-                )
-                noisy_latents, noise, timesteps, imgs = self._prepare_noise_and_noisy_latents(
-                    batch, latents, unaugmented_latents, timesteps, conditioned_prompts,
-                    imgs, dtype, is_reg, do_double, min_noise_steps, max_noise_steps
-                )
-        
+        with torch.no_grad():
+            conditioned_prompts, do_double = self._prepare_prompts(batch)
+            latents, imgs, unaugmented_latents, dtype, is_reg = self._prepare_latents(batch)
+            timesteps, min_noise_steps, max_noise_steps, do_double = self._prepare_timesteps(
+                batch, latents, is_reg, do_double
+            )
+            noisy_latents, noise, timesteps, imgs = self._prepare_noise_and_noisy_latents(
+                batch, latents, unaugmented_latents, timesteps, conditioned_prompts,
+                imgs, dtype, is_reg, do_double, min_noise_steps, max_noise_steps
+            )
+
         return noisy_latents, noise, timesteps, conditioned_prompts, imgs
     
     def _prepare_prompts(self, batch):
