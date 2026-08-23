@@ -75,6 +75,7 @@ export const defaultJobConfig: JobConfig = {
           content_or_style: 'balanced',
           turbo_prior_steps: 8,
           turbo_t_jitter: 0.5,
+          turbo_t_jitter_end: 0,
           optimizer_params: {
             weight_decay: 1e-4,
           },

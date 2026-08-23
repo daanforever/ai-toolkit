@@ -107,7 +107,7 @@ class TimestepSampler:
         # turbo_prior must run before content_or_style gaussian branches, which would
         # otherwise steal sampling when both are set in YAML.
         if self.train_config.timestep_type == 'turbo_prior':
-            timesteps = self._sample_turbo_prior(batch_size, latents)
+            timesteps = self._sample_turbo_prior(batch_size, latents, step_num)
             return TimestepSamplerResult(timesteps=timesteps, timestep_indices=None)
 
         # Gaussian modes are chosen by `content_or_style` and must not be overridden by
@@ -162,14 +162,38 @@ class TimestepSampler:
         self,
         batch_size: int,
         latents: torch.Tensor,
+        step_num: int,
     ) -> torch.Tensor:
-        """Sample float t from the official Turbo NFE grid with Voronoi jitter."""
+        """Sample float t from the official Turbo NFE grid with Voronoi jitter.
+
+        Slots are always multinomial-sampled by |Δσ| weights (dsigma). No MSE
+        slot-weight multiply. ``turbo_slot_weighting`` is not an A/B option: if
+        present and not ``dsigma``, raise; if omitted, still dsigma.
+
+        Jitter anneals from ``turbo_t_jitter`` (start) to ``turbo_t_jitter_end``
+        over training steps: j = lerp(start, end, step_num / max(steps-1, 1)).
+        Constant when end == start.
+        """
         from extensions_built_in.diffusion_models.z_image_diffsynth.turbo_schedule import (
             get_turbo_sigmas_and_timesteps,
+            turbo_slot_dsigma_weights,
         )
 
+        if hasattr(self.train_config, "turbo_slot_weighting"):
+            slot_weighting = getattr(self.train_config, "turbo_slot_weighting")
+            if slot_weighting != "dsigma":
+                raise ValueError(
+                    "turbo_prior: turbo_slot_weighting must be 'dsigma' or omitted; "
+                    f"got {slot_weighting!r}"
+                )
+
         n_steps = int(getattr(self.train_config, "turbo_prior_steps", 8) or 8)
-        jitter = float(getattr(self.train_config, "turbo_t_jitter", 0.5) or 0.0)
+        jitter_start = float(getattr(self.train_config, "turbo_t_jitter", 0.5) or 0.0)
+        jitter_end = float(getattr(self.train_config, "turbo_t_jitter_end", 0.0) or 0.0)
+        train_steps = int(getattr(self.train_config, "steps", 1) or 1)
+        progress = float(step_num) / float(max(train_steps - 1, 1))
+        progress = max(0.0, min(1.0, progress))
+        jitter = jitter_start + (jitter_end - jitter_start) * progress
         _, centers = get_turbo_sigmas_and_timesteps(
             num_inference_steps=n_steps,
             use_dynamic_shifting=False,
@@ -191,7 +215,10 @@ class TimestepSampler:
                 d_next = (centers[i] - centers[i + 1]) * 0.5
                 deltas[i] = torch.minimum(d_prev, d_next)
 
-        slot = torch.randint(0, n, (batch_size,), device=latents.device)
+        weights = turbo_slot_dsigma_weights(n).to(
+            device=latents.device, dtype=torch.float32
+        )
+        slot = torch.multinomial(weights, batch_size, replacement=True)
         t_i = centers[slot]
         if jitter == 0.0:
             return t_i

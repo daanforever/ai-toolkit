@@ -9,10 +9,12 @@ Run from repo root:
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from extensions_built_in.diffusion_models.z_image_diffsynth.turbo_schedule import (
     get_turbo_sigmas_and_timesteps,
+    turbo_slot_dsigma_weights,
 )
 from toolkit.timestep_sampler import TimestepSampler
 
@@ -44,8 +46,14 @@ def _voronoi_deltas(centers: torch.Tensor) -> torch.Tensor:
     return deltas
 
 
-def _train_config(*, turbo_t_jitter: float = 0.0, content_or_style: str = "balanced"):
-    return SimpleNamespace(
+def _train_config(
+    *,
+    turbo_t_jitter: float = 0.0,
+    content_or_style: str = "balanced",
+    steps: int = 1000,
+    turbo_t_jitter_end=None,
+):
+    cfg = SimpleNamespace(
         noise_scheduler="flowmatch",
         timestep_type="turbo_prior",
         turbo_prior_steps=8,
@@ -54,13 +62,35 @@ def _train_config(*, turbo_t_jitter: float = 0.0, content_or_style: str = "balan
         min_denoising_steps=0,
         max_denoising_steps=999,
         content_or_style=content_or_style,
+        steps=steps,
     )
+    if turbo_t_jitter_end is not None:
+        cfg.turbo_t_jitter_end = turbo_t_jitter_end
+    return cfg
 
 
-def _sample(jitter: float, batch_size: int, content_or_style: str = "balanced", seed: int = 0):
+def _sample(
+    jitter: float,
+    batch_size: int,
+    content_or_style: str = "balanced",
+    seed: int = 0,
+    *,
+    step_num: int = 0,
+    steps: int = 1000,
+    turbo_t_jitter_end=None,
+    turbo_slot_weighting=None,
+):
     torch.manual_seed(seed)
+    cfg = _train_config(
+        turbo_t_jitter=jitter,
+        content_or_style=content_or_style,
+        steps=steps,
+        turbo_t_jitter_end=turbo_t_jitter_end,
+    )
+    if turbo_slot_weighting is not None:
+        cfg.turbo_slot_weighting = turbo_slot_weighting
     sched = SimpleNamespace(timesteps=torch.arange(1000, 0, -1).float())
-    sampler = TimestepSampler(_train_config(turbo_t_jitter=jitter, content_or_style=content_or_style), sched)
+    sampler = TimestepSampler(cfg, sched)
     latents = torch.zeros(1, 16, 8, 8)
     return sampler.sample(
         batch_size=batch_size,
@@ -70,8 +100,191 @@ def _sample(jitter: float, batch_size: int, content_or_style: str = "balanced", 
         max_noise_steps=999,
         num_train_timesteps=1000,
         device=torch.device("cpu"),
-        step_num=0,
+        step_num=step_num,
     )
+
+
+def _fake_trainer_init(
+    self,
+    process_id,
+    job,
+    config,
+    *,
+    content_or_style: str = "balanced",
+    **kwargs,
+):
+    self.config = config
+    self.progress_bar = None
+    self.print = lambda *a, **k: None
+    mk = dict((config.get("model", {}) or {}).get("model_kwargs", {}) or {})
+    self.model_config = SimpleNamespace(model_kwargs=mk)
+    self.train_config = SimpleNamespace(
+        noise_scheduler="placeholder",
+        num_train_timesteps=None,
+        loss_type=None,
+        timestep_type="turbo_prior",
+        content_or_style=content_or_style,
+        linear_timesteps=False,
+        linear_timesteps2=False,
+        snr_gamma=1.0,
+        min_snr_gamma=1.0,
+        dtype="bf16",
+        do_prior_divergence=False,
+        timestep_weighting="none",
+        train_turbo=False,
+        turbo_prior_steps=8,
+        turbo_t_jitter=0.5,
+    )
+
+
+def _patch_diffusion_trainer_init(monkeypatch, *, content_or_style: str = "balanced"):
+    from extensions_built_in.sd_trainer.DiffusionTrainer import DiffusionTrainer
+
+    def _init(self, process_id, job, config, **kwargs):
+        _fake_trainer_init(
+            self, process_id, job, config, content_or_style=content_or_style, **kwargs
+        )
+
+    monkeypatch.setattr(DiffusionTrainer, "__init__", _init)
+
+
+# --- dsigma weights ---
+
+
+def test_dsigma_weights_last_heaviest_sum_one():
+    sigmas, _ = get_turbo_sigmas_and_timesteps(
+        num_inference_steps=8,
+        use_dynamic_shifting=False,
+    )
+    next_sigma = torch.cat([sigmas[1:], sigmas.new_zeros(1)])
+    expected = (sigmas - next_sigma).abs()
+    expected = expected / expected.sum()
+
+    w = turbo_slot_dsigma_weights(8)
+    assert w.numel() == 8
+    assert torch.allclose(w, expected, atol=1e-6)
+    assert torch.allclose(w.sum(), torch.tensor(1.0), atol=1e-5)
+    assert float(w[-1]) == float(w.max())
+    # Last Δσ = σ_last - 0 ≈ 0.30 of total mass on static shift.
+    assert float(w[-1]) > 0.25
+
+
+# --- turbo_slot_weighting ---
+
+
+def test_omitted_turbo_slot_weighting_uses_dsigma():
+    """No turbo_slot_weighting key → dsigma multinomial (jitter0 hits all centers)."""
+    result = _sample(jitter=0.0, batch_size=256, seed=0)
+    centers = _centers_static_8()
+    got = {round(float(x), 4) for x in result.timesteps.tolist()}
+    want = {round(float(x), 4) for x in centers.tolist()}
+    assert got == want
+
+
+def test_explicit_dsigma_turbo_slot_weighting_ok():
+    result = _sample(
+        jitter=0.0, batch_size=64, seed=0, turbo_slot_weighting="dsigma"
+    )
+    centers = _centers_static_8()
+    got = {round(float(x), 4) for x in result.timesteps.tolist()}
+    want = {round(float(x), 4) for x in centers.tolist()}
+    assert got.issubset(want)
+
+
+@pytest.mark.parametrize("bad", ["uniform", "other", "mse"])
+def test_non_dsigma_turbo_slot_weighting_raises(bad):
+    torch.manual_seed(0)
+    cfg = _train_config(turbo_t_jitter=0.0)
+    cfg.turbo_slot_weighting = bad
+    sched = SimpleNamespace(timesteps=torch.arange(1000, 0, -1).float())
+    sampler = TimestepSampler(cfg, sched)
+    latents = torch.zeros(1, 16, 8, 8)
+    with pytest.raises(ValueError, match="dsigma"):
+        sampler.sample(
+            batch_size=4,
+            latents=latents,
+            content_or_style="balanced",
+            min_noise_steps=0,
+            max_noise_steps=999,
+            num_train_timesteps=1000,
+            device=torch.device("cpu"),
+            step_num=0,
+        )
+
+
+# --- jitter anneal ---
+
+
+def test_jitter_anneal_default_end_zero_at_last_step():
+    """Omitted turbo_t_jitter_end defaults to 0 → last step has zero jitter."""
+    steps = 100
+    result = _sample(
+        jitter=0.5,
+        batch_size=256,
+        seed=3,
+        step_num=steps - 1,
+        steps=steps,
+        # turbo_t_jitter_end omitted → getattr default 0.0
+    )
+    centers = _centers_static_8()
+    got = {round(float(x), 4) for x in result.timesteps.tolist()}
+    want = {round(float(x), 4) for x in centers.tolist()}
+    assert got == want
+
+
+def test_jitter_anneal_step0_uses_start():
+    """step_num=0 → effective jitter = start (0.5); samples leave exact centers."""
+    steps = 100
+    centers = _centers_static_8()
+    deltas = _voronoi_deltas(centers)
+    result = _sample(
+        jitter=0.5,
+        batch_size=2048,
+        seed=4,
+        step_num=0,
+        steps=steps,
+        turbo_t_jitter_end=0.0,
+    )
+    ts = result.timesteps.float()
+    center_set = {round(float(x), 4) for x in centers.tolist()}
+    got = {round(float(x), 4) for x in ts.tolist()}
+    assert got != center_set, "step 0 with start=0.5 must apply jitter"
+
+    max_offset = 0.5 * 2.0 * deltas
+    dists = (ts.unsqueeze(1) - centers.unsqueeze(0)).abs()
+    in_cell = (dists <= max_offset.unsqueeze(0) + 1e-3).any(dim=1)
+    assert bool(in_cell.all())
+
+
+def test_jitter_anneal_end_equals_start_constant():
+    """end == start → same non-zero jitter at step 0 and last step."""
+    steps = 50
+    centers = _centers_static_8()
+    center_set = {round(float(x), 4) for x in centers.tolist()}
+
+    r0 = _sample(
+        jitter=0.5,
+        batch_size=512,
+        seed=5,
+        step_num=0,
+        steps=steps,
+        turbo_t_jitter_end=0.5,
+    )
+    r_last = _sample(
+        jitter=0.5,
+        batch_size=512,
+        seed=5,
+        step_num=steps - 1,
+        steps=steps,
+        turbo_t_jitter_end=0.5,
+    )
+    assert {round(float(x), 4) for x in r0.timesteps.tolist()} != center_set
+    assert {round(float(x), 4) for x in r_last.timesteps.tolist()} != center_set
+    # Same seed + same effective jitter → identical samples.
+    assert torch.allclose(r0.timesteps, r_last.timesteps)
+
+
+# --- grid / voronoi (P1 retained) ---
 
 
 def test_static_8_centers_match_helper_and_jitter0_set():
@@ -94,10 +307,10 @@ def test_jitter_stays_in_voronoi_cells_and_last_slot_not_toward_zero():
     assert last_floor > 50.0
 
     for jitter in (0.5, 1.0):
+        # end=start so anneal does not collapse jitter at step 0 with default end=0
+        # (default end=0 is fine at step_num=0: progress=0 → start).
         result = _sample(jitter=jitter, batch_size=2048, seed=1)
         ts = result.timesteps.float()
-        # Every sample must land in some closed sampling cell.
-        # Cell i: |t - c_i| <= jitter * 2 * delta_i (+ tiny float slack).
         max_offset = jitter * 2.0 * deltas
         dists = (ts.unsqueeze(1) - centers.unsqueeze(0)).abs()
         in_cell = (dists <= max_offset.unsqueeze(0) + 1e-3).any(dim=1)
@@ -127,37 +340,70 @@ def test_gaussian_content_or_style_does_not_override_turbo_prior():
     assert got == want
 
 
-def test_turbo_prior_ignores_diffsynth_training_loop(monkeypatch):
-    """timestep_type=turbo_prior + use_diffsynth_training_loop=true → loop off, type kept."""
+# --- trainer contracts (P3) ---
+
+
+def test_turbo_prior_omitted_encoding_defaults_true(monkeypatch):
     from extensions_built_in.diffusion_models.z_image_diffsynth.trainer import (
         ZImageDiffSynthTrainer,
     )
-    from extensions_built_in.sd_trainer.DiffusionTrainer import DiffusionTrainer
 
-    def _fake_init(self, process_id, job, config, **kwargs):
-        self.config = config
-        self.progress_bar = None
-        mk = dict((config.get("model", {}) or {}).get("model_kwargs", {}) or {})
-        self.model_config = SimpleNamespace(model_kwargs=mk)
-        self.train_config = SimpleNamespace(
-            noise_scheduler="placeholder",
-            num_train_timesteps=None,
-            loss_type=None,
-            timestep_type="turbo_prior",
-            content_or_style="gaussian",
-            linear_timesteps=False,
-            linear_timesteps2=False,
-            snr_gamma=1.0,
-            min_snr_gamma=1.0,
-            dtype="bf16",
-            do_prior_divergence=False,
-            timestep_weighting="none",
-            train_turbo=False,
-            turbo_prior_steps=8,
-            turbo_t_jitter=0.5,
-        )
+    _patch_diffusion_trainer_init(monkeypatch)
+    cfg = {
+        "model": {
+            "model_kwargs": {
+                "use_diffsynth_training_loop": False,
+            }
+        }
+    }
+    trainer = ZImageDiffSynthTrainer(0, None, cfg)
+    assert trainer.model_config.model_kwargs.get("use_diffsynth_prompt_encoding") is True
+    assert cfg["model"]["model_kwargs"]["use_diffsynth_prompt_encoding"] is True
 
-    monkeypatch.setattr(DiffusionTrainer, "__init__", _fake_init)
+
+def test_turbo_prior_explicit_encoding_true_ok(monkeypatch):
+    from extensions_built_in.diffusion_models.z_image_diffsynth.trainer import (
+        ZImageDiffSynthTrainer,
+    )
+
+    _patch_diffusion_trainer_init(monkeypatch)
+    cfg = {
+        "model": {
+            "model_kwargs": {
+                "use_diffsynth_training_loop": False,
+                "use_diffsynth_prompt_encoding": True,
+            }
+        }
+    }
+    trainer = ZImageDiffSynthTrainer(0, None, cfg)
+    assert trainer.model_config.model_kwargs.get("use_diffsynth_prompt_encoding") is True
+
+
+def test_turbo_prior_raises_on_encoding_false(monkeypatch):
+    from extensions_built_in.diffusion_models.z_image_diffsynth.trainer import (
+        ZImageDiffSynthTrainer,
+    )
+
+    _patch_diffusion_trainer_init(monkeypatch)
+    cfg = {
+        "model": {
+            "model_kwargs": {
+                "use_diffsynth_training_loop": False,
+                "use_diffsynth_prompt_encoding": False,
+            }
+        }
+    }
+    with pytest.raises(ValueError, match="use_diffsynth_prompt_encoding"):
+        ZImageDiffSynthTrainer(0, None, cfg)
+
+
+def test_turbo_prior_raises_on_diffsynth_training_loop(monkeypatch):
+    """timestep_type=turbo_prior + use_diffsynth_training_loop=true → raise."""
+    from extensions_built_in.diffusion_models.z_image_diffsynth.trainer import (
+        ZImageDiffSynthTrainer,
+    )
+
+    _patch_diffusion_trainer_init(monkeypatch)
     cfg = {
         "model": {
             "model_kwargs": {
@@ -165,7 +411,41 @@ def test_turbo_prior_ignores_diffsynth_training_loop(monkeypatch):
             }
         }
     }
-    trainer = ZImageDiffSynthTrainer(0, None, cfg)
+    with pytest.raises(ValueError, match="use_diffsynth_training_loop"):
+        ZImageDiffSynthTrainer(0, None, cfg)
 
-    assert trainer.use_diffsynth_training_loop is False
-    assert trainer.train_config.timestep_type == "turbo_prior"
+
+@pytest.mark.parametrize("mode", ["gaussian", "gaussian_bimodal"])
+def test_turbo_prior_raises_on_gaussian_content_or_style(monkeypatch, mode):
+    from extensions_built_in.diffusion_models.z_image_diffsynth.trainer import (
+        ZImageDiffSynthTrainer,
+    )
+
+    _patch_diffusion_trainer_init(monkeypatch, content_or_style=mode)
+    cfg = {
+        "model": {
+            "model_kwargs": {
+                "use_diffsynth_training_loop": False,
+            }
+        }
+    }
+    with pytest.raises(ValueError, match="gaussian"):
+        ZImageDiffSynthTrainer(0, None, cfg)
+
+
+def test_turbo_prior_raises_on_dynamic_shifting(monkeypatch):
+    from extensions_built_in.diffusion_models.z_image_diffsynth.trainer import (
+        ZImageDiffSynthTrainer,
+    )
+
+    _patch_diffusion_trainer_init(monkeypatch)
+    cfg = {
+        "model": {
+            "model_kwargs": {
+                "use_diffsynth_training_loop": False,
+                "use_dynamic_shifting": True,
+            }
+        }
+    }
+    with pytest.raises(ValueError, match="use_dynamic_shifting"):
+        ZImageDiffSynthTrainer(0, None, cfg)

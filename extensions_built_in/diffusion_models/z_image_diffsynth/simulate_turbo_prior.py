@@ -67,24 +67,38 @@ from extensions_built_in.diffusion_models.z_image_diffsynth.turbo_schedule impor
 )
 
 LINEAR_RANK = 4
-TOTAL_STEPS = 13
+TOTAL_STEPS = 11
 TURBO_PRIOR_STEPS = 8
 
 # Collected by monkeypatch during run_job (sim-only; debug logger skips turbo_prior).
 _COLLECTED_T: List[float] = []
+# (step_num, effective_jitter) per _sample_turbo_prior call — anneal check.
+_COLLECTED_JITTER: List[tuple] = []
 
 
 def _log(msg: str) -> None:
     print(msg, flush=True)
 
 
+def _effective_jitter(train_config, step_num: int) -> float:
+    start = float(getattr(train_config, "turbo_t_jitter", 0.5) or 0.0)
+    end = float(getattr(train_config, "turbo_t_jitter_end", 0.0) or 0.0)
+    train_steps = int(getattr(train_config, "steps", 1) or 1)
+    progress = float(step_num) / float(max(train_steps - 1, 1))
+    progress = max(0.0, min(1.0, progress))
+    return start + (end - start) * progress
+
+
 def _install_t_collector() -> None:
     """Hook TimestepSampler._sample_turbo_prior to record sampled t values."""
     _COLLECTED_T.clear()
+    _COLLECTED_JITTER.clear()
     _orig = TimestepSampler._sample_turbo_prior
 
-    def _wrapped(self, batch_size, latents):
-        t = _orig(self, batch_size, latents)
+    def _wrapped(self, batch_size, latents, step_num=0):
+        j = _effective_jitter(self.train_config, step_num)
+        _COLLECTED_JITTER.append((int(step_num), j))
+        t = _orig(self, batch_size, latents, step_num)
         _COLLECTED_T.extend(t.detach().float().cpu().tolist())
         return t
 
@@ -126,6 +140,15 @@ def _print_t_histogram(n_steps: int = TURBO_PRIOR_STEPS) -> None:
     _log(
         f"[t-log] t min={min(t_vals):.1f} mean={sum(t_vals)/n:.1f} max={max(t_vals):.1f}"
     )
+    if _COLLECTED_JITTER:
+        first_step, first_j = _COLLECTED_JITTER[0]
+        last_step, last_j = _COLLECTED_JITTER[-1]
+        _log(
+            f"[t-log] jitter anneal first step={first_step} j={first_j:.4f} "
+            f"last step={last_step} j={last_j:.4f}"
+        )
+    else:
+        _log("[t-log] WARNING: no jitter anneal samples collected")
 
 
 def _train_lora(
@@ -194,6 +217,7 @@ def _train_lora(
                         "timestep_type": "turbo_prior",
                         "turbo_prior_steps": TURBO_PRIOR_STEPS,
                         "turbo_t_jitter": 0.5,
+                        "turbo_t_jitter_end": 0,
                         "content_or_style": "balanced",
                         "timestep_weighting": "none",
                         "min_snr_gamma": 0,
@@ -243,6 +267,7 @@ def _train_lora(
                         "qtype_te": "qfloat8",
                         "arch": "zimage_diffsynth",
                         "low_vram": False,
+                        # use_diffsynth_prompt_encoding omitted → trainer default-on (true)
                         "model_kwargs": {
                             "use_diffsynth_training_loop": False,
                             "use_dynamic_shifting": False,
@@ -354,6 +379,10 @@ def main() -> None:
         )
 
     _log("2) Training LoRA + sample via single run_job (turbo_prior) ...")
+    _log(
+        "[sim] use_diffsynth_prompt_encoding omitted → true "
+        "(turbo_prior DiffSynth encoding locked on)"
+    )
     lora_path = _train_lora(
         work_root, dataset_dir, model_path, sampling_path, batch_size=batch_size
     )

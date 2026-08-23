@@ -30,6 +30,33 @@ def _read_use_dynamic_shifting_from_config(config) -> bool:
     return False
 
 
+def _model_kwargs_from_config(config) -> dict:
+    if isinstance(config, dict):
+        try:
+            model_cfg = config.get("model", {}) or {}
+            return dict(model_cfg.get("model_kwargs", {}) or {})
+        except Exception:
+            return {}
+    return {}
+
+
+def _write_model_kwarg(trainer, config, key: str, value) -> None:
+    """Persist a model_kwargs entry on both live model_config and raw config dict."""
+    try:
+        mk = dict(getattr(trainer.model_config, "model_kwargs", None) or {})
+        mk[key] = value
+        trainer.model_config.model_kwargs = mk
+    except Exception:
+        pass
+    if isinstance(config, dict):
+        try:
+            model_cfg = config.setdefault("model", {})
+            model_kwargs = model_cfg.setdefault("model_kwargs", {})
+            model_kwargs[key] = value
+        except Exception:
+            pass
+
+
 class ZImageDiffSynthTrainer(DiffusionTrainer):
     """
     Trainer for Z-Image DiffSynth (arch zimage_diffsynth).
@@ -51,21 +78,43 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
         use_diffsynth_training_loop = _read_use_diffsynth_training_loop_from_config(cfg)
         use_dynamic_shifting = _read_use_dynamic_shifting_from_config(cfg)
 
-        # turbo_prior needs TimestepSampler (toolkit loop). Warn and ignore DiffSynth loop.
-        if getattr(tc, "timestep_type", None) == "turbo_prior" and use_diffsynth_training_loop:
-            print_acc(
-                "ZImage DiffSynth: timestep_type=turbo_prior requires toolkit TimestepSampler; "
-                "ignoring use_diffsynth_training_loop=true."
-            )
-            use_diffsynth_training_loop = False
+        if getattr(tc, "timestep_type", None) == "turbo_prior":
+            mk = _model_kwargs_from_config(cfg)
+            try:
+                mk_live = dict(getattr(self.model_config, "model_kwargs", None) or {})
+                mk = {**mk, **mk_live}
+            except Exception:
+                pass
 
-        if getattr(tc, "timestep_type", None) == "turbo_prior" and getattr(
-            tc, "content_or_style", None
-        ) in ("gaussian", "gaussian_bimodal"):
-            print_acc(
-                "ZImage DiffSynth: timestep_type=turbo_prior ignores content_or_style="
-                f"{tc.content_or_style!r} (prior sampling wins)."
-            )
+            if "use_diffsynth_prompt_encoding" in mk:
+                if not bool(mk["use_diffsynth_prompt_encoding"]):
+                    raise ValueError(
+                        "timestep_type=turbo_prior requires use_diffsynth_prompt_encoding=true "
+                        "(explicit false is not allowed)."
+                    )
+            else:
+                _write_model_kwarg(self, cfg, "use_diffsynth_prompt_encoding", True)
+
+            if use_diffsynth_training_loop:
+                raise ValueError(
+                    "timestep_type=turbo_prior requires use_diffsynth_training_loop=false "
+                    "(toolkit TimestepSampler); true is not allowed."
+                )
+
+            if getattr(tc, "content_or_style", None) in (
+                "gaussian",
+                "gaussian_bimodal",
+            ):
+                raise ValueError(
+                    "timestep_type=turbo_prior is incompatible with content_or_style="
+                    f"{tc.content_or_style!r}; use balanced (or another non-gaussian mode)."
+                )
+
+            if use_dynamic_shifting:
+                raise ValueError(
+                    "timestep_type=turbo_prior requires use_dynamic_shifting=false "
+                    "(official Turbo uses static shift); true is not allowed."
+                )
 
         self.use_diffsynth_training_loop = use_diffsynth_training_loop
         self._requested_use_dynamic_shifting = use_dynamic_shifting

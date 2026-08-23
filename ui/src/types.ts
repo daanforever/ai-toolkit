@@ -167,6 +167,7 @@ export interface TrainConfig {
   fixed_cycle_weight_sigma?: number;
   turbo_prior_steps?: number;
   turbo_t_jitter?: number;
+  turbo_t_jitter_end?: number;
 }
 
 export interface QuantizeKwargsConfig {

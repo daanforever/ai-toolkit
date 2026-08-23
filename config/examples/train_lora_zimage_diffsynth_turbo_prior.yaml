@@ -1,0 +1,97 @@
+---
+# Z-Image DiffSynth — Turbo-t prior LoRA (train SFT Z-Image, sample Z-Image-Turbo)
+# process.type: z_image_diffsynth_trainer, model.arch: zimage_diffsynth.
+# Train on Tongyi-MAI/Z-Image; sample/infer on Tongyi-MAI/Z-Image-Turbo at 8 steps, CFG 0.
+# Slot sampling is always dsigma — do not set turbo_slot_weighting.
+# See extensions_built_in/diffusion_models/z_image_diffsynth/README.turbo.md
+job: extension
+config:
+  name: "my_zimage_diffsynth_turbo_prior_lora_v1"
+  process:
+    - type: "z_image_diffsynth_trainer"
+      training_folder: "output"
+      device: cuda:0
+      network:
+        type: "lora"
+        dtype: fp32
+        linear: 16
+        linear_alpha: 16
+        network_kwargs:
+          ignore_if_contains:
+            - "context_refiner"
+            - "noise_refiner"
+            - "all_final_layer"
+      save:
+        dtype: bf16
+        save_every: 500
+        max_step_saves_to_keep: 6
+        save_format: safetensors
+      datasets:
+        - folder_path: "/path/to/images/folder"
+          caption_ext: "txt"
+          caption_dropout_rate: 0.05
+          cache_latents_to_disk: true
+          resolution: [ 1024, 1024 ]
+      train:
+        batch_size: 1
+        gradient_accumulation: 1
+        steps: 3000
+        train_unet: true
+        train_text_encoder: false
+        gradient_checkpointing: true
+        noise_scheduler: "flowmatch"
+        prediction_type: "flowmatch"
+        timestep_type: "turbo_prior"
+        turbo_prior_steps: 8
+        turbo_t_jitter: 0.5
+        turbo_t_jitter_end: 0
+        timestep_weighting: "none"
+        min_snr_gamma: 0
+        content_or_style: "balanced"
+        loss_type: "mse"
+        dtype: fp32
+        optimizer: "adafactor"
+        lr: 1.0
+        optimizer_params:
+          weight_decay: 0.01
+        lr_scheduler: "constant"
+        cache_text_embeddings: true
+        unload_text_encoder: true
+        ema_config:
+          use_ema: false
+          ema_decay: 0.99
+        skip_first_sample: false
+        disable_sampling: false
+      logging:
+        log_every: 1
+        use_ui_logger: true
+      model:
+        name_or_path: "Tongyi-MAI/Z-Image"
+        sampling_name_or_path: "Tongyi-MAI/Z-Image-Turbo"
+        arch: "zimage_diffsynth"
+        dtype: bf16
+        quantize: true
+        qtype: "qfloat8"
+        quantize_te: true
+        qtype_te: "qfloat8"
+        low_vram: false
+        model_kwargs:
+          use_diffsynth_training_loop: false
+          use_diffsynth_prompt_encoding: true
+          use_dynamic_shifting: false
+      sample:
+        sampler: "flowmatch"
+        sample_every: 250
+        width: 1024
+        height: 1024
+        samples:
+          - prompt: "[trigger], studio portrait, soft lighting"
+          - prompt: "[trigger] on a beach, golden hour"
+        neg: ""
+        seed: 42
+        walk_seed: true
+        guidance_scale: 0
+        sample_steps: 8
+meta:
+  name: "[name]"
+  version: "1.0"

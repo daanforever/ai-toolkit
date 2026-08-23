@@ -65,7 +65,17 @@ Default `use_dynamic_shifting: false` keeps current behaviour: DiffSynth static 
 
 ### Example: Turbo-t prior (`timestep_type: turbo_prior`)
 
-Train-time `t` is sampled from the official 8-NFE Turbo grid (static `shift=3`) with Voronoi jitter, via `TimestepSampler` (toolkit loop). Requires **`use_diffsynth_training_loop: false`** (if the DiffSynth loop is requested, the trainer warns and ignores it). Wins over `content_or_style: gaussian` / `gaussian_bimodal`. Optional: `turbo_prior_steps` (default 8), `turbo_t_jitter` (default 0.5).
+Train-time `t` is sampled from the official 8-NFE Turbo grid (static `shift=3`) with Voronoi jitter, via `TimestepSampler` (toolkit loop). **Train on Z-Image** (`name_or_path`); **sample on Z-Image-Turbo** (`sampling_name_or_path`). Full recipe: `README.turbo.md` and `config/examples/train_lora_zimage_diffsynth_turbo_prior.yaml`.
+
+**Raise contract** (hard fail, not warn/coerce):
+
+- `use_diffsynth_training_loop: true`
+- `use_diffsynth_prompt_encoding: false` (explicit)
+- `use_dynamic_shifting: true`
+- `content_or_style: gaussian` or `gaussian_bimodal`
+- `turbo_slot_weighting` present and not `dsigma` — omit the key; slots are always dsigma (no A/B weighting)
+
+Jitter anneals from `turbo_t_jitter` (default `0.5`) to `turbo_t_jitter_end` (default `0`) over training steps. Optional: `turbo_prior_steps` (default 8).
 
 ```yaml
 process:
@@ -74,13 +84,18 @@ process:
       noise_scheduler: flowmatch
       prediction_type: flowmatch
       timestep_type: turbo_prior
+      turbo_t_jitter: 0.5
+      turbo_t_jitter_end: 0
       content_or_style: balanced
       timestep_weighting: none
       min_snr_gamma: 0
     model:
+      name_or_path: Tongyi-MAI/Z-Image
+      sampling_name_or_path: Tongyi-MAI/Z-Image-Turbo
       arch: zimage_diffsynth
       model_kwargs:
         use_diffsynth_training_loop: false
+        use_diffsynth_prompt_encoding: true
         use_dynamic_shifting: false
     sample:
       sample_steps: 8

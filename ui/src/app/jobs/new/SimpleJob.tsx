@@ -581,6 +581,16 @@ export default function SimpleJob({
                       min={0}
                       max={1}
                     />
+                    <NumberInput
+                      label="Turbo T Jitter End"
+                      className="pt-2"
+                      docKey="train.turbo_t_jitter_end"
+                      value={jobConfig.config.process[0].train.turbo_t_jitter_end ?? 0}
+                      onChange={value => setJobConfig(value, 'config.process[0].train.turbo_t_jitter_end')}
+                      placeholder="eg. 0"
+                      min={0}
+                      max={1}
+                    />
                   </>
                 )}
                 <SelectInput

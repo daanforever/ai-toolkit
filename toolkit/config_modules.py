@@ -546,6 +546,10 @@ class TrainConfig:
         self.next_sample_timesteps = kwargs.get('next_sample_timesteps', 8)
         self.turbo_prior_steps: int = kwargs.get('turbo_prior_steps', 8)
         self.turbo_t_jitter: float = kwargs.get('turbo_t_jitter', 0.5)
+        self.turbo_t_jitter_end: float = kwargs.get('turbo_t_jitter_end', 0.0)
+        # Not an A/B feature; if present and not dsigma, _sample_turbo_prior raises.
+        if 'turbo_slot_weighting' in kwargs:
+            self.turbo_slot_weighting = kwargs['turbo_slot_weighting']
         self.linear_timesteps = kwargs.get('linear_timesteps', False)
         self.linear_timesteps2 = kwargs.get('linear_timesteps2', False)
         self.disable_sampling = kwargs.get('disable_sampling', False)

@@ -43,3 +43,18 @@ def get_turbo_sigmas_and_timesteps(
         sigmas = shift * sigmas / (1 + (shift - 1) * sigmas)
     timesteps = sigmas * num_train_timesteps
     return sigmas, timesteps
+
+
+def turbo_slot_dsigma_weights(n: int) -> torch.Tensor:
+    """Normalized |Δσ| slot weights from the same Turbo sigmas as train/sample.
+
+    Last Δσ is ``sigmas[-1] - 0`` (heaviest slot, σ≈0.30→0).
+    """
+    sigmas, _ = get_turbo_sigmas_and_timesteps(
+        num_inference_steps=n,
+        use_dynamic_shifting=False,
+    )
+    # Adjacent drops; last step goes to σ=0.
+    next_sigma = torch.cat([sigmas[1:], sigmas.new_zeros(1)])
+    dsigma = (sigmas - next_sigma).abs()
+    return dsigma / dsigma.sum()

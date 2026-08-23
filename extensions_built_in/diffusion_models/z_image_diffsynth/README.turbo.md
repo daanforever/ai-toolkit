@@ -2,11 +2,11 @@
 
 This note is for users who want a LoRA that **behaves well at official Turbo inference**: 8 denoising steps, static time shift 3, no classifier-free guidance (CFG).
 
-Train the LoRA on **Z-Image** (dense SFT / base) weights. Sample and later use it on **Z-Image-Turbo**. The training loss stays ordinary flow-matching MSE on the base model. What changes is **which noise levels `t` you train on**.
+**Do not train on Turbo.** Train the LoRA on **Z-Image** (dense SFT / base) weights. Sample and later use it on **Z-Image-Turbo**. The training loss stays ordinary flow-matching MSE on the base model. What changes is **which noise levels `t` you train on**.
 
 Z-Image-Turbo only calls the transformer on **eight** shifted sigmas. If you train on the usual 1000-step dense schedule (especially `content_or_style: gaussian`, whose peak sits near `t ≈ 120`), the LoRA is barely defined on the Turbo grid. The last Turbo center is about `t ≈ 300`, so that gaussian peak is **outside** the trajectory Euler actually uses.
 
-Use process type `z_image_diffsynth_trainer` and `model.arch: zimage_diffsynth`. Adapter flags and letterbox / compile behaviour are documented in `README.md`. This file covers the **Turbo-t prior** job only.
+Use process type `z_image_diffsynth_trainer` and `model.arch: zimage_diffsynth`. Adapter flags and letterbox / compile behaviour are documented in `README.md`. This file covers the **Turbo-t prior** job only. Example YAML: `config/examples/train_lora_zimage_diffsynth_turbo_prior.yaml`.
 
 ## Checkpoints
 
@@ -16,6 +16,20 @@ Use process type `z_image_diffsynth_trainer` and `model.arch: zimage_diffsynth`.
 | Sample / Turbo transformer | Tongyi-MAI **Z-Image-Turbo** | `model.sampling_name_or_path` |
 
 Both paths should be local snapshot directories (or equivalent Hugging Face IDs your machine can resolve). Sampling during training uses the Turbo transformer when `sampling_name_or_path` is set.
+
+## Raise contract
+
+With `timestep_type: turbo_prior`, the trainer / sampler **raises** (does not silently coerce) on:
+
+| Setting | Forbidden value | Required |
+| --- | --- | --- |
+| `model.model_kwargs.use_diffsynth_training_loop` | `true` | `false` |
+| `model.model_kwargs.use_diffsynth_prompt_encoding` | explicit `false` | `true` (or omit → defaulted on) |
+| `model.model_kwargs.use_dynamic_shifting` | `true` | `false` |
+| `train.content_or_style` | `gaussian` or `gaussian_bimodal` | `balanced` (or another non-gaussian mode) |
+| `train.turbo_slot_weighting` | any value other than `dsigma` | omit the key (always dsigma) |
+
+There is **no A/B slot-weighting dropdown**. Slots are always multinomial-sampled by `|Δσ|` (dsigma). Do not put `turbo_slot_weighting` in the YAML.
 
 ## Required settings
 
@@ -27,8 +41,9 @@ These must be set this way or the job is not a Turbo-t prior run.
 | `train` | `prediction_type` | `flowmatch` | Match the scheduler / loss. |
 | `train` | `timestep_type` | `turbo_prior` | Sample `t` from the official 8-NFE Turbo grid, not a dense 1000-step linear/shift/gaussian schedule. |
 | `model` | `arch` | `zimage_diffsynth` | This adapter. |
-| `model.model_kwargs` | `use_diffsynth_training_loop` | `false` | Turbo-t prior goes through the toolkit timestep sampler. If you leave the DiffSynth loop on, the trainer **warns and turns it off**. |
-| `model.model_kwargs` | `use_dynamic_shifting` | `false` | Official Turbo inference is **static** shift 3. Dynamic (Flux-style) shift is for dense SFT, not Turbo. |
+| `model.model_kwargs` | `use_diffsynth_training_loop` | `false` | Turbo-t prior goes through the toolkit timestep sampler. `true` raises. |
+| `model.model_kwargs` | `use_diffsynth_prompt_encoding` | `true` | Explicit `false` raises; omit defaults to `true`. |
+| `model.model_kwargs` | `use_dynamic_shifting` | `false` | Official Turbo inference is **static** shift 3. `true` raises. |
 | `sample` | `sample_steps` | `8` | Same NFE as Turbo. Do not judge the LoRA at 10 or 30 steps. |
 | `sample` | `guidance_scale` | `0` | Official Turbo does not use CFG. |
 
@@ -38,19 +53,20 @@ Strongly recommended so training `t` and preview sampling stay on the Turbo traj
 
 | Location | Parameter | Recommended value | Notes |
 | --- | --- | --- | --- |
-| `train` | `content_or_style` | `balanced` | With `turbo_prior`, gaussian modes are **ignored** (warning in the log). Set `balanced` so the YAML matches what actually runs. |
+| `train` | `content_or_style` | `balanced` | `gaussian` / `gaussian_bimodal` **raise**. |
 | `train` | `timestep_weighting` | `none` | Do not re-weight a dense 1000-step SNR/gaussian schedule; `t` is already on eight Turbo slots. |
 | `train` | `min_snr_gamma` | `0` | Disable min-SNR reweighting for this prior. |
 | `train` | `turbo_prior_steps` | `8` | Number of Turbo slots (default 8). Keep in lockstep with `sample.sample_steps`. |
-| `train` | `turbo_t_jitter` | `0.5` | Voronoi jitter around each slot (default 0.5). `0` pins exact centers. The last slot does not jitter toward `t → 0`. |
-| `model` | `name_or_path` | Z-Image snapshot | Base weights the LoRA is trained on. |
+| `train` | `turbo_t_jitter` | `0.5` | Start of Voronoi jitter anneal (default 0.5). `0` pins exact centers. |
+| `train` | `turbo_t_jitter_end` | `0` | End of jitter anneal over training steps (default `0`). Effective `j = lerp(start, end, step / (steps-1))`. |
+| `model` | `name_or_path` | Z-Image snapshot | Base weights the LoRA is trained on — **not** Turbo. |
 | `model` | `sampling_name_or_path` | Z-Image-Turbo snapshot | Transformer used for in-training samples. |
 
 **Grid (static shift 3, 8 steps):** train-time centers are about
 
 `1000, 955, 900, 833, 750, 643, 500, 300`
 
-Jitter spreads each sample in its Voronoi cell. A small fraction of values slightly below 300 is normal at `turbo_t_jitter: 0.5`. A mass of `t` near 120 means you are still on the old gaussian prior — check `timestep_type`.
+Jitter spreads each sample in its Voronoi cell. Anneal from `turbo_t_jitter: 0.5` → `turbo_t_jitter_end: 0` so early steps explore cells and late steps pin centers. The last slot does not jitter toward `t → 0`. A mass of `t` near 120 means you are still on the old gaussian prior — check `timestep_type`.
 
 ## Recommended settings
 
@@ -59,18 +75,19 @@ Not required for correctness, but typical for a stable Turbo LoRA job on this ad
 | Location | Parameter | Suggestion |
 | --- | --- | --- |
 | `network` | `type` | `lora` |
-| `network` | `linear` / `linear_alpha` | Rank 8–32 for a real run; rank 4 is only for short smoke tests. |
-| `network.network_kwargs.ignore_if_contains` | — | Often exclude `context_refiner`, `noise_refiner`, `all_final_layer` (same as the adapter’s example job). |
+| `network` | `linear` / `linear_alpha` | Rank = alpha **16** for the normative recipe (8–32 also fine). |
+| `network.network_kwargs.ignore_if_contains` | — | Exclude `context_refiner`, `noise_refiner`, `all_final_layer`. |
 | `model` | `quantize` / `quantize_te` | `true` with `qtype` / `qtype_te` `qfloat8` to cut VRAM. |
 | `model` | `dtype` | `bf16` for the transformer; LoRA weights often `fp32`. |
 | `model.model_kwargs` | `loader` | `auto`, `diffusers`, or `diffsynth` — see `README.md`. |
 | `train` | `batch_size` | `1` avoids letterbox; `> 1` enables pad-to-square for this arch. |
+| `train` | `steps` | ~2000–4000 for a real run. |
 | `train` | `gradient_checkpointing` | `true` |
 | `train` | `train_unet` / `train_text_encoder` | Train DiT LoRA only (`true` / `false`). |
 | `train` | `cache_text_embeddings` | `true` so the text encoder can be unloaded after caching. |
 | `train` | `optimizer` | `adafactor` (toolkit) or `hfadafactor` (stock Hugging Face). |
 | `save` | `save_format` | `safetensors` |
-| `sample` | width / height | Match the resolution you care about at 8 NFE (previews in the example jobs use 256 for speed). |
+| `sample` | width / height | Match dataset resolution (normative: 1024). |
 
 Do **not** expand this recipe to assistant LoRA, trajectory imitation, or Decoupled DMD. Those are separate training modes.
 
@@ -78,12 +95,14 @@ Do **not** expand this recipe to assistant LoRA, trajectory imitation, or Decoup
 
 | Avoid | Instead |
 | --- | --- |
-| `timestep_type: linear` or `shift` plus `content_or_style: gaussian` | `timestep_type: turbo_prior` |
-| `use_diffsynth_training_loop: true` | `false` (required for this prior) |
-| `use_dynamic_shifting: true` | `false` |
+| Training on **Z-Image-Turbo** as `name_or_path` | Train **Z-Image**, sample **Z-Image-Turbo** |
+| `timestep_type: linear` or `shift` plus `content_or_style: gaussian` | `timestep_type: turbo_prior` + `content_or_style: balanced` |
+| `use_diffsynth_training_loop: true` | `false` (required; `true` raises) |
+| `use_diffsynth_prompt_encoding: false` | `true` (explicit `false` raises) |
+| `use_dynamic_shifting: true` | `false` (`true` raises) |
+| `turbo_slot_weighting: uniform` (or any non-dsigma) | Omit the key (always dsigma) |
 | `sample_steps` 9, 20, or 30 as the quality check | `8` |
 | `guidance_scale` 1 or higher at sample time | `0` |
-| Training and sampling from the same Turbo checkpoint only | Train on **Z-Image**, sample on **Z-Image-Turbo** |
 
 ## After training
 
