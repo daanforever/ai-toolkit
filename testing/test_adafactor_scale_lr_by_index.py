@@ -185,10 +185,10 @@ def test_scale_lr_factor_power_curve():
         assert got == pytest.approx(expected)
 
 
-def test_scale_lr_factor_errors_when_non_positive():
+def test_scale_lr_factor_allows_non_positive():
     p = torch.nn.Parameter(torch.ones(2))
-    with pytest.raises(ValueError, match="scale_lr_factor must be > 0"):
-        Adafactor(
+    for factor in (0.0, -1.0):
+        opt = Adafactor(
             [{"params": [p]}],
             lr=1e-3,
             relative_step=False,
@@ -197,8 +197,9 @@ def test_scale_lr_factor_errors_when_non_positive():
             beta1=None,
             weight_decay=0.0,
             scale_lr_by_index=False,
-            scale_lr_factor=0.0,
+            scale_lr_factor=factor,
         )
+        assert opt.scale_lr_factor == factor
 
 
 def test_weight_decay_max_errors_when_non_positive():

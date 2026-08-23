@@ -134,7 +134,6 @@ class Adafactor(torch.optim.Optimizer):
             Independent of `relative_step`.
         scale_lr_factor (`float`, *optional*, defaults to `1.0`):
             Strength of index-based LR/WD scaling when `scale_lr_by_index=True`.
-            Must be ``> 0``.
         weight_decay_max (`float`, *optional*, defaults to `0.1`):
             Target for index-scaled weight decay when `scale_lr_by_index=True`.
             Geometric interpolate toward this value:
@@ -354,10 +353,6 @@ class Adafactor(torch.optim.Optimizer):
     ) -> None:
         """Enable index-based LR scaling and resolve max_index from param groups."""
         scale_lr_factor = float(scale_lr_factor)
-        if scale_lr_factor <= 0:
-            raise ValueError(
-                f"scale_lr_factor must be > 0, got scale_lr_factor={scale_lr_factor}"
-            )
         weight_decay_max = float(weight_decay_max)
         if weight_decay_max <= 0:
             raise ValueError(
