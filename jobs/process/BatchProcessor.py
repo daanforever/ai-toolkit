@@ -245,36 +245,40 @@ class GeneralBatchProcessor:
                     num_train_timesteps, device=self.p.device_torch, original_inference_steps=num_train_timesteps
                 )
             elif self.p.train_config.noise_scheduler == 'flowmatch':
-                linear_timesteps = any([
-                    self.p.train_config.linear_timesteps,
-                    self.p.train_config.linear_timesteps2,
-                    self.p.train_config.timestep_type == 'linear',
-                    self.p.train_config.timestep_type == 'one_step',
-                ])
-                
-                timestep_type = 'linear' if linear_timesteps else None
-                if timestep_type is None:
-                    timestep_type = self.p.train_config.timestep_type
-                
-                if self.p.train_config.timestep_type == 'next_sample':
-                    # simulate a sample
-                    num_train_timesteps = self.p.train_config.next_sample_timesteps
-                    timestep_type = 'shift'
-                
-                patch_size = 1
-                if self.p.sd.is_flux or 'flex' in self.p.sd.arch or self.p.sd.arch == 'zimage_diffsynth':
-                    # flux is a patch size of 1, but latents are divided by 2, so we need to double it
-                    patch_size = 2
-                elif hasattr(self.p.sd.unet.config, 'patch_size'):
-                    patch_size = self.p.sd.unet.config.patch_size
-                
-                self.p.sd.noise_scheduler.set_train_timesteps(
-                    num_train_timesteps,
-                    device=self.p.device_torch,
-                    timestep_type=timestep_type,
-                    latents=latents,
-                    patch_size=patch_size,
-                )
+                # turbo_prior: float t comes from TimestepSampler / Turbo grid helper.
+                # Do not build a 1000-point linear/shift train grid just to obtain t.
+                # add_noise uses t/1000 directly; leave any existing scheduler state for get_sigmas.
+                if self.p.train_config.timestep_type != 'turbo_prior':
+                    linear_timesteps = any([
+                        self.p.train_config.linear_timesteps,
+                        self.p.train_config.linear_timesteps2,
+                        self.p.train_config.timestep_type == 'linear',
+                        self.p.train_config.timestep_type == 'one_step',
+                    ])
+                    
+                    timestep_type = 'linear' if linear_timesteps else None
+                    if timestep_type is None:
+                        timestep_type = self.p.train_config.timestep_type
+                    
+                    if self.p.train_config.timestep_type == 'next_sample':
+                        # simulate a sample
+                        num_train_timesteps = self.p.train_config.next_sample_timesteps
+                        timestep_type = 'shift'
+                    
+                    patch_size = 1
+                    if self.p.sd.is_flux or 'flex' in self.p.sd.arch or self.p.sd.arch == 'zimage_diffsynth':
+                        # flux is a patch size of 1, but latents are divided by 2, so we need to double it
+                        patch_size = 2
+                    elif hasattr(self.p.sd.unet.config, 'patch_size'):
+                        patch_size = self.p.sd.unet.config.patch_size
+                    
+                    self.p.sd.noise_scheduler.set_train_timesteps(
+                        num_train_timesteps,
+                        device=self.p.device_torch,
+                        timestep_type=timestep_type,
+                        latents=latents,
+                        patch_size=patch_size,
+                    )
             else:
                 self.p.sd.noise_scheduler.set_timesteps(
                     num_train_timesteps, device=self.p.device_torch

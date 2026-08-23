@@ -63,6 +63,30 @@ process:
 
 Default `use_dynamic_shifting: false` keeps current behaviour: DiffSynth static `shift=3` in DiffSynth loop, static shift in toolkit loop.
 
+### Example: Turbo-t prior (`timestep_type: turbo_prior`)
+
+Train-time `t` is sampled from the official 8-NFE Turbo grid (static `shift=3`) with Voronoi jitter, via `TimestepSampler` (toolkit loop). Requires **`use_diffsynth_training_loop: false`** (if the DiffSynth loop is requested, the trainer warns and ignores it). Wins over `content_or_style: gaussian` / `gaussian_bimodal`. Optional: `turbo_prior_steps` (default 8), `turbo_t_jitter` (default 0.5).
+
+```yaml
+process:
+  - type: z_image_diffsynth_trainer
+    train:
+      noise_scheduler: flowmatch
+      prediction_type: flowmatch
+      timestep_type: turbo_prior
+      content_or_style: balanced
+      timestep_weighting: none
+      min_snr_gamma: 0
+    model:
+      arch: zimage_diffsynth
+      model_kwargs:
+        use_diffsynth_training_loop: false
+        use_dynamic_shifting: false
+    sample:
+      sample_steps: 8
+      guidance_scale: 0
+```
+
 ## Checklist vs DiffSynth `Z-Image.sh`
 
 When aligning a job with [DiffSynth-Studio/examples](DiffSynth-Studio/examples/z_image/model_training/lora/Z-Image.sh), compare at least:

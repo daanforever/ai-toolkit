@@ -541,9 +541,11 @@ class TrainConfig:
         # adds an additional loss to the network to encourage it output a normalized standard deviation
         self.target_norm_std = kwargs.get('target_norm_std', None)
         self.target_norm_std_value = kwargs.get('target_norm_std_value', 1.0)
-        self.timestep_type = kwargs.get('timestep_type', 'sigmoid')  # sigmoid, linear, lognorm_blend, next_sample, one_step, shift, flux_shift, ...
+        self.timestep_type = kwargs.get('timestep_type', 'sigmoid')  # sigmoid, linear, lognorm_blend, next_sample, one_step, shift, flux_shift, turbo_prior, ...
         self.timestep_weighting: TimestepWeightingType = kwargs.get('timestep_weighting', 'none')
         self.next_sample_timesteps = kwargs.get('next_sample_timesteps', 8)
+        self.turbo_prior_steps: int = kwargs.get('turbo_prior_steps', 8)
+        self.turbo_t_jitter: float = kwargs.get('turbo_t_jitter', 0.5)
         self.linear_timesteps = kwargs.get('linear_timesteps', False)
         self.linear_timesteps2 = kwargs.get('linear_timesteps2', False)
         self.disable_sampling = kwargs.get('disable_sampling', False)

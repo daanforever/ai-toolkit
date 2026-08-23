@@ -68,7 +68,7 @@ def allowed_slot_index_range(
 
 @dataclass
 class TimestepSamplerResult:
-    """Result of timestep sampling: final timesteps and optional indices (None for fixed_cycle)."""
+    """Result of timestep sampling: final timesteps and optional indices (None for fixed_cycle / turbo_prior)."""
     timesteps: torch.Tensor
     timestep_indices: Optional[torch.Tensor]
 
@@ -102,8 +102,14 @@ class TimestepSampler:
         Sample timesteps or timestep indices for the current batch.
 
         Returns TimestepSamplerResult with timesteps always set; timestep_indices
-        is None only for fixed_cycle strategy.
+        is None for fixed_cycle and turbo_prior strategies.
         """
+        # turbo_prior must run before content_or_style gaussian branches, which would
+        # otherwise steal sampling when both are set in YAML.
+        if self.train_config.timestep_type == 'turbo_prior':
+            timesteps = self._sample_turbo_prior(batch_size, latents)
+            return TimestepSamplerResult(timesteps=timesteps, timestep_indices=None)
+
         # Gaussian modes are chosen by `content_or_style` and must not be overridden by
         # `timestep_type` in ('next_sample', 'one_step'). Otherwise runtime/UI updates to
         # timestep_type (DiffusionTrainer.apply_runtime_timestep_type) can silently change
@@ -151,6 +157,46 @@ class TimestepSampler:
             return TimestepSamplerResult(timesteps=timesteps, timestep_indices=timestep_indices)
         else:
             raise ValueError(f"Unknown content_or_style {content_or_style}")
+
+    def _sample_turbo_prior(
+        self,
+        batch_size: int,
+        latents: torch.Tensor,
+    ) -> torch.Tensor:
+        """Sample float t from the official Turbo NFE grid with Voronoi jitter."""
+        from extensions_built_in.diffusion_models.z_image_diffsynth.turbo_schedule import (
+            get_turbo_sigmas_and_timesteps,
+        )
+
+        n_steps = int(getattr(self.train_config, "turbo_prior_steps", 8) or 8)
+        jitter = float(getattr(self.train_config, "turbo_t_jitter", 0.5) or 0.0)
+        _, centers = get_turbo_sigmas_and_timesteps(
+            num_inference_steps=n_steps,
+            use_dynamic_shifting=False,
+        )
+        centers = centers.to(device=latents.device, dtype=torch.float32)
+        n = centers.numel()
+        if n == 0:
+            raise ValueError("turbo_prior: empty Turbo timestep grid")
+
+        # Voronoi half-widths: first toward next only; last from previous only (not toward 0).
+        deltas = torch.empty(n, device=centers.device, dtype=centers.dtype)
+        if n == 1:
+            deltas[0] = 0.0
+        else:
+            deltas[0] = (centers[0] - centers[1]) * 0.5
+            deltas[-1] = (centers[-2] - centers[-1]) * 0.5
+            for i in range(1, n - 1):
+                d_prev = (centers[i - 1] - centers[i]) * 0.5
+                d_next = (centers[i] - centers[i + 1]) * 0.5
+                deltas[i] = torch.minimum(d_prev, d_next)
+
+        slot = torch.randint(0, n, (batch_size,), device=latents.device)
+        t_i = centers[slot]
+        if jitter == 0.0:
+            return t_i
+        u = (torch.rand(batch_size, device=latents.device, dtype=centers.dtype) * 2.0 - 1.0) * jitter
+        return t_i + u * 2.0 * deltas[slot]
 
     def _sample_next_sample(
         self,

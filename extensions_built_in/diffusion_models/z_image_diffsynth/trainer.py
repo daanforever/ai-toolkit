@@ -50,6 +50,23 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
         cfg = getattr(self, "config", None)
         use_diffsynth_training_loop = _read_use_diffsynth_training_loop_from_config(cfg)
         use_dynamic_shifting = _read_use_dynamic_shifting_from_config(cfg)
+
+        # turbo_prior needs TimestepSampler (toolkit loop). Warn and ignore DiffSynth loop.
+        if getattr(tc, "timestep_type", None) == "turbo_prior" and use_diffsynth_training_loop:
+            print_acc(
+                "ZImage DiffSynth: timestep_type=turbo_prior requires toolkit TimestepSampler; "
+                "ignoring use_diffsynth_training_loop=true."
+            )
+            use_diffsynth_training_loop = False
+
+        if getattr(tc, "timestep_type", None) == "turbo_prior" and getattr(
+            tc, "content_or_style", None
+        ) in ("gaussian", "gaussian_bimodal"):
+            print_acc(
+                "ZImage DiffSynth: timestep_type=turbo_prior ignores content_or_style="
+                f"{tc.content_or_style!r} (prior sampling wins)."
+            )
+
         self.use_diffsynth_training_loop = use_diffsynth_training_loop
         self._requested_use_dynamic_shifting = use_dynamic_shifting
         self.use_dynamic_shifting = use_dynamic_shifting

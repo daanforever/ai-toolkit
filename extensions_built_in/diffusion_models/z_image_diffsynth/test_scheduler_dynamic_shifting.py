@@ -20,6 +20,9 @@ from extensions_built_in.diffusion_models.z_image_diffsynth.scheduler_adapter im
 from extensions_built_in.diffusion_models.z_image_diffsynth.sampling import (
     _get_diffsynth_scheduler,
 )
+from extensions_built_in.diffusion_models.z_image_diffsynth.turbo_schedule import (
+    get_turbo_sigmas_and_timesteps,
+)
 from toolkit.samplers.custom_flowmatch_sampler import (
     CustomFlowMatchEulerDiscreteScheduler,
     calculate_shift,
@@ -166,6 +169,13 @@ def test_sampling_dynamic_vs_static_scheduler():
     assert not torch.allclose(sig_dyn, sig_dyn_large)
     assert torch.allclose(sig_static, sig_static_large)
     assert not torch.allclose(sig_dyn, sig_static)
+
+
+def test_static_8_step_turbo_centers():
+    """Official Turbo 8-NFE centers (static shift=3), atol ~1."""
+    ref = torch.tensor([1000.0, 955.0, 900.0, 833.0, 750.0, 643.0, 500.0, 300.0])
+    _, timesteps = get_turbo_sigmas_and_timesteps(8, use_dynamic_shifting=False)
+    assert torch.allclose(timesteps, ref, atol=1.0)
 
 
 def test_get_sigmas_and_weights_allow_non_exact_float_timesteps():

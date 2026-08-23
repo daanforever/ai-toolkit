@@ -2,7 +2,6 @@
 # When sampling_name_or_path points to a diffusers-format checkpoint, we use ZImagePipeline
 # (same as z_image) so the same checkpoint gives the same quality.
 
-import math
 import os
 import sys
 from typing import List, Optional
@@ -12,13 +11,12 @@ from PIL import Image
 
 from toolkit.samplers.custom_flowmatch_sampler import (
     CustomFlowMatchEulerDiscreteScheduler,
-    calculate_shift,
-    flowmatch_image_seq_len,
 )
 from toolkit.util.debug import memory_debug, is_debug_enabled
 
 from . import forward as fwd_mod
-from .scheduler_config import STATIC_SHIFT, DYNAMIC_SHIFT_DEFAULTS, build_scheduler_config
+from .scheduler_config import build_scheduler_config
+from .turbo_schedule import get_turbo_sigmas_and_timesteps
 
 
 def _get_diffsynth_scheduler(
@@ -29,27 +27,13 @@ def _get_diffsynth_scheduler(
     latent_w: Optional[int] = None,
 ):
     """Z-Image timestep schedule (DiffSynth static or Flux-style dynamic shift)."""
-    sigma_min = 0.0
-    sigma_max = 1.0
-    num_train_timesteps = 1000
-    sigma_start = sigma_min + (sigma_max - sigma_min) * denoising_strength
-    sigmas = torch.linspace(sigma_start, sigma_min, num_inference_steps + 1)[:-1]
-    if use_dynamic_shifting and latent_h is not None and latent_w is not None:
-        image_seq_len = flowmatch_image_seq_len(latent_h, latent_w)
-        mu = calculate_shift(
-            image_seq_len,
-            DYNAMIC_SHIFT_DEFAULTS["base_image_seq_len"],
-            DYNAMIC_SHIFT_DEFAULTS["max_image_seq_len"],
-            DYNAMIC_SHIFT_DEFAULTS["base_shift"],
-            DYNAMIC_SHIFT_DEFAULTS["max_shift"],
-        )
-        t = sigmas.clamp(min=1e-8)
-        exp_mu = math.exp(mu)
-        sigmas = exp_mu / (exp_mu + (1 / t - 1) ** 1)
-    else:
-        sigmas = STATIC_SHIFT * sigmas / (1 + (STATIC_SHIFT - 1) * sigmas)
-    timesteps = sigmas * num_train_timesteps
-    return sigmas, timesteps
+    return get_turbo_sigmas_and_timesteps(
+        num_inference_steps,
+        denoising_strength=denoising_strength,
+        use_dynamic_shifting=use_dynamic_shifting,
+        latent_h=latent_h,
+        latent_w=latent_w,
+    )
 
 
 def _step_scheduler(sigmas, timesteps, model_output, timestep, sample, device):
