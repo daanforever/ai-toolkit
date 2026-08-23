@@ -130,15 +130,16 @@ class Adafactor(torch.optim.Optimizer):
         scale_lr_by_index (`bool`, *optional*, defaults to `False`):
             If True, scales `base_lr` and effective weight decay by group `index` vs
             resolved `_max_index` (requires at least one group with `index`, and
-            `max_index > 0`): lower-index groups get higher LR and lower WD.
-            Independent of `relative_step`.
+            `max_index > 0`). With ``u = index / max_index``:
+            ``lr' = lr * exp(-scale_lr_factor * u)``,
+            ``wd' = wd * exp(scale_lr_factor * u)`` (capped by `weight_decay_max`
+            when `scale_lr_factor > 0`). Positive factor: later layers get lower LR
+            and higher WD; negative factor inverts that. Independent of `relative_step`.
         scale_lr_factor (`float`, *optional*, defaults to `1.0`):
-            Strength of index-based LR/WD scaling when `scale_lr_by_index=True`.
+            Strength and direction of index-based LR/WD scaling when `scale_lr_by_index=True`.
         weight_decay_max (`float`, *optional*, defaults to `0.1`):
-            Target for index-scaled weight decay when `scale_lr_by_index=True`.
-            Geometric interpolate toward this value:
-            ``wd' = wd**(1-t) * weight_decay_max**t`` with
-            ``t = (index/max_index)**scale_lr_factor``. Must be ``> 0``.
+            Cap for index-scaled weight decay when `scale_lr_by_index=True` and
+            `scale_lr_factor > 0`. Must be ``> 0``.
 
     This implementation handles low-precision (FP16, bfloat) values, but we have not thoroughly tested.
 
@@ -385,9 +386,8 @@ class Adafactor(torch.optim.Optimizer):
         """Index-based LR multiplier, or ``1.0`` when scaling does not apply to this group."""
         if not self.scale_lr_by_index or "index" not in group:
             return 1.0
-        return (
-            (self._max_index - int(group["index"])) / self._max_index
-        ) ** self.scale_lr_factor
+        u = int(group["index"]) / self._max_index
+        return math.exp(-self.scale_lr_factor * u)
 
     def _to_effective_lr(self, base_lr: float, group) -> float:
         """Apply index LR scaling to ``base_lr``, or return it unchanged when scaling is off."""
@@ -1510,11 +1510,10 @@ class Adafactor(torch.optim.Optimizer):
                 if group["weight_decay"] != 0 and not group.get("is_magnitude", False):
                     wd = group["weight_decay"]
                     if self.scale_lr_by_index and "index" in group:
-                        idx = int(group["index"])
-                        # Geometric interpolate toward weight_decay_max as idx -> max_index:
-                        # idx=0 -> wd, idx=max_index -> weight_decay_max
-                        t = (idx / self._max_index) ** self.scale_lr_factor
-                        wd = wd ** (1.0 - t) * self.weight_decay_max ** t
+                        # Inverse of LR: wd' = wd * exp(+factor * u), u = index / max_index.
+                        wd = wd / self._index_lr_multiplier(group)
+                        if self.scale_lr_factor > 0.0:
+                            wd = min(wd, self.weight_decay_max)
                     weight_decay_mode = self._validate_weight_decay_mode(
                         group.get("weight_decay_mode", "absolute")
                     )

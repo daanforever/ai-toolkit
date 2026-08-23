@@ -1,5 +1,7 @@
 """Unit tests for Adafactor group-level warmup (_global_lr / _warmup_update_group)."""
 
+import math
+
 import pytest
 import torch
 
@@ -309,11 +311,11 @@ def test_warmup_scale_lr_lower_index_scale_finishes_earlier():
     eps0 = float(g_hi["eps"][0])
     eps1 = float(g_hi["eps"][1])
     assert opt._index_lr_multiplier(g_hi) == pytest.approx(1.0)
-    assert opt._index_lr_multiplier(g_lo) == pytest.approx(0.5)
-    assert opt._index_lr_multiplier(g_max) == pytest.approx(0.0)
+    assert opt._index_lr_multiplier(g_lo) == pytest.approx(math.exp(-0.5))
+    assert opt._index_lr_multiplier(g_max) == pytest.approx(math.exp(-1.0))
 
     target_lo = opt._to_effective_lr(lr, g_lo)
-    assert target_lo == pytest.approx(lr * 0.5 + eps0)
+    assert target_lo == pytest.approx(lr * math.exp(-0.5) + eps0)
 
     lr_start_u = lr * eps1
     delta_ref = (lr - lr_start_u) / steps

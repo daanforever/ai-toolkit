@@ -1,5 +1,7 @@
 """Tests for Adafactor scale_lr_by_index mode."""
 
+import math
+
 import pytest
 import torch
 
@@ -36,10 +38,10 @@ def test_scale_lr_by_index_formula():
     )
     assert opt._max_index == 2
 
-    for idx, expected_factor in ((0, 1.0), (1, 0.5), (2, 0.0)):
+    for idx in (0, 1, 2):
         state = _state_with_rms(opt, group_idx=idx)
         got = opt._get_lr(opt.param_groups[idx], state)
-        expected = lr * expected_factor + eps[0]
+        expected = lr * math.exp(-idx / 2) + eps[0]
         assert got == pytest.approx(expected)
 
 
@@ -73,7 +75,9 @@ def test_scale_lr_by_index_skips_unindexed_with_valid_max():
     assert opt._get_lr(opt.param_groups[1], state1) == pytest.approx(lr)
 
     state2 = _state_with_rms(opt, 2)
-    assert opt._get_lr(opt.param_groups[2], state2) == pytest.approx(eps[0])
+    assert opt._get_lr(opt.param_groups[2], state2) == pytest.approx(
+        lr * math.exp(-1.0) + eps[0]
+    )
 
 
 def test_scale_lr_by_index_errors_without_indices():
@@ -150,15 +154,18 @@ def test_set_lr_still_scaled_dynamically():
     state0 = _state_with_rms(opt, 0)
     state1 = _state_with_rms(opt, 1)
     assert opt._get_lr(opt.param_groups[0], state0) == pytest.approx(2e-3 + eps[0])
-    assert opt._get_lr(opt.param_groups[1], state1) == pytest.approx(eps[0])
+    assert opt._get_lr(opt.param_groups[1], state1) == pytest.approx(
+        2e-3 * math.exp(-1.0) + eps[0]
+    )
 
 
-def test_scale_lr_factor_power_curve():
+def test_scale_lr_factor_exponential_curve():
     p0 = torch.nn.Parameter(torch.ones(2))
     p1 = torch.nn.Parameter(torch.ones(2))
     p2 = torch.nn.Parameter(torch.ones(2))
     lr = 1e-3
     eps = (1e-30, 1e-3)
+    factor = 2.0
     opt = Adafactor(
         [
             {"params": [p0], "index": 0},
@@ -173,16 +180,50 @@ def test_scale_lr_factor_power_curve():
         beta1=None,
         weight_decay=0.0,
         scale_lr_by_index=True,
-        scale_lr_factor=2.0,
+        scale_lr_factor=factor,
     )
-    assert opt.scale_lr_factor == 2.0
+    assert opt.scale_lr_factor == factor
     assert opt._max_index == 2
 
-    for idx, expected_factor in ((0, 1.0), (1, 0.25), (2, 0.0)):
+    for idx in (0, 1, 2):
         state = _state_with_rms(opt, group_idx=idx)
         got = opt._get_lr(opt.param_groups[idx], state)
-        expected = lr * expected_factor + eps[0]
+        expected = lr * math.exp(-factor * idx / 2) + eps[0]
         assert got == pytest.approx(expected)
+
+
+def test_scale_lr_factor_negative_increases_later_layers():
+    p0 = torch.nn.Parameter(torch.ones(2))
+    p1 = torch.nn.Parameter(torch.ones(2))
+    p2 = torch.nn.Parameter(torch.ones(2))
+    lr = 1e-4
+    eps = (1e-30, 1e-3)
+    factor = -1.1
+    opt = Adafactor(
+        [
+            {"params": [p0], "index": 0},
+            {"params": [p1], "index": 1},
+            {"params": [p2], "index": 2},
+        ],
+        lr=lr,
+        eps=eps,
+        relative_step=False,
+        scale_parameter=False,
+        warmup_init=False,
+        beta1=None,
+        weight_decay=0.0,
+        scale_lr_by_index=True,
+        scale_lr_factor=factor,
+    )
+    lrs = []
+    for idx in (0, 1, 2):
+        state = _state_with_rms(opt, group_idx=idx)
+        got = opt._get_lr(opt.param_groups[idx], state)
+        expected = lr * math.exp(-factor * idx / 2) + eps[0]
+        assert math.isfinite(got)
+        assert got == pytest.approx(expected)
+        lrs.append(got)
+    assert lrs[0] < lrs[1] < lrs[2]
 
 
 def test_scale_lr_factor_allows_non_positive():
@@ -292,12 +333,12 @@ def test_scale_wd_by_index_param_rms():
     opt = _make_indexed_wd_opt("param_rms", lr=0.2, wd=0.1)
     _zero_grad_step(opt)
     effective = opt.get_effective_wd()
-    # wd' = wd**(1-t) * weight_decay_max**t; t=(index/max)**factor
+    # wd' = wd * exp(factor * u), u=index/max; capped by weight_decay_max when factor>0
     # max_index=2, factor=1, weight_decay_max=0.5
     assert opt.weight_decay_max == pytest.approx(0.5)
     assert effective[0] == pytest.approx(0.1)
-    assert effective[1] == pytest.approx((0.1 * 0.5) ** 0.5)
-    assert effective[2] == pytest.approx(0.5)
+    assert effective[1] == pytest.approx(0.1 * math.exp(0.5))
+    assert effective[2] == pytest.approx(0.1 * math.exp(1.0))
     assert all(g["weight_decay"] == pytest.approx(0.1) for g in opt.param_groups)
 
 
@@ -305,10 +346,10 @@ def test_scale_wd_by_index_constant():
     opt = _make_indexed_wd_opt("constant", lr=0.2, wd=0.1)
     _zero_grad_step(opt)
     effective = opt.get_effective_wd()
-    # wd' = wd**(1-t) * weight_decay_max**t; no * lr
+    # wd' = wd * exp(factor * u); no * lr
     assert effective[0] == pytest.approx(0.1)
-    assert effective[1] == pytest.approx((0.1 * 0.5) ** 0.5)
-    assert effective[2] == pytest.approx(0.5)
+    assert effective[1] == pytest.approx(0.1 * math.exp(0.5))
+    assert effective[2] == pytest.approx(0.1 * math.exp(1.0))
     assert all(g["weight_decay"] == pytest.approx(0.1) for g in opt.param_groups)
 
 
@@ -333,13 +374,12 @@ def test_scale_wd_by_index_absolute():
         scale_lr_by_index=True,
     )
     _zero_grad_step(opt)
-    # Default weight_decay_max=0.1 (== wd) => wd' stays wd for all indices.
-    # lr_scaled: index 0 -> lr+eps0, index 1 -> 0.5*lr+eps0, index 2 -> eps0
+    # Default weight_decay_max=0.1 (== wd) => cap keeps wd' == wd for factor>0.
+    # lr_scaled: lr * exp(-u) + eps0, u=index/max_index
     assert opt.weight_decay_max == pytest.approx(0.1)
     expected = [
-        wd * (lr + eps[0]),
-        wd * (0.5 * lr + eps[0]),
-        wd * eps[0],
+        wd * (lr * math.exp(-idx / 2) + eps[0])
+        for idx in (0, 1, 2)
     ]
     effective = opt.get_effective_wd()
     for got, exp in zip(effective, expected):
@@ -352,7 +392,7 @@ def test_scale_wd_by_index_custom_weight_decay_max():
     effective = opt.get_effective_wd()
     assert opt.weight_decay_max == pytest.approx(0.25)
     assert effective[0] == pytest.approx(0.1)
-    assert effective[1] == pytest.approx((0.1 * 0.25) ** 0.5)
+    assert effective[1] == pytest.approx(0.1 * math.exp(0.5))
     assert effective[2] == pytest.approx(0.25)
 
 
@@ -368,10 +408,10 @@ def test_scale_wd_skips_unindexed_group():
     )
     _zero_grad_step(opt)
     effective = opt.get_effective_wd()
-    # index 0 -> 0.1; unindexed -> wd * rms; index 2 -> weight_decay_max=0.5
+    # index 0 -> 0.1; unindexed -> wd * rms; index 2 -> 0.1 * exp(1)
     assert effective[0] == pytest.approx(0.1)
     assert effective[1] == pytest.approx(0.1)
-    assert effective[2] == pytest.approx(0.5)
+    assert effective[2] == pytest.approx(0.1 * math.exp(1.0))
 
 
 def test_scale_wd_disabled_when_mode_off():
@@ -380,3 +420,35 @@ def test_scale_wd_disabled_when_mode_off():
     )
     _zero_grad_step(opt)
     assert all(v == pytest.approx(0.1) for v in opt.get_effective_wd())
+
+
+def test_scale_wd_negative_factor_decreases_later_layers():
+    p0 = torch.nn.Parameter(torch.ones(4, dtype=torch.float32))
+    p1 = torch.nn.Parameter(torch.ones(4, dtype=torch.float32))
+    p2 = torch.nn.Parameter(torch.ones(4, dtype=torch.float32))
+    wd = 0.1
+    factor = -1.1
+    opt = Adafactor(
+        [
+            {"params": [p0], "index": 0},
+            {"params": [p1], "index": 1},
+            {"params": [p2], "index": 2},
+        ],
+        lr=0.2,
+        relative_step=False,
+        scale_parameter=False,
+        warmup_init=False,
+        beta1=None,
+        weight_decay=wd,
+        weight_decay_mode="constant",
+        scale_lr_by_index=True,
+        scale_lr_factor=factor,
+        weight_decay_max=0.5,
+    )
+    _zero_grad_step(opt)
+    effective = opt.get_effective_wd()
+    expected = [wd * math.exp(factor * idx / 2.0) for idx in (0, 1, 2)]
+    for got, exp in zip(effective, expected):
+        assert math.isfinite(got)
+        assert got == pytest.approx(exp)
+    assert effective[0] > effective[1] > effective[2]
