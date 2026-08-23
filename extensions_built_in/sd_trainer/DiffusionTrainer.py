@@ -71,6 +71,8 @@ class DiffusionTrainer(SDTrainer):
                     Optional[float],
                 ]
             ] = None
+            self._last_applied_runtime_turbo_prior_steps = None
+            self._last_applied_runtime_turbo_t_jitter = None
             # Initialize the status
             self._run_async_operation(self._update_status("running", "Starting"))
             self._stop_watcher_started = False
@@ -779,6 +781,63 @@ class DiffusionTrainer(SDTrainer):
         if is_debug_enabled():
             print_acc(f"\nruntime timestep_type from UI/DB: {value}")
 
+    def get_runtime_turbo_prior_params(self):
+        """Read runtime_turbo_prior_steps, runtime_turbo_t_jitter from DB. Returns (steps, jitter) or (None, None)."""
+        if not self.is_ui_trainer:
+            return (None, None)
+
+        def _read():
+            try:
+                with self._db_connect() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "SELECT runtime_turbo_prior_steps, runtime_turbo_t_jitter "
+                        "FROM RuntimeParams WHERE jobId = ?",
+                        (self.job_id,),
+                    )
+                    row = cursor.fetchone()
+                    if row is None:
+                        return (None, None)
+                    steps = int(row[0]) if row[0] is not None else None
+                    jitter = float(row[1]) if row[1] is not None else None
+                    return (steps, jitter)
+            except sqlite3.OperationalError:
+                # DB not migrated yet (columns missing)
+                return (None, None)
+
+        return _read()
+
+    def apply_runtime_turbo_prior_params(self):
+        """If runtime turbo_prior steps/jitter are set in DB, apply them to train_config."""
+        if not self.is_ui_trainer:
+            return
+        steps, jitter = self.get_runtime_turbo_prior_params()
+        if steps is None and jitter is None:
+            return
+        if (
+            steps == self._last_applied_runtime_turbo_prior_steps
+            and jitter == self._last_applied_runtime_turbo_t_jitter
+        ):
+            return
+        steps_unchanged = steps is None or steps == self.train_config.turbo_prior_steps
+        jitter_unchanged = jitter is None or jitter == self.train_config.turbo_t_jitter
+        if steps_unchanged and jitter_unchanged:
+            self._last_applied_runtime_turbo_prior_steps = steps
+            self._last_applied_runtime_turbo_t_jitter = jitter
+            return
+        if steps is not None:
+            self.train_config.turbo_prior_steps = steps
+        if jitter is not None:
+            self.train_config.turbo_t_jitter = jitter
+        self._last_applied_runtime_turbo_prior_steps = steps
+        self._last_applied_runtime_turbo_t_jitter = jitter
+        if is_debug_enabled():
+            print_acc(
+                f"\nruntime turbo_prior from UI/DB: "
+                f"steps={self.train_config.turbo_prior_steps}, "
+                f"jitter={self.train_config.turbo_t_jitter}"
+            )
+
     def get_runtime_timestep_weighting(self):
         """Read runtime_timestep_weighting from DB (only when is_ui_trainer). Returns str or None."""
         return self._get_runtime_scalar("runtime_timestep_weighting", str)
@@ -1070,6 +1129,8 @@ class DiffusionTrainer(SDTrainer):
         self._last_applied_runtime_min_snr_gamma = None
         self._last_applied_runtime_debug = None
         self._last_applied_runtime_fc_key = None
+        self._last_applied_runtime_turbo_prior_steps = None
+        self._last_applied_runtime_turbo_t_jitter = None
 
     async def _update_key(self, key, value):
         if not self.accelerator.is_main_process:
@@ -1194,6 +1255,7 @@ class DiffusionTrainer(SDTrainer):
             self.apply_runtime_content_or_style()
             self.apply_runtime_fixed_cycle_params()
             self.apply_runtime_timestep_type()
+            self.apply_runtime_turbo_prior_params()
             self.apply_runtime_timestep_weighting()
             self.apply_runtime_batch_size()
             self.apply_runtime_network_weights()

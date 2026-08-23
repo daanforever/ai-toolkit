@@ -165,6 +165,8 @@ export interface TrainConfig {
   fixed_cycle_seed?: number | null;
   fixed_cycle_weight_peak_timesteps?: number[] | null;
   fixed_cycle_weight_sigma?: number;
+  turbo_prior_steps?: number;
+  turbo_t_jitter?: number;
 }
 
 export interface QuantizeKwargsConfig {

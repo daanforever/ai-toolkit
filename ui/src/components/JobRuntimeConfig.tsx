@@ -21,6 +21,7 @@ const TIMESTEP_TYPE_OPTIONS = [
   { value: 'linear', label: 'Linear' },
   { value: 'shift', label: 'Shift' },
   { value: 'flux_shift', label: 'Flux Shift' },
+  { value: 'turbo_prior', label: 'Turbo Prior' },
 ];
 
 const TIMESTEP_WEIGHTING_OPTIONS = [
@@ -120,6 +121,15 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
   const showGaussianPeak2 =
     contentOrStyle === 'gaussian_bimodal' || timestepWeighting === 'gaussian_bimodal';
   const showFixedCycle = contentOrStyle === 'fixed_cycle';
+  const showTurboPrior = timestepType === 'turbo_prior';
+  const turboPriorSteps =
+    trainAny?.turbo_prior_steps != null && Number.isInteger(Number(trainAny.turbo_prior_steps))
+      ? Number(trainAny.turbo_prior_steps)
+      : 8;
+  const turboTJitter =
+    trainAny?.turbo_t_jitter != null && Number.isFinite(Number(trainAny.turbo_t_jitter))
+      ? Number(trainAny.turbo_t_jitter)
+      : 0.5;
   const [fixedCycleTimestepsInput, setFixedCycleTimestepsInput] = useState(() => {
     const p = parseJobConfig(job.job_config);
     const t = p?.config?.process?.[0]?.train as Record<string, unknown> | undefined;
@@ -299,6 +309,22 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
       tr.fixed_cycle_weight_sigma = fixedCycleWeightSigma;
     }
 
+    if (timestepType === 'turbo_prior') {
+      if (!Number.isInteger(turboPriorSteps) || turboPriorSteps < 1) {
+        setApplyStatus('error');
+        setErrorMessage('Turbo prior steps must be an integer ≥ 1');
+        return;
+      }
+      if (!Number.isFinite(turboTJitter) || turboTJitter < 0 || turboTJitter > 1) {
+        setApplyStatus('error');
+        setErrorMessage('Turbo t jitter must be a finite number in [0, 1]');
+        return;
+      }
+      const tr = process.train as Record<string, unknown>;
+      tr.turbo_prior_steps = turboPriorSteps;
+      tr.turbo_t_jitter = turboTJitter;
+    }
+
     try {
       const postRes = await fetch('/api/jobs', {
         method: 'POST',
@@ -343,6 +369,8 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         fixed_cycle_seed?: number | null;
         fixed_cycle_weight_peak_timesteps?: number[] | null;
         fixed_cycle_weight_sigma?: number;
+        turbo_prior_steps?: number;
+        turbo_t_jitter?: number;
       } = {
         weight_decay: weightDecay,
         weight_decay_increment: weightDecayIncrement,
@@ -378,6 +406,12 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
           .fixed_cycle_weight_peak_timesteps as number[] | null;
         patchBody.fixed_cycle_seed = tr.fixed_cycle_seed as number | null;
         patchBody.fixed_cycle_weight_sigma = tr.fixed_cycle_weight_sigma as number;
+      }
+
+      if (timestepType === 'turbo_prior') {
+        const tr = process.train as Record<string, unknown>;
+        patchBody.turbo_prior_steps = tr.turbo_prior_steps as number;
+        patchBody.turbo_t_jitter = tr.turbo_t_jitter as number;
       }
 
       const patchRes = await fetch(`/api/jobs/${job.id}/runtime-config`, {
@@ -431,6 +465,8 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     fixedCycleWeightPeaksStr,
     fixedCycleSeedStr,
     fixedCycleWeightSigma,
+    turboPriorSteps,
+    turboTJitter,
   ]);
 
   if (!initialConfig) {
@@ -629,6 +665,48 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
             </select>
           </div>
         </div>
+
+        {showTurboPrior ? (
+          <div className="flex items-end gap-4 flex-wrap">
+            <div className="space-y-2 flex-1 min-w-[140px]">
+              <p className="text-xs text-gray-400">Turbo prior steps</p>
+              <input
+                type="number"
+                step={1}
+                min={1}
+                placeholder="e.g. 8"
+                value={turboPriorSteps}
+                onChange={(e) => {
+                  const v = parseInt(e.target.value, 10);
+                  if (Number.isInteger(v) && v >= 1) {
+                    setValue(v, `${TRAIN_PATH}.turbo_prior_steps`);
+                    setApplyStatus('idle');
+                  }
+                }}
+                className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+              />
+            </div>
+            <div className="space-y-2 flex-1 min-w-[140px]">
+              <p className="text-xs text-gray-400">Turbo t jitter</p>
+              <input
+                type="number"
+                step="0.01"
+                min={0}
+                max={1}
+                placeholder="e.g. 0.5"
+                value={turboTJitter}
+                onChange={(e) => {
+                  const v = parseFloat(e.target.value);
+                  if (Number.isFinite(v) && v >= 0 && v <= 1) {
+                    setValue(v, `${TRAIN_PATH}.turbo_t_jitter`);
+                    setApplyStatus('idle');
+                  }
+                }}
+                className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+              />
+            </div>
+          </div>
+        ) : null}
 
         <div className="flex items-end gap-4 flex-wrap">
           <div className="space-y-2 flex-1 min-w-[140px]">

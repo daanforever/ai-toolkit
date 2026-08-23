@@ -322,6 +322,24 @@ const docs: { [key: string]: ConfigDoc } = {
         • <code>timestep_bias_exponent</code> (default 3.0): Controls the cubic bias exponent for content/style timestep distribution. Higher values create stronger bias toward edges (early timesteps for content, late timesteps for style). Lower values create more uniform distribution.
         <br /><br />
         <b>Fixed Cycle</b>: Deterministic cycle over a fixed list of timestep values. Same step number always gets the same timestep, so training is reproducible. Recommended for distilled/Turbo models (e.g. Z-Image-Turbo LoRA) that are sensitive to random timestep sampling. Configure via YAML: <code>fixed_cycle_timesteps</code>, <code>fixed_cycle_seed</code>, <code>fixed_cycle_weight_peak_timesteps</code>. With <code>content_or_style: fixed_cycle</code>, you can also adjust these from the job <b>Runtime config</b> UI (same pattern as Gaussian runtime fields).
+        <br /><br />
+        <b>Note:</b> When <code>timestep_type</code> is <b>Turbo Prior</b> (<code>turbo_prior</code>), the Turbo Prior sampler wins and ignores gaussian / gaussian_bimodal bias settings here.
+      </>
+    ),
+  },
+  'train.turbo_prior_steps': {
+    title: 'Turbo Prior Steps',
+    description: (
+      <>
+        Used when <code>timestep_type</code> is <code>turbo_prior</code>. Number of Turbo schedule slots (default <code>8</code>). Keep in lockstep with sample steps for Turbo models.
+      </>
+    ),
+  },
+  'train.turbo_t_jitter': {
+    title: 'Turbo T Jitter',
+    description: (
+      <>
+        Used when <code>timestep_type</code> is <code>turbo_prior</code>. Voronoi jitter around each Turbo slot in <code>[0, 1]</code> (default <code>0.5</code>). <code>0</code> pins exact slot centers. The last slot does not jitter toward <code>t → 0</code>.
       </>
     ),
   },

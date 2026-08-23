@@ -63,6 +63,8 @@ model RuntimeParams {
   runtime_fixed_cycle_seed Int?
   runtime_fixed_cycle_weight_peak_timesteps String?
   runtime_fixed_cycle_weight_sigma Float?
+  runtime_turbo_prior_steps Int?
+  runtime_turbo_t_jitter Float?
   runtime_batch_size       Int?
   runtime_gradient_accumulation Int?
   runtime_save_every       Int?

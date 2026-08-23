@@ -73,6 +73,8 @@ export const defaultJobConfig: JobConfig = {
           timestep_type: 'sigmoid',
           timestep_weighting: 'none',
           content_or_style: 'balanced',
+          turbo_prior_steps: 8,
+          turbo_t_jitter: 0.5,
           optimizer_params: {
             weight_decay: 1e-4,
           },

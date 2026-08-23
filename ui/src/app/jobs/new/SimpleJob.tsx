@@ -556,8 +556,32 @@ export default function SimpleJob({
                       { value: 'sigmoid', label: 'Sigmoid' },
                       { value: 'linear', label: 'Linear' },
                       { value: 'shift', label: 'Shift' },
+                      { value: 'turbo_prior', label: 'Turbo Prior' },
                     ]}
                   />
+                )}
+                {jobConfig.config.process[0].train.timestep_type === 'turbo_prior' && (
+                  <>
+                    <NumberInput
+                      label="Turbo Prior Steps"
+                      className="pt-2"
+                      docKey="train.turbo_prior_steps"
+                      value={jobConfig.config.process[0].train.turbo_prior_steps ?? 8}
+                      onChange={value => setJobConfig(value, 'config.process[0].train.turbo_prior_steps')}
+                      placeholder="eg. 8"
+                      min={1}
+                    />
+                    <NumberInput
+                      label="Turbo T Jitter"
+                      className="pt-2"
+                      docKey="train.turbo_t_jitter"
+                      value={jobConfig.config.process[0].train.turbo_t_jitter ?? 0.5}
+                      onChange={value => setJobConfig(value, 'config.process[0].train.turbo_t_jitter')}
+                      placeholder="eg. 0.5"
+                      min={0}
+                      max={1}
+                    />
+                  </>
                 )}
                 <SelectInput
                   label="Timestep Weighting"
