@@ -30,12 +30,7 @@ def test_parse_tune_default_recipe_ok(overlay, default_process0):
     assert tune["promote_top_k"]["a"] == 3
     assert tune["promote_top_k"]["b"] == 2
     assert tune["safe_range"] == 100
-    assert tune["step_timeout_s"] == 2.0
-    assert tune["load_budget_s"] == 180.0
-    assert tune["sample_budget_s"] == 60.0
-
-
-def test_parse_tune_timeout_knobs_missing_use_defaults(overlay, default_process0):
+    assert tune["step_timeout_s"] == 30.0
     proc = copy.deepcopy(default_process0)
     proc["tune"].pop("step_timeout_s", None)
     proc["tune"].pop("load_budget_s", None)

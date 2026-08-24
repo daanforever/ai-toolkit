@@ -91,6 +91,8 @@ _COLLECTED_T: List[float] = []
 _COLLECTED_JITTER: List[tuple] = []
 # (main_device_str, sampling_device_str) snapped during train get_noise_prediction.
 _TRAIN_RESIDENCY: List[tuple[str, str]] = []
+# True returns from _move_sampling_transformer during train forward (not sample batch).
+_SAMPLING_MOVES_TRAIN: List[bool] = []
 _PROBES_INSTALLED = False
 _LORA_INIT_PATH: Path | None = None
 _LORA_INIT_PROBE_INSTALLED = False
@@ -201,16 +203,28 @@ def _snap_train_residency(model) -> None:
 
 
 def _install_vram_probe() -> None:
-    """Snap main vs sampling devices during train get_noise_prediction."""
+    """Snap main vs sampling devices during train get_noise_prediction.
+
+    Also counts real ``_move_sampling_transformer`` moves (True returns) during
+    train forward; sample-batch moves (``_sampling_in_batch_generate``) ignored.
+    """
     global _PROBES_INSTALLED
     from extensions_built_in.diffusion_models.z_image_diffsynth.model import (
         ZImageDiffSynthModel,
     )
 
     _TRAIN_RESIDENCY.clear()
+    _SAMPLING_MOVES_TRAIN.clear()
     if _PROBES_INSTALLED:
         return
     _orig = ZImageDiffSynthModel.get_noise_prediction
+    _orig_move = ZImageDiffSynthModel._move_sampling_transformer
+
+    def _wrapped_move(self, device):
+        moved = _orig_move(self, device)
+        if moved and not getattr(self, "_sampling_in_batch_generate", False):
+            _SAMPLING_MOVES_TRAIN.append(True)
+        return moved
 
     def _wrapped(self, *args, **kwargs):
         out = _orig(self, *args, **kwargs)
@@ -235,6 +249,7 @@ def _install_vram_probe() -> None:
                     )
         return out
 
+    ZImageDiffSynthModel._move_sampling_transformer = _wrapped_move  # type: ignore[method-assign]
     ZImageDiffSynthModel.get_noise_prediction = _wrapped  # type: ignore[method-assign]
     _PROBES_INSTALLED = True
 
@@ -378,6 +393,18 @@ def _assert_vram_acceptance(
         raise RuntimeError(
             f"Acceptance fail: CUDA peak {peak_gb:.2f} GiB ≥ "
             f"{PEAK_VRAM_FRAC_MAX:.0%} of {total_gb:.2f} GiB"
+        )
+    n_moves = len(_SAMPLING_MOVES_TRAIN)
+    first_allowed = 1
+    extras = max(0, n_moves - first_allowed)
+    _log(
+        f"[vram] sampling_moves_train={n_moves} "
+        f"first_allowed={first_allowed} extras={extras}"
+    )
+    if extras > 0:
+        raise RuntimeError(
+            "Acceptance fail: sampling transformer moved during train forward "
+            "after exclusive pin"
         )
     if train_on_turbo:
         _log("[vram] residency OK (Turbo CUDA, base off CUDA during train)")

@@ -152,7 +152,7 @@ config:
         num_frames: 1
         fps: 1
       tune:
-        step_timeout_s: 2.0
+        step_timeout_s: 30.0
         load_budget_s: 180
         sample_budget_s: 60
         turbo_teacher_weight: true

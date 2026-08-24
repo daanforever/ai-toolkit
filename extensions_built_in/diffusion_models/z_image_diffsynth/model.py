@@ -146,8 +146,22 @@ class ZImageDiffSynthModel(BaseModel):
         return 16 * 2
 
     def _place_training_dit(self, device):
-        """Move frozen DiT (quantized payload included) onto ``device``; fail if it stays off."""
+        """Move frozen DiT (quantized payload included) onto ``device``; fail if it stays off.
+
+        Returns True iff a real device change was needed (and performed).
+        """
+        from toolkit.util.device import devices_equal
+
         target = device if isinstance(device, torch.device) else torch.device(device)
+        module = getattr(self, "_raw_dit", None) or self.model
+        if module is None:
+            self._assert_dit_on_device(target)
+            return False
+        base_p = self._first_frozen_base_param(module)
+        need_move = base_p is None or not devices_equal(base_p.device, target)
+        if not need_move:
+            self._assert_dit_on_device(target)
+            return False
         dit = getattr(self, "_raw_dit", None)
         if dit is not None:
             from .compile_blocks import move_dit_with_compiled_blocks
@@ -156,6 +170,7 @@ class ZImageDiffSynthModel(BaseModel):
         elif self.model is not None:
             self.model.to(target)
         self._assert_dit_on_device(target)
+        return True
 
     def _assert_dit_on_device(self, device):
         from toolkit.util.device import devices_equal, quantized_payload_device
@@ -182,10 +197,22 @@ class ZImageDiffSynthModel(BaseModel):
 
     def _move_main_network(self, device):
         """Pin DiT + training LoRA to CUDA; preserve network.dtype. Never move to CPU."""
-        with memory_debug(self.print_and_status_update, "Move main network"):
-            target = device if isinstance(device, torch.device) else torch.device(device)
-            if target.type == "cpu":
-                return
+        from contextlib import nullcontext
+
+        from toolkit.util.device import devices_equal
+
+        target = device if isinstance(device, torch.device) else torch.device(device)
+        if target.type == "cpu":
+            return
+        module = getattr(self, "_raw_dit", None) or self.model
+        base_p = None if module is None else self._first_frozen_base_param(module)
+        need_move = base_p is None or not devices_equal(base_p.device, target)
+        ctx = (
+            memory_debug(self.print_and_status_update, "Move main network")
+            if need_move
+            else nullcontext()
+        )
+        with ctx:
             self._place_training_dit(target)
             net = getattr(self, "network", None)
             if net is None or not hasattr(net, "force_to"):
@@ -195,7 +222,7 @@ class ZImageDiffSynthModel(BaseModel):
             p = next((p for p in net.parameters() if p.requires_grad), None)
             dtype = p.dtype if p is not None else self.torch_dtype
             net.force_to(target, dtype)
-            if is_debug_enabled():
+            if need_move and is_debug_enabled():
                 self.print_and_status_update(
                     f"\n[zimage_diffsynth] main network force_to {device}"
                 )
@@ -209,18 +236,21 @@ class ZImageDiffSynthModel(BaseModel):
         return None
 
     def _move_sampling_transformer(self, device):
-        """Move _sampling_transformer (sampling DiT base). Do not force_to _sampling_network."""
+        """Move _sampling_transformer (sampling DiT base). Do not force_to _sampling_network.
+
+        Returns True iff ``st.to`` was actually called (need_move).
+        """
         from toolkit.util.device import devices_equal
 
+        st = getattr(self, "_sampling_transformer", None)
+        if st is None:
+            return False
+        target = device if isinstance(device, torch.device) else torch.device(device)
+        base_p = self._first_frozen_base_param(st)
+        need_move = base_p is None or not devices_equal(base_p.device, target)
+        if not need_move:
+            return False
         with memory_debug(self.print_and_status_update, "Move sampling transformer"):
-            st = getattr(self, "_sampling_transformer", None)
-            if st is None:
-                return
-            target = device if isinstance(device, torch.device) else torch.device(device)
-            base_p = self._first_frozen_base_param(st)
-            need_move = base_p is None or not devices_equal(base_p.device, target)
-            if not need_move:
-                return
             if is_debug_enabled():
                 self.print_and_status_update(
                     f"\n[zimage_diffsynth] moving sampling transformer to {device}"
@@ -239,6 +269,7 @@ class ZImageDiffSynthModel(BaseModel):
                     f"[zimage_diffsynth] sampling transformer still on {base_p.device} "
                     f"after move to {target}"
                 )
+        return True
 
     def _flush_cuda(self):
         """Release CUDA cache and run GC so VRAM is actually freed after model moves."""
@@ -259,14 +290,14 @@ class ZImageDiffSynthModel(BaseModel):
         except Exception:
             pass
 
-    def _park_base_dit_and_lora(self) -> None:
+    def _park_base_dit_and_lora(self) -> bool:
         """Park base DiT on CPU. Do not move train LoRA: it shares parameters with sampling LoRA."""
-        self._place_training_dit("cpu")
+        return self._place_training_dit("cpu")
 
-    def _park_sampling_dit_and_lora(self) -> None:
+    def _park_sampling_dit_and_lora(self) -> bool:
         """Park Turbo DiT on CPU. Do not move sampling LoRA: it shares parameters
         with the train LoRA, so force_to(CPU) would yank train weights off CUDA."""
-        self._move_sampling_transformer("cpu")
+        return self._move_sampling_transformer("cpu")
 
     def _enable_dit_gradient_checkpointing(self, dit) -> None:
         """Turn on Diffusers/module GC so Turbo train does not dump full activations."""
@@ -513,12 +544,13 @@ class ZImageDiffSynthModel(BaseModel):
         # that silently runs the frozen base on CPU (~30 s/it).
         train_on_turbo = getattr(self, "_train_on_turbo", False)
         if train_on_turbo:
-            self._park_base_dit_and_lora()
+            parked = self._park_base_dit_and_lora()
             if (
                 isinstance(self.device_torch, torch.device)
                 and self.device_torch.type == "cuda"
             ):
-                self._flush_cuda()
+                if parked:
+                    self._flush_cuda()
                 self._move_sampling_transformer(self.device_torch)
             elif isinstance(latent_model_input, torch.Tensor):
                 self._move_sampling_transformer(latent_model_input.device)
@@ -529,12 +561,13 @@ class ZImageDiffSynthModel(BaseModel):
                 sampling_net = getattr(self, "network", None)
             self._force_network_to(sampling_net, self.device_torch)
         else:
-            self._park_sampling_dit_and_lora()
+            parked = self._park_sampling_dit_and_lora()
             if (
                 isinstance(self.device_torch, torch.device)
                 and self.device_torch.type == "cuda"
             ):
-                self._flush_cuda()
+                if parked:
+                    self._flush_cuda()
                 self._move_main_network(self.device_torch)
             elif isinstance(latent_model_input, torch.Tensor):
                 self._place_training_dit(latent_model_input.device)

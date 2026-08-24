@@ -856,3 +856,342 @@ def test_unload_sampling_transformer_when_train_on_turbo_unset(monkeypatch):
     model._unload_sampling_transformer_after_generate()
     assert to_devices == ["cpu"]
     assert any("Unloaded sampling transformer to CPU" in p for p in prints)
+
+
+# --- Sampling transformer .to residency (spy real move, not debug label alone) ---
+
+
+@pytest.fixture
+def _debug_enabled_restored():
+    """Enable process-global debug; restore prior config after the test."""
+    import toolkit.util.debug as debug_mod
+
+    prev = debug_mod._debug_config
+    debug_mod.set_debug_config(SimpleNamespace(debug=True))
+    try:
+        yield
+    finally:
+        debug_mod.set_debug_config(prev)
+
+
+def _frozen_sampling_inner():
+    """Frozen non-LoRA Linear so _first_frozen_base_param can detect need_move."""
+
+    class _InnerDit(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.frozen_linear = nn.Linear(4, 4, bias=False)
+            self.frozen_linear.weight.requires_grad_(False)
+            self.lora_linear = nn.Linear(4, 4, bias=False)
+            self.lora_linear.weight.requires_grad_(True)
+
+    return _InnerDit()
+
+
+def _spy_wrapper_to(wrapper):
+    """Instance-bind spy on _DiTUnetWrapper.to; returns (to_calls list, restore)."""
+    to_calls = []
+    orig_to = wrapper.to
+
+    def _spy(*args, **kwargs):
+        to_calls.append(args[0] if args else kwargs.get("device"))
+        return orig_to(*args, **kwargs)
+
+    wrapper.to = _spy
+    return to_calls, lambda: setattr(wrapper, "to", orig_to)
+
+
+def _model_for_move_sampling(wrapper, statuses):
+    from extensions_built_in.diffusion_models.z_image_diffsynth.model import (
+        ZImageDiffSynthModel,
+    )
+
+    model = ZImageDiffSynthModel.__new__(ZImageDiffSynthModel)
+    model.print_and_status_update = lambda msg: statuses.append(str(msg))
+    model._sampling_transformer = wrapper
+    model.device_torch = torch.device("cpu")
+    return model
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA required for cpu→cuda sampling move",
+)
+def test_move_sampling_transformer_to_on_device_change_then_noop(_debug_enabled_restored):
+    """(a) first different-device move calls .to + status; (b) same-device repeat skips both."""
+    from extensions_built_in.diffusion_models.z_image_diffsynth.model import (
+        ZImageDiffSynthModel,
+        _DiTUnetWrapper,
+    )
+
+    inner = _frozen_sampling_inner()
+    inner.frozen_linear.to("cpu")
+    wrapper = _DiTUnetWrapper(inner)
+    statuses = []
+    model = _model_for_move_sampling(wrapper, statuses)
+    to_calls, restore_to = _spy_wrapper_to(wrapper)
+
+    try:
+        statuses.clear()
+        to_calls.clear()
+        ZImageDiffSynthModel._move_sampling_transformer(model, "cuda")
+        assert len(to_calls) == 1
+        assert any("moving sampling transformer" in s for s in statuses)
+
+        statuses.clear()
+        to_calls.clear()
+        ZImageDiffSynthModel._move_sampling_transformer(model, "cuda")
+        assert to_calls == []
+        assert not any("moving sampling transformer" in s for s in statuses)
+    finally:
+        restore_to()
+        try:
+            ZImageDiffSynthModel._move_sampling_transformer(model, "cpu")
+        except Exception:
+            pass
+
+
+def test_move_sampling_transformer_noop_no_debug_label(_debug_enabled_restored):
+    """Post-fix: same-device no-op must not emit memory_debug [DEBUG Move ...] label."""
+    from extensions_built_in.diffusion_models.z_image_diffsynth.model import (
+        ZImageDiffSynthModel,
+        _DiTUnetWrapper,
+    )
+
+    inner = _frozen_sampling_inner()
+    wrapper = _DiTUnetWrapper(inner)
+    statuses = []
+    model = _model_for_move_sampling(wrapper, statuses)
+    to_calls, restore_to = _spy_wrapper_to(wrapper)
+
+    try:
+        statuses.clear()
+        to_calls.clear()
+        ZImageDiffSynthModel._move_sampling_transformer(model, "cpu")
+        assert to_calls == []
+        assert not any("[DEBUG Move sampling transformer]" in s for s in statuses)
+    finally:
+        restore_to()
+
+
+def test_get_noise_prediction_repeats_do_not_call_sampling_to():
+    """Pinned residency: three True + three False get_noise_prediction → sampling .to stays 0."""
+    from extensions_built_in.diffusion_models.z_image_diffsynth.model import (
+        ZImageDiffSynthModel,
+        _DiTUnetWrapper,
+    )
+    from toolkit.prompt_utils import PromptEmbeds
+
+    class _MarkDit(nn.Module):
+        def __init__(self, name):
+            super().__init__()
+            self.name = name
+            self.w = nn.Parameter(torch.ones(1), requires_grad=False)
+            self.in_channels = 16
+
+        def forward(self, latent_list, timestep, text_embeds, return_dict=False):
+            b = len(latent_list)
+            h, w = latent_list[0].shape[-2], latent_list[0].shape[-1]
+            c = latent_list[0].shape[0]
+            scale = 2.0 if self.name == "sampling" else 1.0
+            outs = [torch.ones(c, 1, h, w) * scale for _ in range(b)]
+            return (outs,)
+
+    base = _MarkDit("base")
+    sampling = _MarkDit("sampling")
+    wrapper = _DiTUnetWrapper(sampling)
+
+    model = ZImageDiffSynthModel.__new__(ZImageDiffSynthModel)
+    model.device_torch = torch.device("cpu")
+    model.torch_dtype = torch.float32
+    model.train_torch_dtype = torch.float32
+    model.model_config = SimpleNamespace(low_vram=False)
+    model.gradient_checkpointing = False
+    model._raw_dit = base
+    model._main_is_diffusers = True
+    model._sampling_is_diffusers = True
+    model._sampling_transformer = wrapper
+    model._sampling_network = None
+    model._saved_train_network = None
+    model.network = None
+    model.print_and_status_update = lambda *a, **k: None
+    model._flush_cuda = lambda: None
+    model._force_network_to = lambda net, device: None
+
+    base.to("cpu")
+    _DiTUnetWrapper.to(wrapper, "cpu")
+
+    to_calls, restore_to = _spy_wrapper_to(wrapper)
+    latents = torch.randn(1, 16, 4, 4)
+    embeds = PromptEmbeds(torch.randn(1, 8, 16))
+    timesteps = torch.tensor([500.0])
+
+    try:
+        model._train_on_turbo = True
+        for _ in range(3):
+            ZImageDiffSynthModel.get_noise_prediction(
+                model, latents, timesteps, embeds
+            )
+        assert to_calls == []
+
+        model._train_on_turbo = False
+        for _ in range(3):
+            ZImageDiffSynthModel.get_noise_prediction(
+                model, latents, timesteps, embeds
+            )
+        assert to_calls == []
+    finally:
+        restore_to()
+
+
+def _mark_dit(name):
+    """Tiny frozen DiT for get_noise_prediction residency/flush tests."""
+
+    class _MarkDit(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.name = name
+            self.w = nn.Parameter(torch.ones(1), requires_grad=False)
+            self.in_channels = 16
+
+        def forward(self, latent_list, timestep, text_embeds, return_dict=False):
+            b = len(latent_list)
+            h, w = latent_list[0].shape[-2], latent_list[0].shape[-1]
+            c = latent_list[0].shape[0]
+            scale = 2.0 if self.name == "sampling" else 1.0
+            outs = [torch.ones(c, 1, h, w) * scale for _ in range(b)]
+            return (outs,)
+
+    return _MarkDit()
+
+
+def _model_for_flush_residency(base, wrapper):
+    from extensions_built_in.diffusion_models.z_image_diffsynth.model import (
+        ZImageDiffSynthModel,
+    )
+
+    model = ZImageDiffSynthModel.__new__(ZImageDiffSynthModel)
+    model.device_torch = torch.device("cuda")
+    model.torch_dtype = torch.float32
+    model.train_torch_dtype = torch.float32
+    model.model_config = SimpleNamespace(low_vram=False)
+    model.gradient_checkpointing = False
+    model._raw_dit = base
+    model.model = None
+    model._main_is_diffusers = True
+    model._sampling_is_diffusers = True
+    model._sampling_transformer = wrapper
+    model._sampling_network = None
+    model._saved_train_network = None
+    model.network = None
+    model.print_and_status_update = lambda *a, **k: None
+    model._force_network_to = lambda net, device: None
+    return model
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA required for flush gating residency tests",
+)
+def test_get_noise_prediction_repeat_does_not_flush_when_already_parked():
+    """Pinned residency: inactive DiT already on CPU → park is no-op → no _flush_cuda."""
+    from extensions_built_in.diffusion_models.z_image_diffsynth.model import (
+        ZImageDiffSynthModel,
+        _DiTUnetWrapper,
+    )
+    from toolkit.prompt_utils import PromptEmbeds
+
+    base = _mark_dit("base")
+    sampling = _mark_dit("sampling")
+    wrapper = _DiTUnetWrapper(sampling)
+    model = _model_for_flush_residency(base, wrapper)
+
+    flush_count = {"n": 0}
+    orig_flush = model._flush_cuda
+
+    def _spy_flush():
+        flush_count["n"] += 1
+        # no-op body is enough for counting; keep call site reachable
+
+    model._flush_cuda = _spy_flush
+
+    latents = torch.randn(1, 16, 4, 4)
+    embeds = PromptEmbeds(torch.randn(1, 8, 16))
+    timesteps = torch.tensor([500.0])
+
+    try:
+        # Turbo: base already on CPU, sampling on CUDA
+        base.to("cpu")
+        wrapper.to("cuda")
+        model._train_on_turbo = True
+        flush_count["n"] = 0
+        for _ in range(2):
+            ZImageDiffSynthModel.get_noise_prediction(
+                model, latents, timesteps, embeds
+            )
+        assert flush_count["n"] == 0
+
+        # Base train: sampling already on CPU, base on CUDA
+        wrapper.to("cpu")
+        base.to("cuda")
+        model._train_on_turbo = False
+        flush_count["n"] = 0
+        for _ in range(2):
+            ZImageDiffSynthModel.get_noise_prediction(
+                model, latents, timesteps, embeds
+            )
+        assert flush_count["n"] == 0
+    finally:
+        model._flush_cuda = orig_flush
+        try:
+            base.to("cpu")
+            wrapper.to("cpu")
+        except Exception:
+            pass
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA required for flush gating residency tests",
+)
+def test_get_noise_prediction_first_park_off_cuda_flushes_then_noop():
+    """First park that moves inactive DiT off CUDA flushes; repeat does not."""
+    from extensions_built_in.diffusion_models.z_image_diffsynth.model import (
+        ZImageDiffSynthModel,
+        _DiTUnetWrapper,
+    )
+    from toolkit.prompt_utils import PromptEmbeds
+
+    base = _mark_dit("base")
+    sampling = _mark_dit("sampling")
+    wrapper = _DiTUnetWrapper(sampling)
+    model = _model_for_flush_residency(base, wrapper)
+
+    flush_count = {"n": 0}
+
+    def _spy_flush():
+        flush_count["n"] += 1
+
+    model._flush_cuda = _spy_flush
+
+    latents = torch.randn(1, 16, 4, 4)
+    embeds = PromptEmbeds(torch.randn(1, 8, 16))
+    timesteps = torch.tensor([500.0])
+
+    try:
+        base.to("cuda")
+        wrapper.to("cpu")
+        model._train_on_turbo = True
+
+        ZImageDiffSynthModel.get_noise_prediction(model, latents, timesteps, embeds)
+        assert flush_count["n"] >= 1
+        after_first = flush_count["n"]
+
+        ZImageDiffSynthModel.get_noise_prediction(model, latents, timesteps, embeds)
+        assert flush_count["n"] == after_first
+    finally:
+        try:
+            base.to("cpu")
+            wrapper.to("cpu")
+        except Exception:
+            pass
