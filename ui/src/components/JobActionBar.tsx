@@ -100,17 +100,17 @@ export default function JobActionBar({
       {showLrScale && canStop && (
         <>
           <Button
-            onClick={() => handleScaleLr(10)}
+            onClick={() => handleScaleLr(2)}
             disabled={lrScaleBusy}
-            title="LR ×10"
+            title="LR ×2"
             className={`ml-2 opacity-100`}
           >
             <ChevronsUp />
           </Button>
           <Button
-            onClick={() => handleScaleLr(0.1)}
+            onClick={() => handleScaleLr(0.5)}
             disabled={lrScaleBusy}
-            title="LR ÷10"
+            title="LR ÷2"
             className={`ml-2 opacity-100`}
           >
             <ChevronsDown />
