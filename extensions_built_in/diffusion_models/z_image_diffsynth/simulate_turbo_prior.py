@@ -1,8 +1,9 @@
 """
 Short GPU sim: LoRA train + sample with normative Turbo-t prior.
 
-One process, one ``run_job``, one model load. Reuses ``temp/test_train/`` cache
-(prompt ``dog``). Does not download or regenerate the dataset.
+Two sequential ``run_job`` passes (``turbo_teacher_weight`` false then true),
+isolated work dirs. Reuses ``temp/test_train/`` cache (prompt ``dog``).
+Does not download or regenerate the dataset.
 
 Run from repo root:
   python -m extensions_built_in.diffusion_models.z_image_diffsynth.simulate_turbo_prior
@@ -12,6 +13,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from collections import Counter
@@ -81,10 +83,9 @@ PEAK_VRAM_FRAC_MAX = 0.85
 _COLLECTED_T: List[float] = []
 # (step_num, effective_jitter) per _sample_turbo_prior call — anneal check.
 _COLLECTED_JITTER: List[tuple] = []
-# VRAM / residency probe during get_turbo_teacher_prediction.
-_TEACHER_CALLS = 0
-# (main_device_str, sampling_device_str) snapped when sampling lands on CUDA.
-_TEACHER_RESIDENCY: List[tuple[str, str]] = []
+# (main_device_str, sampling_device_str) snapped during train get_noise_prediction.
+_TRAIN_RESIDENCY: List[tuple[str, str]] = []
+_PROBES_INSTALLED = False
 
 
 def _log(msg: str) -> None:
@@ -106,9 +107,13 @@ def _install_t_collector() -> None:
     First ``FORCE_COVERAGE_STEPS`` calls emit Turbo centers round-robin with no
     jitter (nearest-center coverage + keeps frac t<300 low). Later steps use the
     real dsigma + Voronoi jitter path under annealed jitter.
+    Install once per process (two-pass main must not nest wrappers).
     """
+    global _PROBES_INSTALLED
     _COLLECTED_T.clear()
     _COLLECTED_JITTER.clear()
+    if _PROBES_INSTALLED:
+        return
     _orig = TimestepSampler._sample_turbo_prior
 
     def _wrapped(self, batch_size, latents, step_num=0):
@@ -153,74 +158,108 @@ def _weight_device(module) -> torch.device | None:
     return payload if payload is not None else p.device
 
 
+def _snap_train_residency(model) -> None:
+    """Record base (_raw_dit) vs Turbo (_sampling_transformer) devices."""
+    main_mod = getattr(model, "_raw_dit", None) or getattr(model, "model", None)
+    st = getattr(model, "_sampling_transformer", None)
+    samp_mod = st
+    if st is not None:
+        inner = getattr(st, "_inner_dit", None)
+        if inner is not None:
+            samp_mod = inner
+    main_dev = _weight_device(main_mod)
+    samp_dev = _weight_device(samp_mod)
+    _TRAIN_RESIDENCY.append(
+        (
+            str(main_dev) if main_dev is not None else "None",
+            str(samp_dev) if samp_dev is not None else "None",
+        )
+    )
+
+
 def _install_vram_probe() -> None:
-    """Snap main vs sampling devices when teacher moves sampling onto CUDA."""
-    global _TEACHER_CALLS
+    """Snap main vs sampling devices during train get_noise_prediction."""
+    global _PROBES_INSTALLED
     from extensions_built_in.diffusion_models.z_image_diffsynth.model import (
         ZImageDiffSynthModel,
     )
 
-    _TEACHER_CALLS = 0
-    _TEACHER_RESIDENCY.clear()
-    _orig = ZImageDiffSynthModel.get_turbo_teacher_prediction
+    _TRAIN_RESIDENCY.clear()
+    if _PROBES_INSTALLED:
+        return
+    _orig = ZImageDiffSynthModel.get_noise_prediction
 
     def _wrapped(self, *args, **kwargs):
-        global _TEACHER_CALLS
-        orig_move = self._move_sampling_transformer
+        out = _orig(self, *args, **kwargs)
+        # Snap after placement; skip in-training sample batch (Turbo on CUDA for previews).
+        if not getattr(self, "_sampling_in_batch_generate", False):
+            _snap_train_residency(self)
+            if _TRAIN_RESIDENCY:
+                main_s, samp_s = _TRAIN_RESIDENCY[-1]
+                if main_s.startswith("cuda") and samp_s.startswith("cuda"):
+                    raise RuntimeError(
+                        "Acceptance fail: base+Turbo co-resident on CUDA during "
+                        f"train forward (main={main_s}, sampling={samp_s})"
+                    )
+            if torch.cuda.is_available():
+                alloc = int(torch.cuda.memory_allocated())
+                total = int(torch.cuda.get_device_properties(0).total_memory)
+                if total > 0 and (float(alloc) / float(total)) >= PEAK_VRAM_FRAC_MAX:
+                    raise RuntimeError(
+                        f"Acceptance fail: mid-step CUDA alloc "
+                        f"{alloc / (1024**3):.2f} GiB ≥ {PEAK_VRAM_FRAC_MAX:.0%} of "
+                        f"{total / (1024**3):.2f} GiB (abort before TDR)"
+                    )
+        return out
 
-        def _move_and_snap(device):
-            orig_move(device)
-            target = device if isinstance(device, torch.device) else torch.device(device)
-            if target.type != "cuda":
-                return
-            main_mod = getattr(self, "_raw_dit", None) or getattr(self, "model", None)
-            st = getattr(self, "_sampling_transformer", None)
-            samp_mod = st
-            if st is not None:
-                inner = getattr(st, "_inner_dit", None)
-                if inner is not None:
-                    samp_mod = inner
-            main_dev = _weight_device(main_mod)
-            samp_dev = _weight_device(samp_mod)
-            _TEACHER_RESIDENCY.append(
-                (
-                    str(main_dev) if main_dev is not None else "None",
-                    str(samp_dev) if samp_dev is not None else "None",
-                )
-            )
-
-        self._move_sampling_transformer = _move_and_snap  # type: ignore[method-assign]
-        try:
-            out = _orig(self, *args, **kwargs)
-            _TEACHER_CALLS += 1
-            return out
-        finally:
-            self._move_sampling_transformer = orig_move  # type: ignore[method-assign]
-
-    ZImageDiffSynthModel.get_turbo_teacher_prediction = _wrapped  # type: ignore[method-assign]
+    ZImageDiffSynthModel.get_noise_prediction = _wrapped  # type: ignore[method-assign]
+    _PROBES_INSTALLED = True
 
 
-def _assert_vram_acceptance(peak_alloc: int, device_total: int) -> None:
-    """Hard GREEN asserts on teacher residency + peak VRAM fraction."""
-    if _TEACHER_CALLS < 1:
+def _assert_vram_acceptance(
+    peak_alloc: int,
+    device_total: int,
+    *,
+    train_on_turbo: bool,
+) -> None:
+    """Hard GREEN asserts on DiT residency + peak VRAM fraction."""
+    if not _TRAIN_RESIDENCY:
         raise RuntimeError(
-            "Acceptance fail: teacher_calls=0 (turbo_teacher_weight not exercised)"
+            "Acceptance fail: no train-forward residency snaps "
+            "(get_noise_prediction not exercised)"
         )
-    co_resident = False
-    for main_s, samp_s in _TEACHER_RESIDENCY:
+    mode = "true" if train_on_turbo else "false"
+    _log(
+        f"[vram] mode=turbo_teacher_weight={mode} "
+        f"residency_snaps={len(_TRAIN_RESIDENCY)} "
+        f"samples={_TRAIN_RESIDENCY[:3]}{'...' if len(_TRAIN_RESIDENCY) > 3 else ''}"
+    )
+    for main_s, samp_s in _TRAIN_RESIDENCY:
         main_cuda = main_s.startswith("cuda")
         samp_cuda = samp_s.startswith("cuda")
-        if main_cuda and samp_cuda:
-            co_resident = True
-            break
-    _log(
-        f"[vram] teacher_calls={_TEACHER_CALLS} residency_snaps={len(_TEACHER_RESIDENCY)} "
-        f"samples={_TEACHER_RESIDENCY[:3]}{'...' if len(_TEACHER_RESIDENCY) > 3 else ''}"
-    )
-    if co_resident:
-        raise RuntimeError(
-            "Acceptance fail: teacher co-resident main+sampling DiT on CUDA"
-        )
+        if train_on_turbo:
+            if main_cuda and samp_cuda:
+                raise RuntimeError(
+                    "Acceptance fail (turbo_teacher_weight=true): "
+                    "base+Turbo co-resident on CUDA during train forward "
+                    f"(main={main_s}, sampling={samp_s})"
+                )
+            if not samp_cuda:
+                raise RuntimeError(
+                    "Acceptance fail (turbo_teacher_weight=true): "
+                    f"Turbo not on CUDA during train forward (sampling={samp_s})"
+                )
+        else:
+            if samp_cuda:
+                raise RuntimeError(
+                    "Acceptance fail (turbo_teacher_weight=false): "
+                    f"Turbo on CUDA during train forward (sampling={samp_s})"
+                )
+            if not main_cuda:
+                raise RuntimeError(
+                    "Acceptance fail (turbo_teacher_weight=false): "
+                    f"base not on CUDA during train forward (main={main_s})"
+                )
     if device_total <= 0:
         raise RuntimeError("Acceptance fail: CUDA device total memory unknown")
     frac = float(peak_alloc) / float(device_total)
@@ -235,7 +274,10 @@ def _assert_vram_acceptance(peak_alloc: int, device_total: int) -> None:
             f"Acceptance fail: CUDA peak {peak_gb:.2f} GiB ≥ "
             f"{PEAK_VRAM_FRAC_MAX:.0%} of {total_gb:.2f} GiB"
         )
-    _log("[vram] co-residency OK (main off CUDA while sampling on during teacher)")
+    if train_on_turbo:
+        _log("[vram] residency OK (Turbo CUDA, base off CUDA during train)")
+    else:
+        _log("[vram] residency OK (base CUDA, Turbo CPU during train)")
 
 
 def _print_t_histogram(n_steps: int = TURBO_PRIOR_STEPS) -> tuple[Counter, float]:
@@ -305,6 +347,7 @@ def _assert_t_acceptance(
             f"(must be < {FRAC_T_LT_300_MAX})"
         )
 
+
 def _train_lora(
     work_root: Path,
     dataset_dir: Path,
@@ -312,8 +355,10 @@ def _train_lora(
     sampling_path: str | None,
     *,
     batch_size: int = 1,
+    turbo_teacher_weight: bool = False,
 ) -> Path:
-    train_name = f"zimage_diffsynth_sim_turbo_prior_b{batch_size}"
+    mode_tag = "turbo" if turbo_teacher_weight else "base"
+    train_name = f"zimage_diffsynth_sim_turbo_prior_{mode_tag}_b{batch_size}"
     output_root = work_root / "output"
     output_root.mkdir(parents=True, exist_ok=True)
 
@@ -374,7 +419,7 @@ def _train_lora(
                         "turbo_prior_steps": TURBO_PRIOR_STEPS,
                         "turbo_t_jitter": 0.5,
                         "turbo_t_jitter_end": 0,
-                        "turbo_teacher_weight": 0.25,
+                        "turbo_teacher_weight": bool(turbo_teacher_weight),
                         "content_or_style": "balanced",
                         "timestep_weighting": "none",
                         "min_snr_gamma": 0,
@@ -420,8 +465,11 @@ def _train_lora(
                         "model_kwargs": {
                             "use_diffsynth_training_loop": False,
                             "use_dynamic_shifting": False,
-                            "disable_noise_refiner": False,
-                            "disable_context_refiner": False,
+                            # Match load_model defaults / example YAML (refiners off).
+                            # noise_refiner ~10GB + context_refiner ~4GB per DiT — fatal
+                            # on 16GB if anything briefly co-resides.
+                            "disable_noise_refiner": True,
+                            "disable_context_refiner": True,
                             "loader": "diffusers",
                         },
                         "layer_offloading": False,
@@ -476,7 +524,10 @@ def _train_lora(
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
         torch.cuda.empty_cache()
-    _log("[PHASE TRAIN] run_job: start")
+    _log(
+        f"[PHASE TRAIN] run_job: start "
+        f"(turbo_teacher_weight={bool(turbo_teacher_weight)})"
+    )
     run_job(config)
     _log("[PHASE TRAIN] run_job: done")
     peak_alloc = (
@@ -489,7 +540,9 @@ def _train_lora(
     )
     slot_counts, frac_lt_300 = _print_t_histogram()
     _assert_t_acceptance(slot_counts, frac_lt_300)
-    _assert_vram_acceptance(peak_alloc, device_total)
+    _assert_vram_acceptance(
+        peak_alloc, device_total, train_on_turbo=bool(turbo_teacher_weight)
+    )
 
     save_dir = output_root / train_name
     candidates = list(save_dir.glob("*.safetensors"))
@@ -498,31 +551,33 @@ def _train_lora(
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
-def main() -> None:
-    _log("Z-Image DiffSynth simulate_turbo_prior (timestep_type=turbo_prior) ...")
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA not available; GPU required for this sim.")
+def _assert_pass_artifacts(work_root: Path, batch_size: int, *, train_on_turbo: bool) -> None:
+    mode_tag = "turbo" if train_on_turbo else "base"
+    train_name = f"zimage_diffsynth_sim_turbo_prior_{mode_tag}_b{batch_size}"
+    save_dir = work_root / "output" / train_name
+    candidates = list(save_dir.glob("*.safetensors"))
+    if not candidates:
+        raise RuntimeError(f"No LoRA checkpoint found in {save_dir}")
+    lora_path = max(candidates, key=lambda p: p.stat().st_mtime)
+    if not lora_path.is_file():
+        raise RuntimeError(f"LoRA checkpoint missing: {lora_path}")
+    samples_dir = save_dir / "samples"
+    train_samples = [
+        p
+        for p in samples_dir.glob("*")
+        if p.suffix.lower() in (".png", ".jpg", ".jpeg")
+        and p.is_file()
+        and p.stat().st_size > 0
+    ]
+    if not train_samples:
+        raise RuntimeError(f"No sample PNGs found under {samples_dir}")
+    _log(
+        f"   [{mode_tag}] LoRA OK: {lora_path}; "
+        f"PNG(s): {[str(p) for p in train_samples]}"
+    )
 
-    prompt = os.environ.get("ZIMAGE_TEST_TRAIN_PROMPT", "dog")
-    seeds = [42 + i for i in range(NUM_SOURCE_IMAGES)]
-    image_cache = TEST_TRAIN_IMAGE_CACHE
-    batch_size = 1
 
-    if not _is_image_cache_valid(image_cache, prompt, seeds):
-        raise RuntimeError(
-            f"Dataset cache invalid at {image_cache}. "
-            "Populate via test_train (or set ZIMAGE_TEST_TRAIN_FORCE_REGEN=1 there). "
-            "This sim does not download or regenerate a dataset."
-        )
-
-    work_root = Path(tempfile.gettempdir()) / "zimage_diffsynth_sim_turbo_prior"
-    if work_root.exists():
-        shutil.rmtree(work_root, ignore_errors=True)
-    dataset_dir = work_root / "datasets" / "1"
-    dataset_dir.mkdir(parents=True, exist_ok=True)
-    _populate_dataset_from_cache(image_cache, dataset_dir)
-    _log(f"1) Dataset from cache {image_cache} -> {dataset_dir} (prompt={prompt!r})")
-
+def _resolve_paths() -> tuple[str, str]:
     model_path = (
         os.environ.get("ZIMAGE_DIFFSYNTH_MODEL_PATH", "").strip()
         or DEFAULT_ZIMAGE_MODEL_PATH
@@ -540,35 +595,113 @@ def main() -> None:
         raise RuntimeError(
             "Sampling (Turbo) path missing; required for _sampling_transformer PNGs."
         )
+    return model_path, sampling_path
 
-    _log("2) Training LoRA + sample via single run_job (turbo_prior) ...")
+
+def _run_single_pass(
+    *,
+    work_root: Path,
+    dataset_dir: Path,
+    model_path: str,
+    sampling_path: str,
+    train_on_turbo: bool,
+    batch_size: int = 1,
+) -> None:
+    mode = "true" if train_on_turbo else "false"
+    _log(
+        f"[pass] turbo_teacher_weight={mode} work={work_root}"
+    )
+    work_root.mkdir(parents=True, exist_ok=True)
+    _train_lora(
+        work_root,
+        dataset_dir,
+        model_path,
+        sampling_path,
+        batch_size=batch_size,
+        turbo_teacher_weight=train_on_turbo,
+    )
+    _assert_pass_artifacts(work_root, batch_size, train_on_turbo=train_on_turbo)
+
+
+def main() -> None:
+    # Child worker: one GPU pass then exit (frees CUDA before the next pass).
+    pass_env = os.environ.get("SIM_TURBO_PRIOR_PASS", "").strip().lower()
+    if pass_env in ("false", "true", "0", "1"):
+        train_on_turbo = pass_env in ("true", "1")
+        work_root = Path(os.environ["SIM_TURBO_PRIOR_WORK"])
+        dataset_dir = Path(os.environ["SIM_TURBO_PRIOR_DATASET"])
+        model_path, sampling_path = _resolve_paths()
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA not available; GPU required for this sim.")
+        _run_single_pass(
+            work_root=work_root,
+            dataset_dir=dataset_dir,
+            model_path=model_path,
+            sampling_path=sampling_path,
+            train_on_turbo=train_on_turbo,
+        )
+        return
+
+    _log(
+        "Z-Image DiffSynth simulate_turbo_prior "
+        "(timestep_type=turbo_prior; two bool passes) ..."
+    )
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA not available; GPU required for this sim.")
+
+    prompt = os.environ.get("ZIMAGE_TEST_TRAIN_PROMPT", "dog")
+    seeds = [42 + i for i in range(NUM_SOURCE_IMAGES)]
+    image_cache = TEST_TRAIN_IMAGE_CACHE
+    batch_size = 1
+
+    if not _is_image_cache_valid(image_cache, prompt, seeds):
+        raise RuntimeError(
+            f"Dataset cache invalid at {image_cache}. "
+            "Populate via test_train (or set ZIMAGE_TEST_TRAIN_FORCE_REGEN=1 there). "
+            "This sim does not download or regenerate a dataset."
+        )
+
+    base_work = Path(tempfile.gettempdir()) / "zimage_diffsynth_sim_turbo_prior"
+    if base_work.exists():
+        shutil.rmtree(base_work, ignore_errors=True)
+    dataset_dir = base_work / "datasets" / "1"
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+    _populate_dataset_from_cache(image_cache, dataset_dir)
+    _log(f"1) Dataset from cache {image_cache} -> {dataset_dir} (prompt={prompt!r})")
+
+    model_path, sampling_path = _resolve_paths()
     _log(
         "[sim] use_diffsynth_prompt_encoding omitted → true "
         "(turbo_prior DiffSynth encoding locked on)"
     )
-    lora_path = _train_lora(
-        work_root, dataset_dir, model_path, sampling_path, batch_size=batch_size
-    )
-    if not lora_path.is_file():
-        raise RuntimeError(f"LoRA checkpoint missing: {lora_path}")
-    _log(f"   LoRA checkpoint: {lora_path}")
+    _log("[sim] each pass runs in a fresh subprocess (CUDA isolation)")
 
-    samples_dir = (
-        work_root / "output" / f"zimage_diffsynth_sim_turbo_prior_b{batch_size}" / "samples"
-    )
-    train_samples = [
-        p
-        for p in samples_dir.glob("*")
-        if p.suffix.lower() in (".png", ".jpg", ".jpeg")
-        and p.is_file()
-        and p.stat().st_size > 0
-    ]
-    if not train_samples:
-        raise RuntimeError(f"No sample PNGs found under {samples_dir}")
+    for pass_idx, train_on_turbo in enumerate((False, True), start=1):
+        mode = "true" if train_on_turbo else "false"
+        work_root = base_work / f"pass_{pass_idx}_{'turbo' if train_on_turbo else 'base'}"
+        work_root.mkdir(parents=True, exist_ok=True)
+        _log(
+            f"{1 + pass_idx}) Pass {pass_idx}/2: turbo_teacher_weight={mode} "
+            f"(work={work_root}) ..."
+        )
+        child_env = os.environ.copy()
+        child_env["SIM_TURBO_PRIOR_PASS"] = mode
+        child_env["SIM_TURBO_PRIOR_WORK"] = str(work_root)
+        child_env["SIM_TURBO_PRIOR_DATASET"] = str(dataset_dir)
+        # Avoid nested venv re-exec confusion; child already uses venv python.
+        rc = subprocess.call(
+            [sys.executable, "-m",
+             "extensions_built_in.diffusion_models.z_image_diffsynth.simulate_turbo_prior"],
+            cwd=_REPO_ROOT,
+            env=child_env,
+        )
+        if rc != 0:
+            raise RuntimeError(
+                f"Pass {pass_idx}/2 (turbo_teacher_weight={mode}) failed "
+                f"with exit code {rc}"
+            )
 
-    _log(f"3) Acceptance PNG(s): {[str(p) for p in train_samples]}")
-    _log(f"   LoRA OK: {lora_path}")
-    _log("Done. ACCEPTANCE GREEN")
+    _log("Done. ACCEPTANCE GREEN (both bool passes)")
 
 
 if __name__ == "__main__":

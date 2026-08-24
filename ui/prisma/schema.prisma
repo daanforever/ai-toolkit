@@ -65,7 +65,7 @@ model RuntimeParams {
   runtime_fixed_cycle_weight_sigma Float?
   runtime_turbo_prior_steps Int?
   runtime_turbo_t_jitter Float?
-  runtime_turbo_teacher_weight Float?
+  runtime_turbo_teacher_weight Boolean?
   runtime_batch_size       Int?
   runtime_gradient_accumulation Int?
   runtime_save_every       Int?

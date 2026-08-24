@@ -2,20 +2,25 @@
 
 This note is for users who want a LoRA that **behaves well at official Turbo inference**: 8 denoising steps, static time shift 3, no classifier-free guidance (CFG).
 
-**Do not train on Turbo.** Train the LoRA on **Z-Image** (dense SFT / base) weights. Sample and later use it on **Z-Image-Turbo**. What changes vs a dense SFT job is **which noise levels `t` you train on**, plus an optional **Turbo-teacher** velocity regularizer (normative for this recipe).
+Train-time `t` comes from the official Turbo grid (`timestep_type: turbo_prior`). Boolean `train.turbo_teacher_weight` selects **which DiT the LoRA trains on**:
 
-Z-Image-Turbo only calls the transformer on **eight** shifted sigmas. If you train on the usual 1000-step dense schedule (especially `content_or_style: gaussian`, whose peak sits near `t ≈ 120`), the LoRA is barely defined on the Turbo grid. The last Turbo center is about `t ≈ 300`, so that gaussian peak is **outside** the trajectory Euler actually uses.
+| Mode | Behavior |
+| --- | --- |
+| `false` (default) | Flow-match on **base Z-Image** + LoRA, turbo_prior t-grid; Turbo sampling DiT stays on **CPU** while training |
+| `true` | Train LoRA on the **Turbo DiT only** (one DiT on GPU); **no** MSE teacher regularizer |
 
-Use process type `z_image_diffsynth_trainer` and `model.arch: zimage_diffsynth`. Adapter flags and letterbox / compile behaviour are documented in `README.md`. This file covers the **Turbo-t prior** job only. Example YAML: `config/examples/train_lora_zimage_diffsynth_turbo_prior.yaml`.
+When `true`, this is **not** “train base, infer Turbo”: it is **direct LoRA on distilled Turbo**. Runtime toggle `false→true` parks base on CPU and pins Turbo on CUDA; `true→false` reverses that via `apply_turbo_teacher_mode`.
+
+Use process type `z_image_diffsynth_trainer` and `model.arch: zimage_diffsynth`. Adapter flags and letterbox / compile behaviour are documented in `README.md`. Example YAML: `config/examples/train_lora_zimage_diffsynth_turbo_prior.yaml`.
 
 ## Checkpoints
 
 | Role | Checkpoint | Config key |
 | --- | --- | --- |
-| Train (base transformer) | Tongyi-MAI **Z-Image** | `model.name_or_path` |
+| Base transformer | Tongyi-MAI **Z-Image** | `model.name_or_path` |
 | Sample / Turbo transformer | Tongyi-MAI **Z-Image-Turbo** | `model.sampling_name_or_path` |
 
-Both paths should be local snapshot directories (or equivalent Hugging Face IDs your machine can resolve). Sampling during training uses the Turbo transformer when `sampling_name_or_path` is set.
+Both paths should be local snapshot directories (or equivalent Hugging Face IDs your machine can resolve). Sampling during training uses the Turbo transformer when `sampling_name_or_path` is set. With `turbo_teacher_weight: true`, train forwards also use that Turbo DiT.
 
 ## Raise contract
 
@@ -29,7 +34,7 @@ With `timestep_type: turbo_prior`, the trainer / sampler **raises** (does not si
 | `train.content_or_style` | `gaussian` or `gaussian_bimodal` | `balanced` (or another non-gaussian mode) |
 | `train.turbo_slot_weighting` | any value other than `dsigma` | omit the key (always dsigma) |
 
-When `train.turbo_teacher_weight > 0`, the trainer also **raises** if:
+When `train.turbo_teacher_weight` is `true`, the trainer also **raises** if:
 
 | Condition | Required |
 | --- | --- |
@@ -48,7 +53,7 @@ These must be set this way or the job is not a Turbo-t prior run.
 | `train` | `noise_scheduler` | `flowmatch` | Z-Image family is flow matching. |
 | `train` | `prediction_type` | `flowmatch` | Match the scheduler / loss. |
 | `train` | `timestep_type` | `turbo_prior` | Sample `t` from the official 8-NFE Turbo grid, not a dense 1000-step linear/shift/gaussian schedule. |
-| `train` | `turbo_teacher_weight` | `0.25` | Normative weight for the Turbo-teacher velocity regularizer (TrainConfig default is `0`; set `0.25` for this recipe). |
+| `train` | `turbo_teacher_weight` | `false` / `true` | Boolean train-on-Turbo switch (default `false`). See modes table above. |
 | `model` | `arch` | `zimage_diffsynth` | This adapter. |
 | `model.model_kwargs` | `use_diffsynth_training_loop` | `false` | Turbo-t prior goes through the toolkit timestep sampler. `true` raises. |
 | `model.model_kwargs` | `use_diffsynth_prompt_encoding` | `true` | Explicit `false` raises; omit defaults to `true`. |
@@ -68,27 +73,21 @@ Strongly recommended so training `t` and preview sampling stay on the Turbo traj
 | `train` | `turbo_prior_steps` | `8` | Number of Turbo slots (default 8). Keep in lockstep with `sample.sample_steps`. |
 | `train` | `turbo_t_jitter` | `0.5` | Start of Voronoi jitter anneal (default 0.5). `0` pins exact centers. |
 | `train` | `turbo_t_jitter_end` | `0` | End of jitter anneal over training steps (default `0`). Effective `j = lerp(start, end, step / (steps-1))`. |
-| `model` | `name_or_path` | Z-Image snapshot | Base weights the LoRA is trained on — **not** Turbo. |
-| `model` | `sampling_name_or_path` | Z-Image-Turbo snapshot | Transformer used for in-training samples **and** as the frozen Turbo teacher when `turbo_teacher_weight > 0`. |
+| `model` | `name_or_path` | Z-Image snapshot | Base weights (train DiT when `turbo_teacher_weight: false`). |
+| `model` | `sampling_name_or_path` | Z-Image-Turbo snapshot | In-training samples; train DiT when `turbo_teacher_weight: true`. |
 
-### Turbo-teacher (LoRA ↔ Turbo velocity regularizer)
+### Train-on-Turbo residency
 
-DM-inspired **velocity consistency** between base+LoRA and frozen Turbo — **not** full Decoupled DMD / DMDR.
+Exclusive DiT residency is pinned by `apply_turbo_teacher_mode`:
 
-```
-L = L_fm + w * L_turbo
-L_turbo = MSE(student v_base+LoRA, teacher v_Turbo)   # MSE only, not cosine
-```
-
-| Piece | Behaviour |
+| `turbo_teacher_weight` | During train forward |
 | --- | --- |
-| Teacher | Frozen `_sampling_transformer` (Z-Image-Turbo); `no_grad`; no train LoRA on teacher |
-| `w` | `train.turbo_teacher_weight` (TrainConfig default `0`; normative recipe `0.25`) |
-| VRAM | **Exclusive residency**: main DiT+LoRA off CUDA → Turbo teacher forward → restore main, then student forward. Never co-reside both DiTs on GPU (same spirit as sample / TE recache). Extra cost is PCIe moves + a second forward, not dual DiT weights. |
+| `false` | Base + train LoRA on CUDA; Turbo on CPU |
+| `true` | Turbo + sampling LoRA on CUDA; base on CPU |
 
-This is **not** Decoupled DMD / DMDR. Do not omit `turbo_teacher_weight: 0.25` for the normative Turbo LoRA recipe (default `0` only disables the term for ablations / non-Turbo jobs).
+Never co-reside both DiTs on GPU. Live Runtime checkbox flips the mode without restarting the job.
 
-**Sim gate** (`simulate_turbo_prior`): hard-fails (no GREEN) if teacher ever sees main+sampling both on CUDA, if CUDA peak ≥ 85% of device total, or if the teacher path was never exercised.
+**Sim gate** (`simulate_turbo_prior`): two sequential GPU passes (`false` then `true`). Hard-fails (no GREEN) if residency is wrong for the mode, if CUDA peak ≥ 85% of device total, or if LoRA / sample PNG / t-slot coverage fails.
 
 **Grid (static shift 3, 8 steps):** train-time centers are about
 
@@ -117,13 +116,12 @@ Not required for correctness, but typical for a stable Turbo LoRA job on this ad
 | `save` | `save_format` | `safetensors` |
 | `sample` | width / height | Match dataset resolution (normative: 1024). |
 
-Do **not** expand this recipe to assistant LoRA, trajectory imitation, or full Decoupled DMD / DMDR. Turbo-teacher above is only the MSE velocity regularizer, not those modes.
+Do **not** expand this recipe to assistant LoRA, trajectory imitation, or full Decoupled DMD / DMDR.
 
 ## What not to copy from a dense SFT job
 
 | Avoid | Instead |
 | --- | --- |
-| Training on **Z-Image-Turbo** as `name_or_path` | Train **Z-Image**, sample **Z-Image-Turbo** |
 | `timestep_type: linear` or `shift` plus `content_or_style: gaussian` | `timestep_type: turbo_prior` + `content_or_style: balanced` |
 | `use_diffsynth_training_loop: true` | `false` (required; `true` raises) |
 | `use_diffsynth_prompt_encoding: false` | `true` (explicit `false` raises) |
@@ -131,7 +129,8 @@ Do **not** expand this recipe to assistant LoRA, trajectory imitation, or full D
 | `turbo_slot_weighting: uniform` (or any non-dsigma) | Omit the key (always dsigma) |
 | `sample_steps` 9, 20, or 30 as the quality check | `8` |
 | `guidance_scale` 1 or higher at sample time | `0` |
+| Float `turbo_teacher_weight` (e.g. `0.25`) | Boolean `false` / `true` only |
 
 ## After training
 
-Load the saved LoRA on **Z-Image-Turbo** and generate at **8 steps, CFG 0**, static shift 3 (the default Turbo sampler in this adapter when dynamic shifting is off). Quality at 20–30 steps is not the target metric for this recipe.
+Load the saved LoRA on **Z-Image-Turbo** and generate at **8 steps, CFG 0**, static shift 3 (the default Turbo sampler in this adapter when dynamic shifting is off). Quality at 20–30 steps is not the target metric for this recipe. With `turbo_teacher_weight: true`, the LoRA was fit directly on Turbo weights — expect behavior closer to that distilled backbone than to a base-trained adapter transferred at sample time.

@@ -810,13 +810,13 @@ class DiffusionTrainer(SDTrainer):
             )
 
     def get_runtime_turbo_teacher_weight(self):
-        """Read runtime_turbo_teacher_weight from DB. Returns float or None."""
+        """Read runtime_turbo_teacher_weight from DB. Returns bool or None."""
         if not self.is_ui_trainer:
             return None
 
         def _read():
             try:
-                return self._get_runtime_scalar("runtime_turbo_teacher_weight", float)
+                return self._get_runtime_scalar("runtime_turbo_teacher_weight", bool)
             except sqlite3.OperationalError:
                 # DB not migrated yet (column missing)
                 return None
@@ -832,11 +832,13 @@ class DiffusionTrainer(SDTrainer):
             return
         if value == self._last_applied_runtime_turbo_teacher_weight:
             return
-        current = float(getattr(self.train_config, "turbo_teacher_weight", 0) or 0)
+        current = bool(getattr(self.train_config, "turbo_teacher_weight", False))
         if value == current:
             self._last_applied_runtime_turbo_teacher_weight = value
             return
-        self.train_config.turbo_teacher_weight = float(value)
+        self.train_config.turbo_teacher_weight = bool(value)
+        if hasattr(self, "apply_runtime_turbo_teacher_mode"):
+            self.apply_runtime_turbo_teacher_mode(bool(value))
         self._last_applied_runtime_turbo_teacher_weight = value
         if is_debug_enabled():
             print_acc(f"\nruntime turbo_teacher_weight from UI/DB: {value}")

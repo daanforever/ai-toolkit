@@ -65,7 +65,7 @@ Each checkpoint is a subprocess `run_job` with `train.steps = N`. Resume **withi
 
 Drop LR (skip later checkpoints) if: non-zero child exit / OOM, no TB events, no sample image, health fail, visual **exploded**, or visual **dead** at `checkpoint >= tune.safe_range` (default 100). Early **dead** (`steps < safe_range`) is recorded but does **not** drop or break — same `training_folder` continues to the next checkpoint. If a stage ends with zero survivors and every drop was actionable **dead** (not health/OOM/exploded): **one** √10 expand above `max(tried LRs)` (cap `1e-2`; e.g. max `1e-3` → `~3e-3`, `1e-2`). Empty expand or second all-dead → `report.json`, **exit 1**.
 
-Every probe overlays Turbo-t: `train.timestep_type: turbo_prior`, `sample.sample_steps: 8`, `sample.guidance_scale: 0`, `train.content_or_style: balanced`, `model.model_kwargs.use_diffsynth_training_loop: false`, and **`train.turbo_teacher_weight: 0.25`** (from `tune.turbo_teacher_weight`, stripped into `train` before `run_job`). Teacher weight is **fixed**, not swept — Stage 1 still recommends sparse `train.lr` only. Trainer logs TB tag `loss/turbo_teacher` when `w > 0`.
+Every probe overlays Turbo-t: `train.timestep_type: turbo_prior`, `sample.sample_steps: 8`, `sample.guidance_scale: 0`, `train.content_or_style: balanced`, `model.model_kwargs.use_diffsynth_training_loop: false`, and **`train.turbo_teacher_weight: true`** (from `tune.turbo_teacher_weight`, stripped into `train` before `run_job`). Train-on-Turbo is **fixed**, not swept — Stage 1 still recommends sparse `train.lr` only.
 
 ## How to run
 
@@ -130,7 +130,7 @@ CLIP Hugging Face id is roughly `laion/CLIP-ViT-B-32-laion2B-s34B-b79K`. If the 
 
 ## Visual / health rules (as implemented)
 
-**Health fail:** no TB events/tags; NaN/Inf in `loss/*` (or bare `loss`, including `loss/turbo_teacher`), `train/grad_rms`, `train/update_rms`; post-warmup last-20% loss mean > 8× first-20% (primary FM loss only — `loss/turbo_teacher` is aux, NaN/Inf-checked but not used for the 8× ratio); last `train/instability_score` > `tune.instability_max` (default 1.0). Missing instability tag is not a fail. Empty post-warmup series: skip ratio.
+**Health fail:** no TB events/tags; NaN/Inf in `loss/*` (or bare `loss`), `train/grad_rms`, `train/update_rms`; post-warmup last-20% loss mean > 8× first-20% (primary FM loss); last `train/instability_score` > `tune.instability_max` (default 1.0). Missing instability tag is not a fail. Empty post-warmup series: skip ratio.
 
 **Dead:** `LPIPS(S,M) < lpips_dead` (0.04) **and** `CLIP-I(S,R) ≤ CLIP-I(M,R) + 0.01`.  
 **Exploded:** `LPIPS(S,M) > lpips_boom` (0.45) **and** `CLIP-I(S,R) < CLIP-I(M,R)`.  
@@ -144,7 +144,7 @@ B/C: `0.6 CLIP-I + 0.4 CLIP-T`.
 
 ```yaml
 tune:
-  turbo_teacher_weight: 0.25  # fixed → train.turbo_teacher_weight; not swept
+  turbo_teacher_weight: true  # fixed → train.turbo_teacher_weight; not swept
   lrs: [1.0e-5, 3.0e-5, 1.0e-4, 3.0e-4, 1.0e-3]
   stages: [a, b, c]
   promote_top_k: {a: 3, b: 2}   # no key c

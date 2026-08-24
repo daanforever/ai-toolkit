@@ -352,10 +352,10 @@ const docs: { [key: string]: ConfigDoc } = {
     ),
   },
   'train.turbo_teacher_weight': {
-    title: 'Turbo Teacher Weight',
+    title: 'Train on Turbo',
     description: (
       <>
-        Used when <code>timestep_type</code> is <code>turbo_prior</code>. Weight <code>w</code> for the Turbo-teacher velocity MSE term: <code>L = L_fm + w * MSE(v_base+LoRA, v_Turbo)</code>. TrainConfig default <code>0</code> (off); normative Turbo LoRA recipe uses <code>0.25</code>. Editable live in Runtime config. Requires a loaded sampling DiT (Z-Image-Turbo). Extra VRAM uses exclusive DiT residency (main off during teacher).
+        Boolean. Default <code>false</code>: flow-match on base Z-Image + LoRA with <code>turbo_prior</code> t-grid (Turbo DiT on CPU). <code>true</code>: train LoRA on the Z-Image-Turbo sampling DiT only (one DiT on GPU; no MSE teacher). Requires <code>timestep_type: turbo_prior</code> and <code>model.sampling_name_or_path</code>. Editable live in Runtime config (residency swap).
       </>
     ),
   },

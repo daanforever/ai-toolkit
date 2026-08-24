@@ -591,14 +591,12 @@ export default function SimpleJob({
                       min={0}
                       max={1}
                     />
-                    <NumberInput
-                      label="Turbo Teacher Weight"
+                    <Checkbox
+                      label="Train on Turbo"
                       className="pt-2"
                       docKey="train.turbo_teacher_weight"
-                      value={jobConfig.config.process[0].train.turbo_teacher_weight ?? 0}
+                      checked={jobConfig.config.process[0].train.turbo_teacher_weight ?? false}
                       onChange={value => setJobConfig(value, 'config.process[0].train.turbo_teacher_weight')}
-                      placeholder="eg. 0.25"
-                      min={0}
                     />
                   </>
                 )}

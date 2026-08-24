@@ -127,9 +127,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
       ? Number(trainAny.turbo_t_jitter)
       : 0.5;
   const turboTeacherWeight =
-    trainAny?.turbo_teacher_weight != null && Number.isFinite(Number(trainAny.turbo_teacher_weight))
-      ? Number(trainAny.turbo_teacher_weight)
-      : 0;
+    trainAny?.turbo_teacher_weight === true || trainAny?.turbo_teacher_weight === 1;
   const [fixedCycleTimestepsInput, setFixedCycleTimestepsInput] = useState(() => {
     const p = parseJobConfig(job.job_config);
     const t = p?.config?.process?.[0]?.train as Record<string, unknown> | undefined;
@@ -321,9 +319,9 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         setErrorMessage('Turbo t jitter must be a finite number in [0, 1]');
         return;
       }
-      if (!Number.isFinite(turboTeacherWeight) || turboTeacherWeight < 0) {
+      if (typeof turboTeacherWeight !== 'boolean') {
         setApplyStatus('error');
-        setErrorMessage('Turbo teacher weight must be a finite number ≥ 0');
+        setErrorMessage('Turbo teacher weight must be a boolean');
         return;
       }
       const tr = process.train as Record<string, unknown>;
@@ -378,7 +376,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         fixed_cycle_weight_sigma?: number;
         turbo_prior_steps?: number;
         turbo_t_jitter?: number;
-        turbo_teacher_weight?: number;
+        turbo_teacher_weight?: boolean;
       } = {
         weight_decay: weightDecay,
         weight_decay_increment: weightDecayIncrement,
@@ -424,7 +422,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         const tr = process.train as Record<string, unknown>;
         patchBody.turbo_prior_steps = tr.turbo_prior_steps as number;
         patchBody.turbo_t_jitter = tr.turbo_t_jitter as number;
-        patchBody.turbo_teacher_weight = tr.turbo_teacher_weight as number;
+        patchBody.turbo_teacher_weight = tr.turbo_teacher_weight as boolean;
       }
 
       const patchRes = await fetch(`/api/jobs/${job.id}/runtime-config`, {
@@ -700,23 +698,22 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
                 className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
               />
             </div>
-            <div className="space-y-2 flex-1 min-w-[140px]">
-              <p className="text-xs text-gray-400">Turbo teacher weight</p>
-              <input
-                type="number"
-                step="0.01"
-                min={0}
-                placeholder="e.g. 0.25"
-                value={turboTeacherWeight}
-                onChange={(e) => {
-                  const v = parseFloat(e.target.value);
-                  if (Number.isFinite(v) && v >= 0) {
-                    setValue(v, `${TRAIN_PATH}.turbo_teacher_weight`);
-                    setApplyStatus('idle');
-                  }
+            <div className="space-y-2 flex-1 min-w-[140px] flex items-center gap-2">
+              <p className="text-xs text-gray-400">Train on Turbo</p>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={turboTeacherWeight}
+                onClick={() => {
+                  setValue(!turboTeacherWeight, `${TRAIN_PATH}.turbo_teacher_weight`);
+                  setApplyStatus('idle');
                 }}
-                className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
-              />
+                className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-900 ${turboTeacherWeight ? 'bg-blue-600' : 'bg-gray-600'}`}
+              >
+                <span
+                  className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition-transform ${turboTeacherWeight ? 'translate-x-5' : 'translate-x-1'}`}
+                />
+              </button>
             </div>
           </div>
         ) : null}

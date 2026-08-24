@@ -45,7 +45,7 @@ config:
         turbo_prior_steps: 8
         turbo_t_jitter: 0.5
         turbo_t_jitter_end: 0
-        turbo_teacher_weight: 0.25
+        turbo_teacher_weight: true
         timestep_weighting: "none"
         min_snr_gamma: 0
         content_or_style: "balanced"

@@ -50,33 +50,3 @@ def test_health_post_warmup_8x_loss_ratio_fails(rubric, tmp_path):
     result = rubric.health_from_tb(log_dir, warmup_steps=8, instability_max=1.0)
     assert result.ok is False
     assert result.reason == "loss_ratio"
-
-
-def test_health_nan_loss_turbo_teacher_fails(rubric, tmp_path):
-    from torch.utils.tensorboard import SummaryWriter
-
-    log_dir = tmp_path / "tb_turbo_nan"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    writer = SummaryWriter(log_dir=str(log_dir))
-    writer.add_scalar("loss", 1.0, global_step=0)
-    writer.add_scalar("loss/turbo_teacher", float("nan"), global_step=0)
-    writer.flush()
-    writer.close()
-    result = rubric.health_from_tb(log_dir, warmup_steps=8, instability_max=1.0)
-    assert result.ok is False
-    assert result.reason == "nan_inf:loss/turbo_teacher"
-
-
-def test_health_inf_loss_turbo_teacher_fails(rubric, tmp_path):
-    from torch.utils.tensorboard import SummaryWriter
-
-    log_dir = tmp_path / "tb_turbo_inf"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    writer = SummaryWriter(log_dir=str(log_dir))
-    writer.add_scalar("loss", 1.0, global_step=0)
-    writer.add_scalar("loss/turbo_teacher", float("inf"), global_step=0)
-    writer.flush()
-    writer.close()
-    result = rubric.health_from_tb(log_dir, warmup_steps=8, instability_max=1.0)
-    assert result.ok is False
-    assert result.reason == "nan_inf:loss/turbo_teacher"

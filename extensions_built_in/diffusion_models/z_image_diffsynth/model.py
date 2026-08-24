@@ -123,6 +123,9 @@ class ZImageDiffSynthModel(BaseModel):
         # When True, we are inside our generate_images(); device moves are done
         # once there (main→CPU, sampling→GPU before loop; restore in finally).
         self._sampling_in_batch_generate = False
+        # Train on Turbo DiT (+ sampling LoRA) when turbo_teacher_weight is true.
+        self._train_on_turbo = False
+        self._saved_train_network = None
         # Enable gradient checkpointing by default for DiffSynth DiT to
         # reduce peak VRAM usage during training forwards.
         self.gradient_checkpointing = True
@@ -207,25 +210,34 @@ class ZImageDiffSynthModel(BaseModel):
 
     def _move_sampling_transformer(self, device):
         """Move _sampling_transformer (sampling DiT base). Do not force_to _sampling_network."""
+        from toolkit.util.device import devices_equal
+
         with memory_debug(self.print_and_status_update, "Move sampling transformer"):
             st = getattr(self, "_sampling_transformer", None)
             if st is None:
                 return
             target = device if isinstance(device, torch.device) else torch.device(device)
             base_p = self._first_frozen_base_param(st)
-            need_move = base_p is None or base_p.device != target
+            need_move = base_p is None or not devices_equal(base_p.device, target)
             if not need_move:
                 return
             if is_debug_enabled():
                 self.print_and_status_update(
                     f"\n[zimage_diffsynth] moving sampling transformer to {device}"
                 )
+            # Wrapper.to unwraps compiled blocks; plain Module uses nn.Module.to.
+            # Do not swallow failures: a silent CUDA leave leaves both DiTs resident.
             try:
-                # Wrapper.to unwraps compiled blocks; plain Module uses nn.Module.to.
                 st.to(device)
             except Exception as e:
-                self.print_and_status_update(
+                raise RuntimeError(
                     f"[zimage_diffsynth] failed moving sampling transformer to {device}: {e}"
+                ) from e
+            base_p = self._first_frozen_base_param(st)
+            if base_p is not None and not devices_equal(base_p.device, target):
+                raise RuntimeError(
+                    f"[zimage_diffsynth] sampling transformer still on {base_p.device} "
+                    f"after move to {target}"
                 )
 
     def _flush_cuda(self):
@@ -234,6 +246,103 @@ class ZImageDiffSynthModel(BaseModel):
             gc.collect()
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
+
+    def _force_network_to(self, net, device) -> None:
+        """Move a LoRA network via force_to, preserving trainable dtype."""
+        if net is None or not hasattr(net, "force_to"):
+            return
+        net = unwrap_model(net)
+        p = next((p for p in net.parameters() if p.requires_grad), None)
+        dtype = p.dtype if p is not None else self.torch_dtype
+        try:
+            net.force_to(device, dtype)
+        except Exception:
+            pass
+
+    def _park_base_dit_and_lora(self) -> None:
+        """Park base DiT on CPU. Do not move train LoRA: it shares parameters with sampling LoRA."""
+        self._place_training_dit("cpu")
+
+    def _park_sampling_dit_and_lora(self) -> None:
+        """Park Turbo DiT on CPU. Do not move sampling LoRA: it shares parameters
+        with the train LoRA, so force_to(CPU) would yank train weights off CUDA."""
+        self._move_sampling_transformer("cpu")
+
+    def _enable_dit_gradient_checkpointing(self, dit) -> None:
+        """Turn on Diffusers/module GC so Turbo train does not dump full activations."""
+        if dit is None or not getattr(self, "gradient_checkpointing", False):
+            return
+        if hasattr(dit, "enable_gradient_checkpointing"):
+            dit.enable_gradient_checkpointing()
+        elif hasattr(dit, "gradient_checkpointing"):
+            dit.gradient_checkpointing = True
+
+    def apply_turbo_teacher_mode(self, enabled: bool) -> None:
+        """Exclusive DiT pin: inactive on CPU + flush, then active on CUDA."""
+        enabled = bool(enabled)
+        self._train_on_turbo = enabled
+        if enabled:
+            self._park_base_dit_and_lora()
+            self._flush_cuda()
+            self._move_sampling_transformer(self.device_torch)
+            sampling_net = getattr(self, "_sampling_network", None)
+            self._force_network_to(sampling_net, self.device_torch)
+            dit, _ = self._dit_for_train_forward()
+            self._enable_dit_gradient_checkpointing(dit)
+            if (
+                sampling_net is not None
+                and getattr(self, "network", None) is not None
+                and self.network is not sampling_net
+            ):
+                if getattr(self, "_saved_train_network", None) is None:
+                    self._saved_train_network = self.network
+                self.network = sampling_net
+            return
+
+        self._park_sampling_dit_and_lora()
+        saved = getattr(self, "_saved_train_network", None)
+        if saved is not None:
+            sampling_net = getattr(self, "_sampling_network", None)
+            if sampling_net is not None and self.network is sampling_net:
+                self._force_network_to(sampling_net, "cpu")
+            self.network = saved
+            self._saved_train_network = None
+        self._flush_cuda()
+        self._move_main_network(self.device_torch)
+
+    def set_device_state(self, state):
+        """Presets move ``unet`` (base DiT) to CUDA and would co-reside with Turbo.
+
+        When training on Turbo, keep base on CPU and re-pin exclusive residency
+        after the preset (``set_device_state`` runs after ``hook_before_train_loop``).
+        """
+        import copy
+
+        if getattr(self, "_train_on_turbo", False) and isinstance(state, dict):
+            state = copy.deepcopy(state)
+            unet_state = dict(state.get("unet") or {})
+            unet_state["device"] = torch.device("cpu")
+            state["unet"] = unet_state
+        super().set_device_state(state)
+        if getattr(self, "_train_on_turbo", False):
+            self.apply_turbo_teacher_mode(True)
+
+    def _dit_for_train_forward(self):
+        """Return (dit, is_diffusers) for the active train forward path."""
+        if getattr(self, "_train_on_turbo", False):
+            st = getattr(self, "_sampling_transformer", None)
+            if st is None:
+                raise ValueError(
+                    "turbo_teacher_weight=true requires a loaded sampling transformer "
+                    "(set model.sampling_name_or_path to Z-Image-Turbo)."
+                )
+            dit = getattr(st, "_inner_dit", None)
+            if dit is None:
+                dit = unwrap_model(st)
+                if hasattr(dit, "_inner_dit"):
+                    dit = dit._inner_dit
+            return dit, getattr(self, "_sampling_is_diffusers", False)
+        return self._raw_dit, getattr(self, "_main_is_diffusers", False)
 
     def _log_device_state(self, label: str):
         """Log device of key modules (for debug). Only runs when config.debug is enabled."""
@@ -398,22 +507,43 @@ class ZImageDiffSynthModel(BaseModel):
         batch=None,
         **kwargs,
     ):
-        # Ensure DiT weights live on the same device as the latents we are
-        # about to run on. During training the device-state presets will
-        # already have moved the wrapper (and inner DiT) to the correct
-        # device; for one-off calls like the smoke test this also brings a
-        # freshly-loaded, CPU-resident DiT onto self.device_torch.
+        # Exclusive residency: park inactive DiT before placing the active one.
+        # Never move the active DiT onto CUDA while the other is still resident.
         # Never follow CPU latents onto the DiT while the trainer device is CUDA;
         # that silently runs the frozen base on CPU (~30 s/it).
-        if (
-            isinstance(self.device_torch, torch.device)
-            and self.device_torch.type == "cuda"
-        ):
-            self._place_training_dit(self.device_torch)
-        elif isinstance(latent_model_input, torch.Tensor):
-            self._place_training_dit(latent_model_input.device)
+        train_on_turbo = getattr(self, "_train_on_turbo", False)
+        if train_on_turbo:
+            self._park_base_dit_and_lora()
+            if (
+                isinstance(self.device_torch, torch.device)
+                and self.device_torch.type == "cuda"
+            ):
+                self._flush_cuda()
+                self._move_sampling_transformer(self.device_torch)
+            elif isinstance(latent_model_input, torch.Tensor):
+                self._move_sampling_transformer(latent_model_input.device)
+            else:
+                self._move_sampling_transformer(self.device_torch)
+            sampling_net = getattr(self, "_sampling_network", None)
+            if sampling_net is None:
+                sampling_net = getattr(self, "network", None)
+            self._force_network_to(sampling_net, self.device_torch)
         else:
-            self._place_training_dit(self.device_torch)
+            self._park_sampling_dit_and_lora()
+            if (
+                isinstance(self.device_torch, torch.device)
+                and self.device_torch.type == "cuda"
+            ):
+                self._flush_cuda()
+                self._move_main_network(self.device_torch)
+            elif isinstance(latent_model_input, torch.Tensor):
+                self._place_training_dit(latent_model_input.device)
+            else:
+                self._place_training_dit(self.device_torch)
+
+        dit, is_diffusers = self._dit_for_train_forward()
+        self._enable_dit_gradient_checkpointing(dit)
+
         # Z-Image DiT is trained on latent-space tensors with a fixed
         # channel count (e.g. 16). If we accidentally receive 3‑channel BCHW
         # tensors here (RGB-like), they will eventually hit dit.all_x_embedder
@@ -423,7 +553,7 @@ class ZImageDiffSynthModel(BaseModel):
         # - cached latents created by another model / latent_space_version
         # - RGB tensors cached as "latents" by external tools.
         if isinstance(latent_model_input, torch.Tensor) and latent_model_input.dim() == 4:
-            in_channels = getattr(self._raw_dit, "in_channels", None)
+            in_channels = getattr(dit, "in_channels", None)
             if in_channels is not None:
                 c = latent_model_input.shape[1]
                 if c != in_channels:
@@ -502,7 +632,7 @@ class ZImageDiffSynthModel(BaseModel):
                 image_valid_patches = None
 
         # Diffusers ZImageTransformer2DModel: official DreamBooth / z_image convention.
-        if getattr(self, "_main_is_diffusers", False):
+        if is_diffusers:
             # Same train/model dtype gate as DiffSynth run_forward: activations may
             # be train.dtype (fp32) while float8-quantized DiT dequantizes to model.dtype (bf16).
             train_dtype = getattr(self, "train_torch_dtype", None) or self.torch_dtype
@@ -531,8 +661,8 @@ class ZImageDiffSynthModel(BaseModel):
                 dtype=model_dtype if use_autocast else torch.float32,
                 enabled=use_autocast,
             ):
-                with spatial_attention_context(self._raw_dit, image_valid_patches):
-                    model_out_list = self._raw_dit(
+                with spatial_attention_context(dit, image_valid_patches):
+                    model_out_list = dit(
                         latent_list,
                         timestep_model_input,
                         text_embeds,
@@ -548,7 +678,7 @@ class ZImageDiffSynthModel(BaseModel):
         train_dtype = getattr(self, "train_torch_dtype", None) or self.torch_dtype
         # Pass raw DiT to DiffSynth model_fn (expects real DiT with t_embedder, etc.).
         noise_pred = forward_mod.run_forward(
-            self._raw_dit,
+            dit,
             latent_model_input,
             timestep,
             text_embeds,
@@ -558,211 +688,6 @@ class ZImageDiffSynthModel(BaseModel):
             image_valid_patches=image_valid_patches,
         )
         return noise_pred
-
-    def _offload_main_for_turbo_teacher(self) -> None:
-        """Park training DiT + LoRA on CPU (TE-recache pattern). ``_move_main_network`` no-ops CPU."""
-        self._place_training_dit("cpu")
-        net = getattr(self, "network", None)
-        if net is not None and hasattr(net, "force_to"):
-            net = unwrap_model(net)
-            p = next((p for p in net.parameters() if p.requires_grad), None)
-            dtype = p.dtype if p is not None else self.torch_dtype
-            try:
-                net.force_to("cpu", dtype)
-            except Exception:
-                pass
-        self._flush_cuda()
-
-    def _restore_main_after_turbo_teacher(self) -> None:
-        """Restore training DiT + LoRA to train device; keep sampling on CPU."""
-        self._move_sampling_transformer("cpu")
-        self._move_main_network(self.device_torch)
-        self._flush_cuda()
-
-    def get_turbo_teacher_prediction(
-        self,
-        latent_model_input: torch.Tensor,
-        timestep: torch.Tensor,
-        text_embeddings: PromptEmbeds,
-        batch=None,
-        **kwargs,
-    ):
-        """
-        Frozen Z-Image-Turbo velocity pred on ``_sampling_transformer`` (no train LoRA).
-
-        I/O matches ``get_noise_prediction`` (Diffusers list/CFHW + negate, or DiffSynth
-        ``run_forward``). Exclusive residency: main+LoRA off CUDA, sampling on, forward,
-        then sampling off and main restored (same spirit as sample / TE recache).
-        """
-        st = getattr(self, "_sampling_transformer", None)
-        if st is None:
-            raise ValueError(
-                "turbo_teacher_weight>0 requires a loaded sampling transformer "
-                "(set model.sampling_name_or_path to Z-Image-Turbo)."
-            )
-
-        text_embeds = text_embeddings.text_embeds
-        attention_mask = text_embeddings.attention_mask
-        if isinstance(text_embeds, torch.Tensor) and len(text_embeds.shape) == 3:
-            if attention_mask is not None:
-                text_embeds = [
-                    text_embeds[i][attention_mask[i].bool()]
-                    for i in range(text_embeds.shape[0])
-                ]
-            else:
-                text_embeds = [text_embeds[i] for i in range(text_embeds.shape[0])]
-        elif isinstance(text_embeds, list) and text_embeds and len(text_embeds[0].shape) == 3:
-            new_text_embeds = []
-            for i, t in enumerate(text_embeds):
-                if t is None:
-                    continue
-                if attention_mask is not None:
-                    if isinstance(attention_mask, (list, tuple)):
-                        mask = attention_mask[i]
-                    else:
-                        mask = (
-                            attention_mask[i]
-                            if attention_mask.dim() == 3
-                            else attention_mask
-                        )
-                    if isinstance(mask, torch.Tensor) and mask.dim() == 2:
-                        new_text_embeds += [
-                            t[j][mask[j].bool()] for j in range(t.shape[0])
-                        ]
-                    elif isinstance(mask, torch.Tensor):
-                        new_text_embeds += [
-                            t[j][mask.bool()] for j in range(t.shape[0])
-                        ]
-                    else:
-                        new_text_embeds += [t[j][mask] for j in range(t.shape[0])]
-                else:
-                    new_text_embeds += list(t.unbind(dim=0))
-            text_embeds = new_text_embeds
-
-        image_valid_patches = None
-        if (
-            batch is not None
-            and getattr(batch, "image_valid_mask_tensor", None) is not None
-            and isinstance(latent_model_input, torch.Tensor)
-            and latent_model_input.dim() == 4
-        ):
-            from .spatial_attention import pixel_valid_to_patch_valid
-
-            valid = batch.image_valid_mask_tensor
-            if valid.dim() == 3:
-                valid = valid.unsqueeze(1)
-            B, _, lh, lw = latent_model_input.shape
-            if valid.shape[0] != B:
-                raise ValueError(
-                    f"image_valid_mask_tensor batch {valid.shape[0]} != latents batch {B}"
-                )
-            valid = valid.to(device=latent_model_input.device)
-            patch_grid = pixel_valid_to_patch_valid(valid, lh, lw, patch_size=2)
-            patches = [patch_grid[b] for b in range(B)]
-            if any(not p.all().item() for p in patches):
-                image_valid_patches = patches
-
-        dit = getattr(st, "_inner_dit", None)
-        if dit is None:
-            dit = unwrap_model(st)
-            if hasattr(dit, "_inner_dit"):
-                dit = dit._inner_dit
-
-        train_dtype = getattr(self, "train_torch_dtype", None) or self.torch_dtype
-        model_dtype = self.torch_dtype
-        target_device = self.device_torch
-        if (
-            isinstance(target_device, torch.device)
-            and target_device.type == "cuda"
-        ):
-            pass
-        elif isinstance(latent_model_input, torch.Tensor):
-            target_device = latent_model_input.device
-        else:
-            target_device = self.device_torch
-
-        try:
-            # Exclusive: never co-reside main DiT and Turbo on CUDA.
-            self._offload_main_for_turbo_teacher()
-            self._move_sampling_transformer(target_device)
-            with torch.no_grad():
-                if getattr(self, "_sampling_is_diffusers", False):
-                    if (
-                        isinstance(latent_model_input, torch.Tensor)
-                        and latent_model_input.dtype != model_dtype
-                    ):
-                        latent_model_input = latent_model_input.to(model_dtype)
-                    if isinstance(text_embeds, torch.Tensor):
-                        if text_embeds.dtype != model_dtype:
-                            text_embeds = text_embeds.to(model_dtype)
-                    elif isinstance(text_embeds, list):
-                        text_embeds = [
-                            p.to(model_dtype)
-                            if isinstance(p, torch.Tensor) and p.dtype != model_dtype
-                            else p
-                            for p in text_embeds
-                        ]
-
-                    if (
-                        isinstance(latent_model_input, torch.Tensor)
-                        and isinstance(target_device, torch.device)
-                        and latent_model_input.device != target_device
-                    ):
-                        latent_model_input = latent_model_input.to(target_device)
-                    if isinstance(timestep, torch.Tensor) and isinstance(
-                        target_device, torch.device
-                    ):
-                        timestep = timestep.to(target_device)
-
-                    latent_list = list(latent_model_input.unsqueeze(2).unbind(dim=0))
-                    timestep_model_input = (1000 - timestep) / 1000
-                    use_autocast = (
-                        isinstance(target_device, torch.device)
-                        and target_device.type == "cuda"
-                        and model_dtype in (torch.float16, torch.bfloat16)
-                    )
-                    from .spatial_attention import spatial_attention_context
-
-                    with torch.autocast(
-                        device_type="cuda",
-                        dtype=model_dtype if use_autocast else torch.float32,
-                        enabled=use_autocast,
-                    ):
-                        with spatial_attention_context(dit, image_valid_patches):
-                            model_out_list = dit(
-                                latent_list,
-                                timestep_model_input,
-                                text_embeds,
-                                return_dict=False,
-                            )[0]
-                    noise_pred = torch.stack([t.float() for t in model_out_list], dim=0)
-                    noise_pred = -noise_pred.squeeze(2)
-                    if noise_pred.dtype != train_dtype:
-                        noise_pred = noise_pred.to(train_dtype)
-                else:
-                    if (
-                        isinstance(latent_model_input, torch.Tensor)
-                        and isinstance(target_device, torch.device)
-                        and latent_model_input.device != target_device
-                    ):
-                        latent_model_input = latent_model_input.to(target_device)
-                    if isinstance(timestep, torch.Tensor) and isinstance(
-                        target_device, torch.device
-                    ):
-                        timestep = timestep.to(target_device)
-                    noise_pred = forward_mod.run_forward(
-                        dit,
-                        latent_model_input,
-                        timestep,
-                        text_embeds,
-                        model_dtype=model_dtype,
-                        use_gradient_checkpointing=False,
-                        train_dtype=train_dtype,
-                        image_valid_patches=image_valid_patches,
-                    )
-                return noise_pred.detach()
-        finally:
-            self._restore_main_after_turbo_teacher()
 
     def get_prompt_embeds(self, prompt: str) -> PromptEmbeds:
         te = self.text_encoder[0]
@@ -898,13 +823,9 @@ class ZImageDiffSynthModel(BaseModel):
         finally:
             if is_debug_enabled():
                 self.print_and_status_update(
-                    "\n[zimage_diffsynth] standalone sampling: restoring main "
-                    "transformer to GPU and sampling transformer to CPU"
+                    "\n[zimage_diffsynth] standalone sampling: restoring train DiT residency"
                 )
-            self._move_sampling_transformer("cpu")
-            self.model.to(self.device_torch, dtype=self.torch_dtype)
-            self._move_main_network(self.device_torch)
-            self._flush_cuda()
+            self.apply_turbo_teacher_mode(getattr(self, "_train_on_turbo", False))
 
     def generate_images(
         self,
@@ -912,6 +833,7 @@ class ZImageDiffSynthModel(BaseModel):
         sampler=None,
     ):
         saved_network = None
+        train_on_turbo = getattr(self, "_train_on_turbo", False)
         use_sampling = (
             hasattr(self, "_sampling_transformer")
             and self._sampling_transformer is not None
@@ -926,6 +848,7 @@ class ZImageDiffSynthModel(BaseModel):
                 and self._sampling_network is not None
                 and hasattr(self, "network")
                 and self.network is not None
+                and self.network is not self._sampling_network
             ):
                 saved_network = self.network
                 self.network = self._sampling_network
@@ -943,25 +866,20 @@ class ZImageDiffSynthModel(BaseModel):
                 if use_sampling:
                     if is_debug_enabled():
                         self.print_and_status_update(
-                            "\n[zimage_diffsynth] batch generate: restoring main "
-                            "transformer to GPU and moving sampling transformer to CPU"
+                            "\n[zimage_diffsynth] batch generate: restoring train DiT residency"
                         )
                     self._sampling_in_batch_generate = False
-                    # Restore after batch: main back on GPU, sampling back on CPU (no memory spike).
                     with memory_debug(
                         self.print_and_status_update,
                         "zimage_diffsynth after batch restore",
                     ):
-                        if saved_network is not None:
+                        if saved_network is not None and not train_on_turbo:
                             self.network = saved_network
-                        self._move_sampling_transformer("cpu")
-                        self.model.to(self.device_torch, dtype=self.torch_dtype)
-                        self._move_main_network(self.device_torch)
-                    
-                    self._flush_cuda()
+                        self.apply_turbo_teacher_mode(train_on_turbo)
+
                     self._log_device_state("after batch restore")
         finally:
-            if saved_network is not None:
+            if saved_network is not None and not train_on_turbo:
                 self.network = saved_network
 
     def get_model_has_grad(self):
@@ -1011,38 +929,51 @@ class ZImageDiffSynthModel(BaseModel):
         names = self.get_transformer_block_names() or []
         log = self.print_and_status_update
         totals = {"ok": 0, "failed": 0, "skipped": 0}
+        train_on_turbo = bool(getattr(self, "_train_on_turbo", False))
 
         def _accumulate(stats):
             for k in totals:
                 totals[k] += stats.get(k, 0)
 
-        if (
-            self._raw_dit is not None
-            and names
-            and not getattr(self, "_main_is_diffusers", False)
-        ):
-            log("[zimage_diffsynth] Compiling main DiT blocks (torch.compile dynamic=True)")
-            _accumulate(compile_dit_module_lists(self._raw_dit, names, log_fn=log))
+        try:
+            # Never co-reside: compile only the active train DiT.
+            if (
+                not train_on_turbo
+                and self._raw_dit is not None
+                and names
+                and not getattr(self, "_main_is_diffusers", False)
+            ):
+                log(
+                    "[zimage_diffsynth] Compiling main DiT blocks "
+                    "(torch.compile dynamic=True)"
+                )
+                _accumulate(compile_dit_module_lists(self._raw_dit, names, log_fn=log))
+            elif train_on_turbo:
+                log("[zimage_diffsynth] Skipping main DiT compile (train-on-Turbo)")
 
-        sampling = getattr(self, "_sampling_transformer", None)
-        if (
-            sampling is not None
-            and not getattr(self, "_sampling_is_diffusers", False)
-            and names
-        ):
-            inner = getattr(sampling, "_inner_dit", None)
-            if inner is None:
-                inner = unwrap_model(sampling)
-                if hasattr(inner, "_inner_dit"):
-                    inner = inner._inner_dit
-            if inner is not None:
-                log("[zimage_diffsynth] Compiling sampling DiT blocks")
-                try:
-                    inner.to(self.device_torch)
-                except Exception:
-                    pass
-                _accumulate(compile_dit_module_lists(inner, names, log_fn=log))
-                self._move_sampling_transformer("cpu")
+            sampling = getattr(self, "_sampling_transformer", None)
+            if (
+                train_on_turbo
+                and sampling is not None
+                and not getattr(self, "_sampling_is_diffusers", False)
+                and names
+            ):
+                inner = getattr(sampling, "_inner_dit", None)
+                if inner is None:
+                    inner = unwrap_model(sampling)
+                    if hasattr(inner, "_inner_dit"):
+                        inner = inner._inner_dit
+                if inner is not None:
+                    log("[zimage_diffsynth] Compiling sampling DiT blocks")
+                    # Active Turbo is already on CUDA via apply_turbo_teacher_mode;
+                    # do not pull sampling onto CUDA while base is resident, and
+                    # do not park Turbo on CPU afterward (breaks train-on-Turbo).
+                    _accumulate(compile_dit_module_lists(inner, names, log_fn=log))
+            elif not train_on_turbo and sampling is not None:
+                log("[zimage_diffsynth] Skipping sampling DiT compile (train-on-base)")
+        finally:
+            # Restore exclusive residency after any compile-side moves.
+            self.apply_turbo_teacher_mode(train_on_turbo)
 
         self._dit_blocks_compiled = True
         log(

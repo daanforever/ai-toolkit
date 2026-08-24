@@ -17,7 +17,7 @@ export async function PATCH(
     return NextResponse.json({ error: 'Job not found' }, { status: 404 });
   }
 
-  let body: { lr?: number; gaussian_mean?: number; gaussian_std?: number; gaussian_mean_2?: number; gaussian_std_2?: number; fixed_cycle_timesteps?: number[]; fixed_cycle_seed?: number | null; fixed_cycle_weight_peak_timesteps?: number[] | null; fixed_cycle_weight_sigma?: number; turbo_prior_steps?: number; turbo_t_jitter?: number; turbo_teacher_weight?: number; weight_decay?: number; weight_decay_increment?: number; weight_decay_mode?: string; beta1?: number | null; beta2?: number; content_or_style?: string; timestep_type?: string; timestep_weighting?: string; network_weights?: number[]; prompts?: string[]; batch_size?: number; gradient_accumulation?: number; save_every?: number; sample_every?: number; warmup_steps?: number; warmup_boost?: number; min_snr_gamma?: number; debug?: boolean };
+  let body: { lr?: number; gaussian_mean?: number; gaussian_std?: number; gaussian_mean_2?: number; gaussian_std_2?: number; fixed_cycle_timesteps?: number[]; fixed_cycle_seed?: number | null; fixed_cycle_weight_peak_timesteps?: number[] | null; fixed_cycle_weight_sigma?: number; turbo_prior_steps?: number; turbo_t_jitter?: number; turbo_teacher_weight?: boolean; weight_decay?: number; weight_decay_increment?: number; weight_decay_mode?: string; beta1?: number | null; beta2?: number; content_or_style?: string; timestep_type?: string; timestep_weighting?: string; network_weights?: number[]; prompts?: string[]; batch_size?: number; gradient_accumulation?: number; save_every?: number; sample_every?: number; warmup_steps?: number; warmup_boost?: number; min_snr_gamma?: number; debug?: boolean };
   try {
     body = await request.json();
   } catch {
@@ -32,7 +32,7 @@ export async function PATCH(
   const TIMESTEP_WEIGHTING_VALUES = ['none', 'weighted', 'gaussian', 'gaussian_bimodal'] as const;
   const WEIGHT_DECAY_MODE_VALUES = ['update_rms', 'param_rms', 'absolute'] as const;
 
-  const data: { runtime_lr?: number; runtime_gaussian_mean?: number; runtime_gaussian_std?: number; runtime_gaussian_mean_2?: number; runtime_gaussian_std_2?: number; runtime_fixed_cycle_timesteps?: string; runtime_fixed_cycle_seed?: number | null; runtime_fixed_cycle_weight_peak_timesteps?: string | null; runtime_fixed_cycle_weight_sigma?: number; runtime_turbo_prior_steps?: number; runtime_turbo_t_jitter?: number; runtime_turbo_teacher_weight?: number; runtime_weight_decay?: number; runtime_weight_decay_increment?: number; runtime_weight_decay_mode?: string; runtime_beta1?: number | null; runtime_beta2?: number; runtime_content_or_style?: string; runtime_timestep_type?: string; runtime_timestep_weighting?: string; runtime_network_weights?: string; runtime_prompts?: string; runtime_batch_size?: number; runtime_gradient_accumulation?: number; runtime_save_every?: number; runtime_sample_every?: number; runtime_warmup_steps?: number; runtime_warmup_boost?: number; runtime_min_snr_gamma?: number; runtime_debug?: boolean } = {};
+  const data: { runtime_lr?: number; runtime_gaussian_mean?: number; runtime_gaussian_std?: number; runtime_gaussian_mean_2?: number; runtime_gaussian_std_2?: number; runtime_fixed_cycle_timesteps?: string; runtime_fixed_cycle_seed?: number | null; runtime_fixed_cycle_weight_peak_timesteps?: string | null; runtime_fixed_cycle_weight_sigma?: number; runtime_turbo_prior_steps?: number; runtime_turbo_t_jitter?: number; runtime_turbo_teacher_weight?: boolean; runtime_weight_decay?: number; runtime_weight_decay_increment?: number; runtime_weight_decay_mode?: string; runtime_beta1?: number | null; runtime_beta2?: number; runtime_content_or_style?: string; runtime_timestep_type?: string; runtime_timestep_weighting?: string; runtime_network_weights?: string; runtime_prompts?: string; runtime_batch_size?: number; runtime_gradient_accumulation?: number; runtime_save_every?: number; runtime_sample_every?: number; runtime_warmup_steps?: number; runtime_warmup_boost?: number; runtime_min_snr_gamma?: number; runtime_debug?: boolean } = {};
 
   const lr = body.lr;
   if (lr !== undefined) {
@@ -183,9 +183,9 @@ export async function PATCH(
 
   const turboTeacherWeight = body.turbo_teacher_weight;
   if (turboTeacherWeight !== undefined) {
-    if (typeof turboTeacherWeight !== 'number' || !Number.isFinite(turboTeacherWeight) || turboTeacherWeight < 0) {
+    if (typeof turboTeacherWeight !== 'boolean') {
       return NextResponse.json(
-        { error: 'turbo_teacher_weight must be a finite number ≥ 0' },
+        { error: 'turbo_teacher_weight must be a boolean' },
         { status: 400 }
       );
     }

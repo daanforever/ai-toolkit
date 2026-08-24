@@ -167,7 +167,7 @@ export interface TrainConfig {
   turbo_prior_steps?: number;
   turbo_t_jitter?: number;
   turbo_t_jitter_end?: number;
-  turbo_teacher_weight?: number;
+  turbo_teacher_weight?: boolean;
 }
 
 export interface QuantizeKwargsConfig {

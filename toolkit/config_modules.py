@@ -547,8 +547,17 @@ class TrainConfig:
         self.turbo_prior_steps: int = kwargs.get('turbo_prior_steps', 8)
         self.turbo_t_jitter: float = kwargs.get('turbo_t_jitter', 0.5)
         self.turbo_t_jitter_end: float = kwargs.get('turbo_t_jitter_end', 0.0)
-        # Soft Turbo-teacher consistency (MSE vs frozen sampling DiT). 0 = off.
-        self.turbo_teacher_weight: float = float(kwargs.get('turbo_teacher_weight', 0) or 0)
+        # Boolean Turbo-teacher mode; false = train on base Z-Image; true = train LoRA on Turbo DiT.
+        raw_turbo_teacher_weight = kwargs.get('turbo_teacher_weight', False)
+        if isinstance(raw_turbo_teacher_weight, bool):
+            self.turbo_teacher_weight: bool = raw_turbo_teacher_weight
+        elif raw_turbo_teacher_weight is None:
+            self.turbo_teacher_weight = False
+        else:
+            raise ValueError(
+                "turbo_teacher_weight must be boolean true/false; "
+                "legacy float weights are not supported"
+            )
         # Not an A/B feature; if present and not dsigma, _sample_turbo_prior raises.
         if 'turbo_slot_weighting' in kwargs:
             self.turbo_slot_weighting = kwargs['turbo_slot_weighting']

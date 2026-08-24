@@ -110,9 +110,17 @@ def overlay_probe(
         train["force_first_sample"] = False
     train["timestep_type"] = "turbo_prior"
     train["content_or_style"] = "balanced"
-    # Fixed teacher weight (not swept; stage-1 recommends train.lr only).
-    w = tune.get("turbo_teacher_weight", 0.25)
-    train["turbo_teacher_weight"] = float(0.25 if w is None else w)
+    # Fixed teacher mode (not swept; stage-1 recommends train.lr only).
+    w = tune.get("turbo_teacher_weight", True)
+    if w is None:
+        train["turbo_teacher_weight"] = True
+    elif isinstance(w, bool):
+        train["turbo_teacher_weight"] = w
+    else:
+        raise ValueError(
+            "turbo_teacher_weight must be boolean true/false; "
+            "legacy float weights are not supported"
+        )
 
     save = process0["save"]
     save["save_every"] = steps

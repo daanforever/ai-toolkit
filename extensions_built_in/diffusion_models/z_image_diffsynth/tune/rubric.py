@@ -72,24 +72,17 @@ def _last_scalar(ea: Any, tag: str) -> float | None:
     return series[-1][1]
 
 
-# Aux loss tags: checked for NaN/Inf but never used as primary for 8× ratio.
-_AUX_LOSS_TAGS = frozenset({"loss/turbo_teacher"})
-
-
 def _pick_primary_loss_tag(tags: Sequence[str]) -> str | None:
     """
     Prefer a primary training loss under loss/.
 
     Choice order: loss/loss, any loss/* ending with '/loss', first loss/* sorted,
     then bare 'loss' (BaseSDTrainProcess writes add_scalar('loss', ...)).
-    Aux tags (e.g. loss/turbo_teacher) are skipped for the ratio check.
     """
     tag_set = set(tags)
     if "loss/loss" in tag_set:
         return "loss/loss"
-    loss_star = sorted(
-        t for t in tags if t.startswith("loss/") and t not in _AUX_LOSS_TAGS
-    )
+    loss_star = sorted(t for t in tags if t.startswith("loss/"))
     for t in loss_star:
         if t.endswith("/loss"):
             return t
