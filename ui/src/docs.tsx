@@ -351,6 +351,14 @@ const docs: { [key: string]: ConfigDoc } = {
       </>
     ),
   },
+  'train.turbo_teacher_weight': {
+    title: 'Turbo Teacher Weight',
+    description: (
+      <>
+        Used when <code>timestep_type</code> is <code>turbo_prior</code>. Weight <code>w</code> for the Turbo-teacher velocity MSE term: <code>L = L_fm + w * MSE(v_base+LoRA, v_Turbo)</code>. TrainConfig default <code>0</code> (off); normative Turbo LoRA recipe uses <code>0.25</code>. Editable live in Runtime config. Requires a loaded sampling DiT (Z-Image-Turbo). Extra VRAM uses exclusive DiT residency (main off during teacher).
+      </>
+    ),
+  },
   'train.fixed_cycle_timesteps': {
     title: 'Fixed Cycle Timesteps',
     description: (

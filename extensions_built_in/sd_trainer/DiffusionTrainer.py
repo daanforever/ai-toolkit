@@ -73,6 +73,7 @@ class DiffusionTrainer(SDTrainer):
             ] = None
             self._last_applied_runtime_turbo_prior_steps = None
             self._last_applied_runtime_turbo_t_jitter = None
+            self._last_applied_runtime_turbo_teacher_weight = None
             # Initialize the status
             self._run_async_operation(self._update_status("running", "Starting"))
             self._stop_watcher_started = False
@@ -808,6 +809,38 @@ class DiffusionTrainer(SDTrainer):
                 f"jitter={self.train_config.turbo_t_jitter}"
             )
 
+    def get_runtime_turbo_teacher_weight(self):
+        """Read runtime_turbo_teacher_weight from DB. Returns float or None."""
+        if not self.is_ui_trainer:
+            return None
+
+        def _read():
+            try:
+                return self._get_runtime_scalar("runtime_turbo_teacher_weight", float)
+            except sqlite3.OperationalError:
+                # DB not migrated yet (column missing)
+                return None
+
+        return _read()
+
+    def apply_runtime_turbo_teacher_weight(self):
+        """If runtime_turbo_teacher_weight is set in DB, apply it to train_config."""
+        if not self.is_ui_trainer:
+            return
+        value = self.get_runtime_turbo_teacher_weight()
+        if value is None:
+            return
+        if value == self._last_applied_runtime_turbo_teacher_weight:
+            return
+        current = float(getattr(self.train_config, "turbo_teacher_weight", 0) or 0)
+        if value == current:
+            self._last_applied_runtime_turbo_teacher_weight = value
+            return
+        self.train_config.turbo_teacher_weight = float(value)
+        self._last_applied_runtime_turbo_teacher_weight = value
+        if is_debug_enabled():
+            print_acc(f"\nruntime turbo_teacher_weight from UI/DB: {value}")
+
     def get_runtime_timestep_weighting(self):
         """Read runtime_timestep_weighting from DB (only when is_ui_trainer). Returns str or None."""
         return self._get_runtime_scalar("runtime_timestep_weighting", str)
@@ -1237,6 +1270,7 @@ class DiffusionTrainer(SDTrainer):
         self._last_applied_runtime_fc_key = None
         self._last_applied_runtime_turbo_prior_steps = None
         self._last_applied_runtime_turbo_t_jitter = None
+        self._last_applied_runtime_turbo_teacher_weight = None
 
     async def _update_key(self, key, value):
         if not self.accelerator.is_main_process:
@@ -1361,6 +1395,7 @@ class DiffusionTrainer(SDTrainer):
             self.apply_runtime_fixed_cycle_params()
             self.apply_runtime_timestep_type()
             self.apply_runtime_turbo_prior_params()
+            self.apply_runtime_turbo_teacher_weight()
             self.apply_runtime_timestep_weighting()
             self.apply_runtime_batch_size()
             self.apply_runtime_network_weights()

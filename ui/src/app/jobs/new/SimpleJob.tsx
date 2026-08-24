@@ -591,6 +591,15 @@ export default function SimpleJob({
                       min={0}
                       max={1}
                     />
+                    <NumberInput
+                      label="Turbo Teacher Weight"
+                      className="pt-2"
+                      docKey="train.turbo_teacher_weight"
+                      value={jobConfig.config.process[0].train.turbo_teacher_weight ?? 0}
+                      onChange={value => setJobConfig(value, 'config.process[0].train.turbo_teacher_weight')}
+                      placeholder="eg. 0.25"
+                      min={0}
+                    />
                   </>
                 )}
                 <SelectInput

@@ -227,5 +227,6 @@ def test_reset_last_applied_clears_prompts():
     t._last_applied_runtime_fc_key = None
     t._last_applied_runtime_turbo_prior_steps = None
     t._last_applied_runtime_turbo_t_jitter = None
+    t._last_applied_runtime_turbo_teacher_weight = None
     DiffusionTrainer._reset_last_applied_runtime(t)
     assert t._last_applied_runtime_prompts is None

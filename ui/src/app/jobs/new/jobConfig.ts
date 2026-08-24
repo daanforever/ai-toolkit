@@ -76,6 +76,7 @@ export const defaultJobConfig: JobConfig = {
           turbo_prior_steps: 8,
           turbo_t_jitter: 0.5,
           turbo_t_jitter_end: 0,
+          turbo_teacher_weight: 0,
           optimizer_params: {
             weight_decay: 1e-4,
           },

@@ -126,6 +126,10 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     trainAny?.turbo_t_jitter != null && Number.isFinite(Number(trainAny.turbo_t_jitter))
       ? Number(trainAny.turbo_t_jitter)
       : 0.5;
+  const turboTeacherWeight =
+    trainAny?.turbo_teacher_weight != null && Number.isFinite(Number(trainAny.turbo_teacher_weight))
+      ? Number(trainAny.turbo_teacher_weight)
+      : 0;
   const [fixedCycleTimestepsInput, setFixedCycleTimestepsInput] = useState(() => {
     const p = parseJobConfig(job.job_config);
     const t = p?.config?.process?.[0]?.train as Record<string, unknown> | undefined;
@@ -317,9 +321,15 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         setErrorMessage('Turbo t jitter must be a finite number in [0, 1]');
         return;
       }
+      if (!Number.isFinite(turboTeacherWeight) || turboTeacherWeight < 0) {
+        setApplyStatus('error');
+        setErrorMessage('Turbo teacher weight must be a finite number ≥ 0');
+        return;
+      }
       const tr = process.train as Record<string, unknown>;
       tr.turbo_prior_steps = turboPriorSteps;
       tr.turbo_t_jitter = turboTJitter;
+      tr.turbo_teacher_weight = turboTeacherWeight;
     }
 
     try {
@@ -368,6 +378,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         fixed_cycle_weight_sigma?: number;
         turbo_prior_steps?: number;
         turbo_t_jitter?: number;
+        turbo_teacher_weight?: number;
       } = {
         weight_decay: weightDecay,
         weight_decay_increment: weightDecayIncrement,
@@ -413,6 +424,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         const tr = process.train as Record<string, unknown>;
         patchBody.turbo_prior_steps = tr.turbo_prior_steps as number;
         patchBody.turbo_t_jitter = tr.turbo_t_jitter as number;
+        patchBody.turbo_teacher_weight = tr.turbo_teacher_weight as number;
       }
 
       const patchRes = await fetch(`/api/jobs/${job.id}/runtime-config`, {
@@ -467,6 +479,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     fixedCycleWeightSigma,
     turboPriorSteps,
     turboTJitter,
+    turboTeacherWeight,
   ]);
 
   if (!initialConfig) {
@@ -681,6 +694,24 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
                   const v = parseFloat(e.target.value);
                   if (Number.isFinite(v) && v >= 0 && v <= 1) {
                     setValue(v, `${TRAIN_PATH}.turbo_t_jitter`);
+                    setApplyStatus('idle');
+                  }
+                }}
+                className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+              />
+            </div>
+            <div className="space-y-2 flex-1 min-w-[140px]">
+              <p className="text-xs text-gray-400">Turbo teacher weight</p>
+              <input
+                type="number"
+                step="0.01"
+                min={0}
+                placeholder="e.g. 0.25"
+                value={turboTeacherWeight}
+                onChange={(e) => {
+                  const v = parseFloat(e.target.value);
+                  if (Number.isFinite(v) && v >= 0) {
+                    setValue(v, `${TRAIN_PATH}.turbo_teacher_weight`);
                     setApplyStatus('idle');
                   }
                 }}
