@@ -995,6 +995,12 @@ class DiffusionTrainer(SDTrainer):
         from toolkit.basic import flush
 
         sd = self.sd
+        # Train-on-Turbo: exclusive pin (base CPU, Turbo CUDA). Never _move_main_network
+        # here — that remounts base onto CUDA and fights get_noise_prediction parking.
+        if getattr(sd, "_train_on_turbo", False) and hasattr(sd, "apply_turbo_teacher_mode"):
+            sd.apply_turbo_teacher_mode(True)
+            flush()
+            return
         device = self.device_torch
         if hasattr(sd, "_move_main_network"):
             # _move_main_network no-ops CPU; use it to restore CUDA DiT + LoRA

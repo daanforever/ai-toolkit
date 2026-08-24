@@ -600,9 +600,11 @@ def test_apply_turbo_teacher_mode_residency_order(monkeypatch):
 
     def _place(device):
         order.append(("place_main", str(device)))
+        return True
 
     def _move_sampling(device):
         order.append(("move_sampling", str(device)))
+        return True
 
     def _move_main(device):
         order.append(("move_main", str(device)))
@@ -660,6 +662,80 @@ def test_apply_turbo_teacher_mode_residency_order(monkeypatch):
     move_main_idx = next(i for i, c in enumerate(false_order) if c[0] == "move_main")
     assert samp_cpu_idx < flush_before_main < move_main_idx
 
+
+def test_apply_turbo_teacher_mode_noop_park_skips_flush(monkeypatch):
+    """Exclusive re-pin when inactive DiT already parked must not empty_cache."""
+    from extensions_built_in.diffusion_models.z_image_diffsynth.model import (
+        ZImageDiffSynthModel,
+    )
+
+    model = object.__new__(ZImageDiffSynthModel)
+    model.device_torch = torch.device("cpu")
+    model.torch_dtype = torch.float32
+    model._train_on_turbo = False
+    model._saved_train_network = None
+    model._sampling_transformer = object()
+    model._raw_dit = object()
+    model.model = None
+    model.network = None
+    model._sampling_network = None
+    model.gradient_checkpointing = False
+    model._dit_for_train_forward = lambda: (None, False)
+
+    flushes = {"n": 0}
+
+    model._place_training_dit = lambda device: False
+    model._move_sampling_transformer = lambda device: False
+    model._move_main_network = lambda device: None
+    model._flush_cuda = lambda: flushes.__setitem__("n", flushes["n"] + 1)
+    model._force_network_to = lambda net, device: None
+
+    ZImageDiffSynthModel.apply_turbo_teacher_mode(model, True)
+    assert flushes["n"] == 0
+    ZImageDiffSynthModel.apply_turbo_teacher_mode(model, False)
+    assert flushes["n"] == 0
+
+
+def test_predict_noise_train_on_turbo_does_not_remount_base_unet(monkeypatch):
+    """BaseModel.predict_noise remounts unet→CUDA when device mismatches; guard that."""
+    from extensions_built_in.diffusion_models.z_image_diffsynth.model import (
+        ZImageDiffSynthModel,
+        _DiTUnetWrapper,
+    )
+    from toolkit.models.base_model import BaseModel
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required to observe base remount vs park")
+
+    base = nn.Linear(4, 4)
+    for p in base.parameters():
+        p.requires_grad_(False)
+    wrapper = _DiTUnetWrapper(base)
+    model = object.__new__(ZImageDiffSynthModel)
+    model.device_torch = torch.device("cuda")
+    model.torch_dtype = torch.float32
+    model._train_on_turbo = True
+    model.unet = wrapper
+    model.model = wrapper
+    model._raw_dit = base
+
+    def _fake_super(self, *args, **kwargs):
+        # Mirror BaseModel.predict_noise remount check.
+        if self.unet.device != self.device_torch:
+            try:
+                self.unet.to(self.device_torch)
+            except Exception:
+                pass
+        return torch.zeros(1)
+
+    monkeypatch.setattr(BaseModel, "predict_noise", _fake_super)
+
+    base.to("cpu")
+    assert wrapper.device.type == "cpu"
+    out = ZImageDiffSynthModel.predict_noise(model, torch.zeros(1, 4))
+    assert out is not None
+    assert wrapper.device.type == "cpu"
+    assert next(base.parameters()).device.type == "cpu"
 
 # --- Turbo LoRA is_active desync (P1 red test; passes after P2 trainer.network sync) ---
 

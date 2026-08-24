@@ -10,6 +10,10 @@ taken after network apply (fails if max|Δ| and ‖Δ‖₂ are ~0).
 
 Run from repo root:
   python -m extensions_built_in.diffusion_models.z_image_diffsynth.simulate_turbo_prior --turbo true
+
+Profiling (CUDA events + move/flush counters; sampling disabled):
+  ZIMAGE_DIFFSYNTH_DEBUG=0 python -m ...simulate_turbo_prior --turbo true --profile
+  ... --turbo true --profile --production-overlay   # match config.yaml recipe knobs
 """
 
 from __future__ import annotations
@@ -20,9 +24,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections import Counter
+import time
+from collections import Counter, defaultdict
+from contextlib import contextmanager
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Optional
 
 import torch
 
@@ -85,6 +91,21 @@ PEAK_VRAM_FRAC_MAX = 0.85
 # Hard gate: LoRA must move vs init snapshot (both stats must clear eps).
 LORA_DELTA_EPS = 1e-8
 
+# Profile mode: skip first N steps, then record; sampling disabled for clean step time.
+PROFILE_WARMUP_STEPS = 3
+PROFILE_MEASURE_STEPS = 12
+PROFILE_TOTAL_STEPS = PROFILE_WARMUP_STEPS + PROFILE_MEASURE_STEPS  # 15
+PROFILE_SECTIONS = (
+    "park_inactive",
+    "flush_cuda",
+    "move_active",
+    "force_to",
+    "dit_forward",
+    "loss",
+    "backward",
+    "optimizer_step",
+)
+
 # Collected by monkeypatch during run_job (sim-only; debug logger skips turbo_prior).
 _COLLECTED_T: List[float] = []
 # (step_num, effective_jitter) per _sample_turbo_prior call — anneal check.
@@ -97,13 +118,26 @@ _PROBES_INSTALLED = False
 _LORA_INIT_PATH: Path | None = None
 _LORA_INIT_PROBE_INSTALLED = False
 
+# Profile state (sim-only; installed when --profile / SIM_TURBO_PRIOR_PROFILE).
+_PROFILE_ENABLED = False
+_PROFILE_PROBES_INSTALLED = False
+_PROFILE_RECORDING = False  # True after warmup
+_PROFILE_CPU_MS: Dict[str, List[float]] = defaultdict(list)
+_PROFILE_CUDA_MS: Dict[str, List[float]] = defaultdict(list)
+_PROFILE_MOVE_COUNTS: Dict[str, int] = defaultdict(int)
+_PROFILE_FLUSH_COUNTS: List[int] = []  # flushes per measured step
+_PROFILE_STEP_WALL_S: List[float] = []
+_PROFILE_VRAM: List[tuple[float, float]] = []  # (alloc_gb, reserved_gb) per step
+_PROFILE_STEP_FLUSHES = 0
+_PROFILE_NEST_DEPTH = 0
+
 
 def _log(msg: str) -> None:
     print(msg, flush=True)
 
 
-def _parse_turbo_cli(argv: list[str] | None = None) -> bool:
-    """Parent-only: ``--turbo true|false`` (default true). Reject other tokens."""
+def _parse_cli(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parent-only CLI: turbo mode + optional profile / production overlay."""
     parser = argparse.ArgumentParser(
         description="Z-Image DiffSynth turbo_prior GPU sim (single pass)."
     )
@@ -113,8 +147,27 @@ def _parse_turbo_cli(argv: list[str] | None = None) -> bool:
         default="true",
         help="turbo_teacher_weight for the single pass (default: true)",
     )
-    args = parser.parse_args(argv)
-    return args.turbo == "true"
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="CUDA-event step breakdown; sampling disabled; measurement-oriented",
+    )
+    parser.add_argument(
+        "--production-overlay",
+        action="store_true",
+        help="Match config.yaml knobs (1024, rank 128, diffsynth, fp32, refiners on)",
+    )
+    return parser.parse_args(argv)
+
+
+def _parse_turbo_cli(argv: list[str] | None = None) -> bool:
+    """Back-compat: return turbo_teacher_weight bool from CLI."""
+    return _parse_cli(argv).turbo == "true"
+
+
+def _env_flag(name: str) -> bool:
+    v = os.environ.get(name, "").strip().lower()
+    return v in ("1", "true", "yes")
 
 
 def _effective_jitter(train_config, step_num: int) -> float:
@@ -124,6 +177,267 @@ def _effective_jitter(train_config, step_num: int) -> float:
     progress = float(step_num) / float(max(train_steps - 1, 1))
     progress = max(0.0, min(1.0, progress))
     return start + (end - start) * progress
+
+
+@contextmanager
+def _profile_section(name: str):
+    """Record CPU wall + CUDA Event time for ``name`` when profiling after warmup."""
+    if not _PROFILE_ENABLED or not _PROFILE_RECORDING:
+        yield
+        return
+    use_cuda = torch.cuda.is_available()
+    t0 = time.perf_counter()
+    start_ev = end_ev = None
+    if use_cuda:
+        start_ev = torch.cuda.Event(enable_timing=True)
+        end_ev = torch.cuda.Event(enable_timing=True)
+        start_ev.record()
+    try:
+        yield
+    finally:
+        cpu_ms = (time.perf_counter() - t0) * 1000.0
+        cuda_ms = 0.0
+        if use_cuda and start_ev is not None and end_ev is not None:
+            end_ev.record()
+            end_ev.synchronize()
+            cuda_ms = float(start_ev.elapsed_time(end_ev))
+        _PROFILE_CPU_MS[name].append(cpu_ms)
+        _PROFILE_CUDA_MS[name].append(cuda_ms)
+
+
+def _reset_profile_buffers() -> None:
+    _PROFILE_CPU_MS.clear()
+    _PROFILE_CUDA_MS.clear()
+    _PROFILE_MOVE_COUNTS.clear()
+    _PROFILE_FLUSH_COUNTS.clear()
+    _PROFILE_STEP_WALL_S.clear()
+    _PROFILE_VRAM.clear()
+
+
+def _median(vals: List[float]) -> float:
+    if not vals:
+        return float("nan")
+    s = sorted(vals)
+    n = len(s)
+    mid = n // 2
+    if n % 2:
+        return float(s[mid])
+    return float(0.5 * (s[mid - 1] + s[mid]))
+
+
+def _print_profile_table() -> None:
+    """Compact section table + median step wall after warmup."""
+    _log("")
+    _log("==== Profile Results (post-warmup) ====")
+    if not _PROFILE_STEP_WALL_S:
+        _log("[profile] WARNING: no measured steps recorded")
+        return
+    med_step = _median(_PROFILE_STEP_WALL_S)
+    _log(
+        f"[profile] measured_steps={len(_PROFILE_STEP_WALL_S)} "
+        f"median_step_s={med_step:.4f} "
+        f"mean_step_s={sum(_PROFILE_STEP_WALL_S)/len(_PROFILE_STEP_WALL_S):.4f}"
+    )
+    _log(
+        f"{'section':<18} {'cpu_ms':>10} {'cuda_ms':>10} "
+        f"{'n_samples':>10} {'moves':>8}"
+    )
+    section_cuda_sum = 0.0
+    for name in PROFILE_SECTIONS:
+        cpu_list = _PROFILE_CPU_MS.get(name, [])
+        cuda_list = _PROFILE_CUDA_MS.get(name, [])
+        if not cpu_list and not cuda_list:
+            cpu_m = cuda_m = float("nan")
+            n = 0
+        else:
+            cpu_m = _median(cpu_list) if cpu_list else float("nan")
+            cuda_m = _median(cuda_list) if cuda_list else float("nan")
+            n = max(len(cpu_list), len(cuda_list))
+            if cuda_list and cuda_m == cuda_m:
+                section_cuda_sum += cuda_m
+        moves = int(_PROFILE_MOVE_COUNTS.get(name, 0))
+        _log(
+            f"{name:<18} {cpu_m:10.2f} {cuda_m:10.2f} {n:10d} {moves:8d}"
+        )
+    flush_med = (
+        _median([float(x) for x in _PROFILE_FLUSH_COUNTS])
+        if _PROFILE_FLUSH_COUNTS
+        else 0.0
+    )
+    _log(
+        f"[profile] flush_cuda calls/step median={flush_med:.1f} "
+        f"(samples={len(_PROFILE_FLUSH_COUNTS)})"
+    )
+    if _PROFILE_VRAM:
+        allocs = [a for a, _ in _PROFILE_VRAM]
+        reserved = [r for _, r in _PROFILE_VRAM]
+        _log(
+            f"[profile] VRAM alloc_gb median={_median(allocs):.2f} "
+            f"min={min(allocs):.2f} max={max(allocs):.2f}"
+        )
+        _log(
+            f"[profile] VRAM reserved_gb median={_median(reserved):.2f} "
+            f"min={min(reserved):.2f} max={max(reserved):.2f}"
+        )
+    step_ms = med_step * 1000.0
+    if step_ms > 0:
+        _log(
+            f"[profile] sum(median cuda_ms sections)={section_cuda_sum:.1f} "
+            f"vs median step_ms={step_ms:.1f} "
+            f"(ratio={section_cuda_sum / step_ms:.2f}; nested sections overlap OK)"
+        )
+    move_keys = ("park_inactive", "move_active", "force_to")
+    total_moves = sum(int(_PROFILE_MOVE_COUNTS.get(k, 0)) for k in move_keys)
+    _log(
+        "[profile] post-warmup True-move counts: "
+        + ", ".join(f"{k}={int(_PROFILE_MOVE_COUNTS.get(k, 0))}" for k in move_keys)
+        + f" (total={total_moves}; expect 0 after exclusive pin)"
+    )
+    _log("==== End Profile ====")
+    _log("")
+
+
+def _install_profile_probes() -> None:
+    """CUDA-event + counter hooks for residency / forward / loss / backward / opt."""
+    global _PROFILE_PROBES_INSTALLED, _PROFILE_RECORDING, _PROFILE_STEP_FLUSHES
+    if _PROFILE_PROBES_INSTALLED:
+        return
+    from extensions_built_in.diffusion_models.z_image_diffsynth.model import (
+        ZImageDiffSynthModel,
+    )
+    from extensions_built_in.sd_trainer.SDTrainer import SDTrainer
+
+    _reset_profile_buffers()
+    _PROFILE_RECORDING = False
+    _PROFILE_STEP_FLUSHES = 0
+
+    _orig_place = ZImageDiffSynthModel._place_training_dit
+    _orig_move_samp = ZImageDiffSynthModel._move_sampling_transformer
+    _orig_move_main = ZImageDiffSynthModel._move_main_network
+    _orig_flush = ZImageDiffSynthModel._flush_cuda
+    _orig_force = ZImageDiffSynthModel._force_network_to
+    _orig_gnp = ZImageDiffSynthModel.get_noise_prediction
+    _orig_calc_loss = SDTrainer.calculate_loss
+    _orig_hook = SDTrainer.hook_train_loop
+
+    def _place(self, device):
+        target = device if isinstance(device, torch.device) else torch.device(device)
+        section = "park_inactive" if target.type == "cpu" else "move_active"
+        with _profile_section(section):
+            moved = _orig_place(self, device)
+        if _PROFILE_RECORDING and moved:
+            _PROFILE_MOVE_COUNTS[section] += 1
+        return moved
+
+    def _move_samp(self, device):
+        target = device if isinstance(device, torch.device) else torch.device(device)
+        section = "park_inactive" if target.type == "cpu" else "move_active"
+        with _profile_section(section):
+            moved = _orig_move_samp(self, device)
+        if (
+            _PROFILE_RECORDING
+            and moved
+            and not getattr(self, "_sampling_in_batch_generate", False)
+        ):
+            _PROFILE_MOVE_COUNTS[section] += 1
+        return moved
+
+    def _move_main(self, device):
+        with _profile_section("move_active"):
+            return _orig_move_main(self, device)
+
+    def _flush(self):
+        global _PROFILE_STEP_FLUSHES
+        with _profile_section("flush_cuda"):
+            out = _orig_flush(self)
+        if _PROFILE_RECORDING:
+            _PROFILE_STEP_FLUSHES += 1
+            _PROFILE_MOVE_COUNTS["flush_cuda"] += 1
+        return out
+
+    def _force(self, net, device):
+        with _profile_section("force_to"):
+            out = _orig_force(self, net, device)
+        if _PROFILE_RECORDING:
+            _PROFILE_MOVE_COUNTS["force_to"] += 1
+        return out
+
+    def _gnp(self, *args, **kwargs):
+        with _profile_section("dit_forward"):
+            return _orig_gnp(self, *args, **kwargs)
+
+    def _calc_loss(self, *args, **kwargs):
+        with _profile_section("loss"):
+            return _orig_calc_loss(self, *args, **kwargs)
+
+    def _hook_train_loop(self, batch):
+        global _PROFILE_RECORDING, _PROFILE_STEP_FLUSHES
+        step = int(getattr(self, "step_num", 0) or 0)
+        if _PROFILE_ENABLED and step >= PROFILE_WARMUP_STEPS:
+            _PROFILE_RECORDING = True
+        else:
+            _PROFILE_RECORDING = False
+        _PROFILE_STEP_FLUSHES = 0
+        t0 = time.perf_counter()
+        accel = getattr(self, "accelerator", None)
+        orig_backward = getattr(accel, "backward", None) if accel is not None else None
+        opt = getattr(self, "optimizer", None)
+        orig_step = getattr(opt, "step", None) if opt is not None else None
+        if orig_backward is not None and _PROFILE_RECORDING:
+
+            def _backward(loss, *a, **kw):
+                with _profile_section("backward"):
+                    return orig_backward(loss, *a, **kw)
+
+            accel.backward = _backward  # type: ignore[method-assign]
+        if orig_step is not None and _PROFILE_RECORDING:
+
+            def _opt_step(*a, **kw):
+                with _profile_section("optimizer_step"):
+                    return orig_step(*a, **kw)
+
+            opt.step = _opt_step  # type: ignore[method-assign]
+        try:
+            return _orig_hook(self, batch)
+        finally:
+            if orig_backward is not None and accel is not None:
+                accel.backward = orig_backward  # type: ignore[method-assign]
+            if orig_step is not None and opt is not None:
+                opt.step = orig_step  # type: ignore[method-assign]
+            if _PROFILE_RECORDING:
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                wall = time.perf_counter() - t0
+                _PROFILE_STEP_WALL_S.append(wall)
+                _PROFILE_FLUSH_COUNTS.append(_PROFILE_STEP_FLUSHES)
+                if torch.cuda.is_available():
+                    alloc = torch.cuda.memory_allocated() / (1024**3)
+                    reserved = torch.cuda.memory_reserved() / (1024**3)
+                    _PROFILE_VRAM.append((float(alloc), float(reserved)))
+                    _log(
+                        f"[profile] step={step} wall_s={wall:.4f} "
+                        f"flush={_PROFILE_STEP_FLUSHES} "
+                        f"alloc_gb={alloc:.2f} reserved_gb={reserved:.2f}"
+                    )
+                else:
+                    _log(
+                        f"[profile] step={step} wall_s={wall:.4f} "
+                        f"flush={_PROFILE_STEP_FLUSHES}"
+                    )
+
+    ZImageDiffSynthModel._place_training_dit = _place  # type: ignore[method-assign]
+    ZImageDiffSynthModel._move_sampling_transformer = _move_samp  # type: ignore[method-assign]
+    ZImageDiffSynthModel._move_main_network = _move_main  # type: ignore[method-assign]
+    ZImageDiffSynthModel._flush_cuda = _flush  # type: ignore[method-assign]
+    ZImageDiffSynthModel._force_network_to = _force  # type: ignore[method-assign]
+    ZImageDiffSynthModel.get_noise_prediction = _gnp  # type: ignore[method-assign]
+    SDTrainer.calculate_loss = _calc_loss  # type: ignore[method-assign]
+    SDTrainer.hook_train_loop = _hook_train_loop  # type: ignore[method-assign]
+    _PROFILE_PROBES_INSTALLED = True
+    _log(
+        f"[profile] probes installed (warmup={PROFILE_WARMUP_STEPS}, "
+        f"measure≈{PROFILE_MEASURE_STEPS})"
+    )
 
 
 def _install_t_collector() -> None:
@@ -488,11 +802,26 @@ def _train_lora(
     *,
     batch_size: int = 1,
     turbo_teacher_weight: bool = False,
+    profile: bool = False,
+    production_overlay: bool = False,
 ) -> Path:
+    global _PROFILE_ENABLED, FORCE_COVERAGE_STEPS
     mode_tag = "turbo" if turbo_teacher_weight else "base"
     train_name = f"zimage_diffsynth_sim_turbo_prior_{mode_tag}_b{batch_size}"
     output_root = work_root / "output"
     output_root.mkdir(parents=True, exist_ok=True)
+
+    n_steps = PROFILE_TOTAL_STEPS if profile else TOTAL_STEPS
+    lora_rank = 128 if production_overlay else LINEAR_RANK
+    resolution = [1024] if production_overlay else [512]
+    train_dtype = "fp32" if production_overlay else "bf16"
+    loader = "diffsynth" if production_overlay else "diffusers"
+    # Production config.yaml leaves refiners enabled; sim default is off (VRAM).
+    disable_refiners = not production_overlay
+    disable_sampling = bool(profile)
+    skip_first_sample = True
+    save_every = max(n_steps, 1) if profile else 10
+    force_coverage = min(FORCE_COVERAGE_STEPS, max(0, n_steps - 1))
 
     config = {
         "job": "extension",
@@ -506,13 +835,13 @@ def _train_lora(
                     "sqlite_db_path": str(work_root / "aitk_db.db"),
                     "device": "cuda",
                     "trigger_word": None,
-                    "performance_log_every": 10,
+                    "performance_log_every": 10 if not profile else 5,
                     "network": {
                         "rank_dropout": 0.01,
                         "type": "lora",
                         "dtype": "fp32",
-                        "linear": LINEAR_RANK,
-                        "linear_alpha": LINEAR_RANK,
+                        "linear": lora_rank,
+                        "linear_alpha": lora_rank,
                         "conv": 0,
                         "conv_alpha": 0,
                         "lokr_full_rank": False,
@@ -529,7 +858,7 @@ def _train_lora(
                     },
                     "save": {
                         "dtype": "bf16",
-                        "save_every": 10,
+                        "save_every": save_every,
                         "max_step_saves_to_keep": 2,
                         "save_format": "safetensors",
                         "push_to_hub": False,
@@ -539,7 +868,7 @@ def _train_lora(
                         "noise_offset": 0.1,
                         "batch_size": batch_size,
                         "bypass_guidance_embedding": False,
-                        "steps": TOTAL_STEPS,
+                        "steps": n_steps,
                         "gradient_accumulation": 1,
                         "train_unet": True,
                         "train_text_encoder": False,
@@ -568,10 +897,10 @@ def _train_lora(
                         "unload_text_encoder": True,
                         "cache_text_embeddings": True,
                         "ema_config": {"use_ema": False, "ema_decay": 0.99},
-                        "skip_first_sample": True,
+                        "skip_first_sample": skip_first_sample,
                         "force_first_sample": False,
-                        "disable_sampling": False,
-                        "dtype": "bf16",
+                        "disable_sampling": disable_sampling,
+                        "dtype": train_dtype,
                         "diff_output_preservation": False,
                         "diff_output_preservation_multiplier": 1,
                         "diff_output_preservation_class": "person",
@@ -581,7 +910,11 @@ def _train_lora(
                         "blank_prompt_probability": 0.2,
                         "blank_prompt_preservation_multiplier": 0.5,
                     },
-                    "logging": {"log_every": 1, "use_ui_logger": True, "debug": True},
+                    "logging": {
+                        "log_every": 1,
+                        "use_ui_logger": True,
+                        "debug": not profile,
+                    },
                     "model": {
                         "debug_zimage_load": False,
                         "name_or_path": model_path,
@@ -597,12 +930,11 @@ def _train_lora(
                         "model_kwargs": {
                             "use_diffsynth_training_loop": False,
                             "use_dynamic_shifting": False,
-                            # Match load_model defaults / example YAML (refiners off).
                             # noise_refiner ~10GB + context_refiner ~4GB per DiT — fatal
-                            # on 16GB if anything briefly co-resides.
-                            "disable_noise_refiner": True,
-                            "disable_context_refiner": True,
-                            "loader": "diffusers",
+                            # on 16GB if anything briefly co-resides (sim default: off).
+                            "disable_noise_refiner": disable_refiners,
+                            "disable_context_refiner": disable_refiners,
+                            "loader": loader,
                         },
                         "layer_offloading": False,
                         "layer_offloading_text_encoder_percent": 1,
@@ -622,7 +954,7 @@ def _train_lora(
                             "cache_latents_to_disk": True,
                             "is_reg": False,
                             "network_weight": 1,
-                            "resolution": [512],
+                            "resolution": resolution,
                             "controls": [],
                             "shrink_video_to_frames": True,
                             "num_frames": 1,
@@ -634,9 +966,9 @@ def _train_lora(
                     "sample": {
                         "sample_noised": True,
                         "sampler": "flowmatch",
-                        "sample_every": 10,
-                        "width": 256,
-                        "height": 256,
+                        "sample_every": 10 if not profile else 10_000,
+                        "width": 256 if not production_overlay else 1024,
+                        "height": 256 if not production_overlay else 768,
                         "samples": [{"prompt": "dog"}],
                         "neg": "",
                         "seed": 42,
@@ -651,8 +983,16 @@ def _train_lora(
         },
     }
 
+    # Shorter force-coverage window when profiling with fewer steps.
+    _saved_force = FORCE_COVERAGE_STEPS
+    if profile:
+        FORCE_COVERAGE_STEPS = force_coverage
+
+    _PROFILE_ENABLED = bool(profile)
     _install_t_collector()
     _install_vram_probe()
+    if profile:
+        _install_profile_probes()
     init_lora_path = work_root / "_lora_init.safetensors"
     _install_lora_init_snapshot(init_lora_path)
     if torch.cuda.is_available():
@@ -660,10 +1000,18 @@ def _train_lora(
         torch.cuda.empty_cache()
     _log(
         f"[PHASE TRAIN] run_job: start "
-        f"(turbo_teacher_weight={bool(turbo_teacher_weight)})"
+        f"(turbo_teacher_weight={bool(turbo_teacher_weight)} "
+        f"profile={bool(profile)} production_overlay={bool(production_overlay)} "
+        f"steps={n_steps} rank={lora_rank} res={resolution} "
+        f"dtype={train_dtype} loader={loader} refiners_off={disable_refiners})"
     )
-    run_job(config)
+    try:
+        run_job(config)
+    finally:
+        FORCE_COVERAGE_STEPS = _saved_force
     _log("[PHASE TRAIN] run_job: done")
+    if profile:
+        _print_profile_table()
     peak_alloc = (
         int(torch.cuda.max_memory_allocated()) if torch.cuda.is_available() else 0
     )
@@ -673,7 +1021,14 @@ def _train_lora(
         else 0
     )
     slot_counts, frac_lt_300 = _print_t_histogram()
-    _assert_t_acceptance(slot_counts, frac_lt_300)
+    # Profile with fewer steps may miss full 8-slot coverage; keep VRAM/residency.
+    if not profile:
+        _assert_t_acceptance(slot_counts, frac_lt_300)
+    else:
+        _log(
+            "[profile] skipping full t-slot acceptance "
+            f"(force_coverage={force_coverage}, steps={n_steps})"
+        )
     _assert_vram_acceptance(
         peak_alloc, device_total, train_on_turbo=bool(turbo_teacher_weight)
     )
@@ -687,7 +1042,13 @@ def _train_lora(
     return lora_path
 
 
-def _assert_pass_artifacts(work_root: Path, batch_size: int, *, train_on_turbo: bool) -> None:
+def _assert_pass_artifacts(
+    work_root: Path,
+    batch_size: int,
+    *,
+    train_on_turbo: bool,
+    profile: bool = False,
+) -> None:
     mode_tag = "turbo" if train_on_turbo else "base"
     train_name = f"zimage_diffsynth_sim_turbo_prior_{mode_tag}_b{batch_size}"
     save_dir = work_root / "output" / train_name
@@ -697,6 +1058,12 @@ def _assert_pass_artifacts(work_root: Path, batch_size: int, *, train_on_turbo: 
     lora_path = max(candidates, key=lambda p: p.stat().st_mtime)
     if not lora_path.is_file():
         raise RuntimeError(f"LoRA checkpoint missing: {lora_path}")
+    if profile:
+        _log(
+            f"   [{mode_tag}] LoRA OK: {lora_path}; "
+            "sample PNGs skipped (--profile disables sampling)"
+        )
+        return
     samples_dir = save_dir / "samples"
     train_samples = [
         p
@@ -742,10 +1109,13 @@ def _run_single_pass(
     sampling_path: str,
     train_on_turbo: bool,
     batch_size: int = 1,
+    profile: bool = False,
+    production_overlay: bool = False,
 ) -> None:
     mode = "true" if train_on_turbo else "false"
     _log(
-        f"[pass] turbo_teacher_weight={mode} work={work_root}"
+        f"[pass] turbo_teacher_weight={mode} work={work_root} "
+        f"profile={profile} production_overlay={production_overlay}"
     )
     work_root.mkdir(parents=True, exist_ok=True)
     _train_lora(
@@ -755,8 +1125,12 @@ def _run_single_pass(
         sampling_path,
         batch_size=batch_size,
         turbo_teacher_weight=train_on_turbo,
+        profile=profile,
+        production_overlay=production_overlay,
     )
-    _assert_pass_artifacts(work_root, batch_size, train_on_turbo=train_on_turbo)
+    _assert_pass_artifacts(
+        work_root, batch_size, train_on_turbo=train_on_turbo, profile=profile
+    )
 
 
 def main() -> None:
@@ -766,6 +1140,8 @@ def main() -> None:
         train_on_turbo = pass_env in ("true", "1")
         work_root = Path(os.environ["SIM_TURBO_PRIOR_WORK"])
         dataset_dir = Path(os.environ["SIM_TURBO_PRIOR_DATASET"])
+        profile = _env_flag("SIM_TURBO_PRIOR_PROFILE")
+        production_overlay = _env_flag("SIM_TURBO_PRIOR_PRODUCTION")
         model_path, sampling_path = _resolve_paths()
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA not available; GPU required for this sim.")
@@ -775,14 +1151,20 @@ def main() -> None:
             model_path=model_path,
             sampling_path=sampling_path,
             train_on_turbo=train_on_turbo,
+            profile=profile,
+            production_overlay=production_overlay,
         )
         return
 
-    train_on_turbo = _parse_turbo_cli()
+    args = _parse_cli()
+    train_on_turbo = args.turbo == "true"
+    profile = bool(args.profile)
+    production_overlay = bool(args.production_overlay)
     mode = "true" if train_on_turbo else "false"
     _log(
         "Z-Image DiffSynth simulate_turbo_prior "
-        f"(timestep_type=turbo_prior; turbo={mode}) ..."
+        f"(timestep_type=turbo_prior; turbo={mode}; "
+        f"profile={profile}; production_overlay={production_overlay}) ..."
     )
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA not available; GPU required for this sim.")
@@ -822,6 +1204,10 @@ def main() -> None:
     child_env["SIM_TURBO_PRIOR_PASS"] = mode
     child_env["SIM_TURBO_PRIOR_WORK"] = str(work_root)
     child_env["SIM_TURBO_PRIOR_DATASET"] = str(dataset_dir)
+    if profile:
+        child_env["SIM_TURBO_PRIOR_PROFILE"] = "1"
+    if production_overlay:
+        child_env["SIM_TURBO_PRIOR_PRODUCTION"] = "1"
     # Avoid nested venv re-exec confusion; child already uses venv python.
     rc = subprocess.call(
         [sys.executable, "-m",

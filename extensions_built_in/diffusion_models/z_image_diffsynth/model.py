@@ -150,7 +150,7 @@ class ZImageDiffSynthModel(BaseModel):
 
         Returns True iff a real device change was needed (and performed).
         """
-        from toolkit.util.device import devices_equal
+        from toolkit.util.device import devices_equal, quantized_payload_device
 
         target = device if isinstance(device, torch.device) else torch.device(device)
         module = getattr(self, "_raw_dit", None) or self.model
@@ -159,6 +159,10 @@ class ZImageDiffSynthModel(BaseModel):
             return False
         base_p = self._first_frozen_base_param(module)
         need_move = base_p is None or not devices_equal(base_p.device, target)
+        if not need_move and base_p is not None:
+            payload = quantized_payload_device(base_p)
+            if payload is not None and not devices_equal(payload, target):
+                need_move = True
         if not need_move:
             self._assert_dit_on_device(target)
             return False
@@ -240,7 +244,7 @@ class ZImageDiffSynthModel(BaseModel):
 
         Returns True iff ``st.to`` was actually called (need_move).
         """
-        from toolkit.util.device import devices_equal
+        from toolkit.util.device import devices_equal, quantized_payload_device
 
         st = getattr(self, "_sampling_transformer", None)
         if st is None:
@@ -248,6 +252,10 @@ class ZImageDiffSynthModel(BaseModel):
         target = device if isinstance(device, torch.device) else torch.device(device)
         base_p = self._first_frozen_base_param(st)
         need_move = base_p is None or not devices_equal(base_p.device, target)
+        if not need_move and base_p is not None:
+            payload = quantized_payload_device(base_p)
+            if payload is not None and not devices_equal(payload, target):
+                need_move = True
         if not need_move:
             return False
         with memory_debug(self.print_and_status_update, "Move sampling transformer"):
@@ -269,6 +277,12 @@ class ZImageDiffSynthModel(BaseModel):
                     f"[zimage_diffsynth] sampling transformer still on {base_p.device} "
                     f"after move to {target}"
                 )
+            payload = quantized_payload_device(base_p) if base_p is not None else None
+            if payload is not None and not devices_equal(payload, target):
+                raise RuntimeError(
+                    f"[zimage_diffsynth] sampling transformer payload still on {payload} "
+                    f"after move to {target}"
+                )
         return True
 
     def _flush_cuda(self):
@@ -282,11 +296,16 @@ class ZImageDiffSynthModel(BaseModel):
         """Move a LoRA network via force_to, preserving trainable dtype."""
         if net is None or not hasattr(net, "force_to"):
             return
+        from toolkit.util.device import devices_equal
+
         net = unwrap_model(net)
+        target = device if isinstance(device, torch.device) else torch.device(device)
         p = next((p for p in net.parameters() if p.requires_grad), None)
+        if p is not None and devices_equal(p.device, target):
+            return
         dtype = p.dtype if p is not None else self.torch_dtype
         try:
-            net.force_to(device, dtype)
+            net.force_to(target, dtype)
         except Exception:
             pass
 
@@ -313,8 +332,9 @@ class ZImageDiffSynthModel(BaseModel):
         enabled = bool(enabled)
         self._train_on_turbo = enabled
         if enabled:
-            self._park_base_dit_and_lora()
-            self._flush_cuda()
+            parked = self._park_base_dit_and_lora()
+            if parked:
+                self._flush_cuda()
             self._move_sampling_transformer(self.device_torch)
             sampling_net = getattr(self, "_sampling_network", None)
             self._force_network_to(sampling_net, self.device_torch)
@@ -330,7 +350,7 @@ class ZImageDiffSynthModel(BaseModel):
                 self.network = sampling_net
             return
 
-        self._park_sampling_dit_and_lora()
+        parked = self._park_sampling_dit_and_lora()
         saved = getattr(self, "_saved_train_network", None)
         if saved is not None:
             sampling_net = getattr(self, "_sampling_network", None)
@@ -338,8 +358,39 @@ class ZImageDiffSynthModel(BaseModel):
                 self._force_network_to(sampling_net, "cpu")
             self.network = saved
             self._saved_train_network = None
-        self._flush_cuda()
+        if parked:
+            self._flush_cuda()
         self._move_main_network(self.device_torch)
+
+    def predict_noise(self, *args, **kwargs):
+        """Block BaseModel from remounting parked base DiT while training on Turbo.
+
+        ``BaseModel.predict_noise`` does ``if self.unet.device != device: unet.to(cuda)``.
+        With ``turbo_teacher_weight=true`` the base unet is intentionally on CPU, so that
+        remount undoes exclusive pin every step (~0.7s D2H + flush) and matches the
+        observed RAM↔VRAM sawtooth / low GPU util.
+        """
+        if not getattr(self, "_train_on_turbo", False):
+            return super().predict_noise(*args, **kwargs)
+        unet = self.unet
+        if unet is None:
+            return super().predict_noise(*args, **kwargs)
+        orig_to = unet.to
+
+        def _to_guard(*a, **kw):
+            from .compile_blocks import _resolve_target_device
+
+            dit = getattr(unet, "_inner_dit", None) or unet
+            target = _resolve_target_device(dit, *a, **kw)
+            if target is not None and torch.device(target).type == "cuda":
+                return unet
+            return orig_to(*a, **kw)
+
+        unet.to = _to_guard  # type: ignore[method-assign]
+        try:
+            return super().predict_noise(*args, **kwargs)
+        finally:
+            unet.to = orig_to  # type: ignore[method-assign]
 
     def set_device_state(self, state):
         """Presets move ``unet`` (base DiT) to CUDA and would co-reside with Turbo.
