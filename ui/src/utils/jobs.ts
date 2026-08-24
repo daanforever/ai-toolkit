@@ -102,6 +102,26 @@ export const getJobConfig = (job: Job) => {
   return JSON.parse(job.job_config) as JobConfig;
 };
 
+export const scaleJobLr = async (job: Job, factor: number): Promise<void> => {
+  const jobConfig = getJobConfig(job);
+  const currentLr = jobConfig.config.process[0].train.lr;
+  if (typeof currentLr !== 'number' || !Number.isFinite(currentLr)) {
+    throw new Error('Current LR is not a finite number');
+  }
+  const newLr = currentLr * factor;
+  if (!Number.isFinite(newLr) || newLr <= 0) {
+    throw new Error('Scaled LR must be a positive finite number');
+  }
+  jobConfig.config.process[0].train.lr = newLr;
+  await apiClient.post('/api/jobs', {
+    id: job.id,
+    name: job.name,
+    gpu_ids: job.gpu_ids,
+    job_config: jobConfig,
+  });
+  await apiClient.patch(`/api/jobs/${job.id}/runtime-config`, { lr: newLr });
+};
+
 export const getAvaliableJobActions = (job: Job) => {
   const jobConfig = getJobConfig(job);
   const isStopping = job.stop && job.status === 'running';

@@ -84,6 +84,7 @@ export default function JobPage({ params }: { params: { jobID: string } }) {
             job={job}
             onRefresh={refreshJob}
             hideView
+            showLrScale
             afterDelete={() => {
               redirect('/jobs');
             }}

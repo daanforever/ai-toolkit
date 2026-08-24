@@ -1,9 +1,12 @@
+'use client';
+
 import Link from 'next/link';
-import { Eye, Trash2, Pen, Play, Pause, Cog, X, RotateCcw, Eraser } from 'lucide-react';
+import { useState } from 'react';
+import { Eye, Trash2, Pen, Play, Pause, Cog, X, RotateCcw, Eraser, ChevronsUp, ChevronsDown } from 'lucide-react';
 import { Button } from '@headlessui/react';
 import { openConfirm } from '@/components/ConfirmModal';
 import { Job } from '@prisma/client';
-import { startJob, stopJob, deleteJob, getAvaliableJobActions, markJobAsStopped, resetJob, clearSamplesAndLossLog } from '@/utils/jobs';
+import { startJob, stopJob, deleteJob, getAvaliableJobActions, markJobAsStopped, resetJob, clearSamplesAndLossLog, scaleJobLr } from '@/utils/jobs';
 import { startQueue } from '@/utils/queue';
 import { Menu, MenuButton, MenuItem, MenuItems } from '@headlessui/react';
 
@@ -14,6 +17,7 @@ interface JobActionBarProps {
   hideView?: boolean;
   className?: string;
   autoStartQueue?: boolean;
+  showLrScale?: boolean;
 }
 
 export default function JobActionBar({
@@ -23,10 +27,25 @@ export default function JobActionBar({
   className,
   hideView,
   autoStartQueue = false,
+  showLrScale = false,
 }: JobActionBarProps) {
   const { canStart, canStop, canDelete, canEdit, canRemoveFromQueue, canReset, canClear } = getAvaliableJobActions(job);
+  const [lrScaleBusy, setLrScaleBusy] = useState(false);
 
   if (!afterDelete) afterDelete = onRefresh;
+
+  const handleScaleLr = async (factor: number) => {
+    if (lrScaleBusy || !canStop) return;
+    setLrScaleBusy(true);
+    try {
+      await scaleJobLr(job, factor);
+      if (onRefresh) onRefresh();
+    } catch (e) {
+      console.error('Error scaling job LR:', e);
+    } finally {
+      setLrScaleBusy(false);
+    }
+  };
 
   return (
     <div className={`${className}`}>
@@ -77,6 +96,26 @@ export default function JobActionBar({
         >
           <Pause />
         </Button>
+      )}
+      {showLrScale && canStop && (
+        <>
+          <Button
+            onClick={() => handleScaleLr(10)}
+            disabled={lrScaleBusy}
+            title="LR ×10"
+            className={`ml-2 opacity-100`}
+          >
+            <ChevronsUp />
+          </Button>
+          <Button
+            onClick={() => handleScaleLr(0.1)}
+            disabled={lrScaleBusy}
+            title="LR ÷10"
+            className={`ml-2 opacity-100`}
+          >
+            <ChevronsDown />
+          </Button>
+        </>
       )}
       {canClear && (
         <Button
