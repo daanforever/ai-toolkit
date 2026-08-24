@@ -280,6 +280,7 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
         sd = getattr(self, "sd", None)
         if sd is not None:
             sd.apply_turbo_teacher_mode(enabled)
+            self.network = sd.network
 
     def hook_before_train_loop(self):
         """
@@ -295,6 +296,7 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
             sd.apply_turbo_teacher_mode(
                 bool(getattr(self.train_config, "turbo_teacher_weight", False))
             )
+            self.network = sd.network
             sd.gradient_checkpointing = bool(
                 getattr(self.train_config, "gradient_checkpointing", True)
             )

@@ -1,16 +1,20 @@
 """
 Short GPU sim: LoRA train + sample with normative Turbo-t prior.
 
-Two sequential ``run_job`` passes (``turbo_teacher_weight`` false then true),
-isolated work dirs. Reuses ``temp/test_train/`` cache (prompt ``dog``).
+Single ``run_job`` pass driven by ``--turbo true|false`` (default ``true``).
+Reuses ``temp/test_train/`` cache (prompt ``dog``).
 Does not download or regenerate the dataset.
 
+Includes a LoRA-delta gate: saved weights must differ from an init snapshot
+taken after network apply (fails if max|Δ| and ‖Δ‖₂ are ~0).
+
 Run from repo root:
-  python -m extensions_built_in.diffusion_models.z_image_diffsynth.simulate_turbo_prior
+  python -m extensions_built_in.diffusion_models.z_image_diffsynth.simulate_turbo_prior --turbo true
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 import shutil
 import subprocess
@@ -78,6 +82,8 @@ FORCE_COVERAGE_STEPS = 16  # 2 full passes over the 8 Turbo centers
 FRAC_T_LT_300_MAX = 0.15
 # Hard gate: peak CUDA allocated must stay under this fraction of device total.
 PEAK_VRAM_FRAC_MAX = 0.85
+# Hard gate: LoRA must move vs init snapshot (both stats must clear eps).
+LORA_DELTA_EPS = 1e-8
 
 # Collected by monkeypatch during run_job (sim-only; debug logger skips turbo_prior).
 _COLLECTED_T: List[float] = []
@@ -86,10 +92,27 @@ _COLLECTED_JITTER: List[tuple] = []
 # (main_device_str, sampling_device_str) snapped during train get_noise_prediction.
 _TRAIN_RESIDENCY: List[tuple[str, str]] = []
 _PROBES_INSTALLED = False
+_LORA_INIT_PATH: Path | None = None
+_LORA_INIT_PROBE_INSTALLED = False
 
 
 def _log(msg: str) -> None:
     print(msg, flush=True)
+
+
+def _parse_turbo_cli(argv: list[str] | None = None) -> bool:
+    """Parent-only: ``--turbo true|false`` (default true). Reject other tokens."""
+    parser = argparse.ArgumentParser(
+        description="Z-Image DiffSynth turbo_prior GPU sim (single pass)."
+    )
+    parser.add_argument(
+        "--turbo",
+        choices=["true", "false"],
+        default="true",
+        help="turbo_teacher_weight for the single pass (default: true)",
+    )
+    args = parser.parse_args(argv)
+    return args.turbo == "true"
 
 
 def _effective_jitter(train_config, step_num: int) -> float:
@@ -107,7 +130,7 @@ def _install_t_collector() -> None:
     First ``FORCE_COVERAGE_STEPS`` calls emit Turbo centers round-robin with no
     jitter (nearest-center coverage + keeps frac t<300 low). Later steps use the
     real dsigma + Voronoi jitter path under annealed jitter.
-    Install once per process (two-pass main must not nest wrappers).
+    Install once per process (must not nest wrappers).
     """
     global _PROBES_INSTALLED
     _COLLECTED_T.clear()
@@ -214,6 +237,88 @@ def _install_vram_probe() -> None:
 
     ZImageDiffSynthModel.get_noise_prediction = _wrapped  # type: ignore[method-assign]
     _PROBES_INSTALLED = True
+
+
+def _install_lora_init_snapshot(init_path: Path) -> None:
+    """Dump LoRA via network.save_weights right after hook_before_train_loop.
+
+    Snapshot is after apply_to / share_parameters_with (hook runs later). Keys
+    match production checkpoints (same save_weights + convert path).
+    Install once per process.
+    """
+    global _LORA_INIT_PATH, _LORA_INIT_PROBE_INSTALLED
+    _LORA_INIT_PATH = init_path
+    if _LORA_INIT_PROBE_INSTALLED:
+        return
+    from extensions_built_in.diffusion_models.z_image_diffsynth.trainer import (
+        ZImageDiffSynthTrainer,
+    )
+
+    _orig = ZImageDiffSynthTrainer.hook_before_train_loop
+
+    def _wrapped(self, *args, **kwargs):
+        out = _orig(self, *args, **kwargs)
+        network = getattr(self, "network", None)
+        if network is None:
+            raise RuntimeError(
+                "Acceptance fail: no trainer.network after hook_before_train_loop "
+                "(cannot snapshot LoRA init)"
+            )
+        path = _LORA_INIT_PATH
+        if path is None:
+            raise RuntimeError("Acceptance fail: LoRA init snapshot path unset")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        network.save_weights(str(path), dtype=torch.bfloat16, metadata=None)
+        _log(f"[lora-delta] init snapshot saved: {path}")
+        return out
+
+    ZImageDiffSynthTrainer.hook_before_train_loop = _wrapped  # type: ignore[method-assign]
+    _LORA_INIT_PROBE_INSTALLED = True
+
+
+def _assert_lora_delta(init_path: Path, saved_path: Path) -> None:
+    """Fail if saved LoRA did not move vs init snapshot (no learning)."""
+    from safetensors.torch import load_file
+
+    if not init_path.is_file():
+        raise RuntimeError(
+            f"Acceptance fail: LoRA init snapshot missing: {init_path}"
+        )
+    if not saved_path.is_file():
+        raise RuntimeError(
+            f"Acceptance fail: LoRA checkpoint missing for delta: {saved_path}"
+        )
+    init_sd = load_file(str(init_path))
+    saved_sd = load_file(str(saved_path))
+    keys = [
+        k
+        for k in init_sd
+        if k in saved_sd
+        and torch.is_floating_point(init_sd[k])
+        and torch.is_floating_point(saved_sd[k])
+    ]
+    if not keys:
+        raise RuntimeError(
+            "Acceptance fail: no overlapping float LoRA keys for delta "
+            f"(init_keys={len(init_sd)}, saved_keys={len(saved_sd)})"
+        )
+    diffs: list[torch.Tensor] = []
+    max_abs = 0.0
+    for k in keys:
+        d = (saved_sd[k].float() - init_sd[k].float()).reshape(-1)
+        diffs.append(d)
+        max_abs = max(max_abs, float(d.abs().max().item()))
+    concat = torch.cat(diffs)
+    l2 = float(torch.linalg.vector_norm(concat).item())
+    _log(
+        f"[lora-delta] max_abs={max_abs:.6e} l2={l2:.6e} "
+        f"keys={len(keys)} eps={LORA_DELTA_EPS}"
+    )
+    if max_abs < LORA_DELTA_EPS and l2 < LORA_DELTA_EPS:
+        raise RuntimeError(
+            f"Acceptance fail: LoRA delta ~0 (no learning) "
+            f"max_abs={max_abs:.6e} l2={l2:.6e}"
+        )
 
 
 def _assert_vram_acceptance(
@@ -521,6 +626,8 @@ def _train_lora(
 
     _install_t_collector()
     _install_vram_probe()
+    init_lora_path = work_root / "_lora_init.safetensors"
+    _install_lora_init_snapshot(init_lora_path)
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
         torch.cuda.empty_cache()
@@ -548,7 +655,9 @@ def _train_lora(
     candidates = list(save_dir.glob("*.safetensors"))
     if not candidates:
         raise RuntimeError(f"No LoRA checkpoint found in {save_dir}")
-    return max(candidates, key=lambda p: p.stat().st_mtime)
+    lora_path = max(candidates, key=lambda p: p.stat().st_mtime)
+    _assert_lora_delta(init_lora_path, lora_path)
+    return lora_path
 
 
 def _assert_pass_artifacts(work_root: Path, batch_size: int, *, train_on_turbo: bool) -> None:
@@ -624,7 +733,7 @@ def _run_single_pass(
 
 
 def main() -> None:
-    # Child worker: one GPU pass then exit (frees CUDA before the next pass).
+    # Child worker: one GPU pass then exit (CUDA isolation via subprocess).
     pass_env = os.environ.get("SIM_TURBO_PRIOR_PASS", "").strip().lower()
     if pass_env in ("false", "true", "0", "1"):
         train_on_turbo = pass_env in ("true", "1")
@@ -642,9 +751,11 @@ def main() -> None:
         )
         return
 
+    train_on_turbo = _parse_turbo_cli()
+    mode = "true" if train_on_turbo else "false"
     _log(
         "Z-Image DiffSynth simulate_turbo_prior "
-        "(timestep_type=turbo_prior; two bool passes) ..."
+        f"(timestep_type=turbo_prior; turbo={mode}) ..."
     )
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA not available; GPU required for this sim.")
@@ -674,34 +785,29 @@ def main() -> None:
         "[sim] use_diffsynth_prompt_encoding omitted → true "
         "(turbo_prior DiffSynth encoding locked on)"
     )
-    _log("[sim] each pass runs in a fresh subprocess (CUDA isolation)")
-
-    for pass_idx, train_on_turbo in enumerate((False, True), start=1):
-        mode = "true" if train_on_turbo else "false"
-        work_root = base_work / f"pass_{pass_idx}_{'turbo' if train_on_turbo else 'base'}"
-        work_root.mkdir(parents=True, exist_ok=True)
-        _log(
-            f"{1 + pass_idx}) Pass {pass_idx}/2: turbo_teacher_weight={mode} "
-            f"(work={work_root}) ..."
+    work_root = base_work / ("turbo" if train_on_turbo else "base")
+    work_root.mkdir(parents=True, exist_ok=True)
+    _log(
+        f"2) Single pass: turbo_teacher_weight={mode} "
+        f"(work={work_root}; fresh subprocess for CUDA isolation) ..."
+    )
+    child_env = os.environ.copy()
+    child_env["SIM_TURBO_PRIOR_PASS"] = mode
+    child_env["SIM_TURBO_PRIOR_WORK"] = str(work_root)
+    child_env["SIM_TURBO_PRIOR_DATASET"] = str(dataset_dir)
+    # Avoid nested venv re-exec confusion; child already uses venv python.
+    rc = subprocess.call(
+        [sys.executable, "-m",
+         "extensions_built_in.diffusion_models.z_image_diffsynth.simulate_turbo_prior"],
+        cwd=_REPO_ROOT,
+        env=child_env,
+    )
+    if rc != 0:
+        raise RuntimeError(
+            f"Pass (turbo_teacher_weight={mode}) failed with exit code {rc}"
         )
-        child_env = os.environ.copy()
-        child_env["SIM_TURBO_PRIOR_PASS"] = mode
-        child_env["SIM_TURBO_PRIOR_WORK"] = str(work_root)
-        child_env["SIM_TURBO_PRIOR_DATASET"] = str(dataset_dir)
-        # Avoid nested venv re-exec confusion; child already uses venv python.
-        rc = subprocess.call(
-            [sys.executable, "-m",
-             "extensions_built_in.diffusion_models.z_image_diffsynth.simulate_turbo_prior"],
-            cwd=_REPO_ROOT,
-            env=child_env,
-        )
-        if rc != 0:
-            raise RuntimeError(
-                f"Pass {pass_idx}/2 (turbo_teacher_weight={mode}) failed "
-                f"with exit code {rc}"
-            )
 
-    _log("Done. ACCEPTANCE GREEN (both bool passes)")
+    _log("Done.")
 
 
 if __name__ == "__main__":

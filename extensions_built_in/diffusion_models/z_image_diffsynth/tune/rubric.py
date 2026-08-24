@@ -11,6 +11,7 @@ _DEFAULT_CLIP_MODEL = "ViT-B-32"
 _DEFAULT_CLIP_PRETRAINED = "laion2b_s34b_b79k"
 _DEFAULT_LPIPS_DEAD = 0.04
 _DEFAULT_LPIPS_BOOM = 0.45
+FLAT_UPDATE_EPS = 1e-8
 
 # Lazy CLIP / LPIPS singletons (CPU). Tests monkeypatch the _metric_* helpers.
 _clip_bundle: tuple[Any, Any, Any] | None = None  # model, preprocess, tokenizer
@@ -157,6 +158,19 @@ def health_from_tb(
                     reason=f"nan_inf:{tag}",
                     **base_kw,
                 )
+
+    # Post-warmup flat update (prefer update_rms; skip if missing/empty)
+    rms_tag = (
+        "train/update_rms"
+        if "train/update_rms" in tags
+        else ("train/grad_rms" if "train/grad_rms" in tags else None)
+    )
+    if rms_tag is not None:
+        post_rms = [
+            v for step, v in _scalar_series(ea, rms_tag) if step >= warmup_steps
+        ]
+        if post_rms and (sum(post_rms) / len(post_rms)) < FLAT_UPDATE_EPS:
+            return HealthResult(ok=False, reason="flat_update", **base_kw)
 
     # Post-warmup loss ratio (skip if no loss tag or no post-warmup points)
     if loss_tag is not None:

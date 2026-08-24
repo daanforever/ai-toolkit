@@ -130,7 +130,7 @@ CLIP Hugging Face id is roughly `laion/CLIP-ViT-B-32-laion2B-s34B-b79K`. If the 
 
 ## Visual / health rules (as implemented)
 
-**Health fail:** no TB events/tags; NaN/Inf in `loss/*` (or bare `loss`), `train/grad_rms`, `train/update_rms`; post-warmup last-20% loss mean > 8× first-20% (primary FM loss); last `train/instability_score` > `tune.instability_max` (default 1.0). Missing instability tag is not a fail. Empty post-warmup series: skip ratio.
+**Health fail:** no TB events/tags; NaN/Inf in `loss/*` (or bare `loss`), `train/grad_rms`, `train/update_rms`; post-warmup mean of `train/update_rms` (fallback `train/grad_rms`) < 1e-8 (`flat_update`); post-warmup last-20% loss mean > 8× first-20% (primary FM loss); last `train/instability_score` > `tune.instability_max` (default 1.0). Missing instability tag is not a fail. Empty post-warmup series: skip ratio.
 
 **Dead:** `LPIPS(S,M) < lpips_dead` (0.04) **and** `CLIP-I(S,R) ≤ CLIP-I(M,R) + 0.01`.  
 **Exploded:** `LPIPS(S,M) > lpips_boom` (0.45) **and** `CLIP-I(S,R) < CLIP-I(M,R)`.  

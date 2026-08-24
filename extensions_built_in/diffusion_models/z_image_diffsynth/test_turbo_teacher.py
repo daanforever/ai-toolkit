@@ -204,15 +204,18 @@ def test_apply_runtime_turbo_teacher_mode_calls_sd(monkeypatch):
     trainer.sd = SimpleNamespace(
         _sampling_transformer=object(),
         apply_turbo_teacher_mode=MagicMock(),
+        network=object(),
     )
 
     ZImageDiffSynthTrainer.apply_runtime_turbo_teacher_mode(trainer, True)
     trainer.sd.apply_turbo_teacher_mode.assert_called_with(True)
     assert trainer.train_config.turbo_teacher_weight is True
+    assert trainer.network is trainer.sd.network
 
     ZImageDiffSynthTrainer.apply_runtime_turbo_teacher_mode(trainer, False)
     trainer.sd.apply_turbo_teacher_mode.assert_called_with(False)
     assert trainer.train_config.turbo_teacher_weight is False
+    assert trainer.network is trainer.sd.network
 
 
 def test_apply_runtime_turbo_teacher_weight_calls_mode(monkeypatch):
@@ -234,6 +237,7 @@ def test_apply_runtime_turbo_teacher_weight_calls_mode(monkeypatch):
     trainer.sd = SimpleNamespace(
         _sampling_transformer=object(),
         apply_turbo_teacher_mode=MagicMock(),
+        network=object(),
     )
     monkeypatch.setattr(
         trainer, "get_runtime_turbo_teacher_weight", lambda: True
@@ -243,6 +247,7 @@ def test_apply_runtime_turbo_teacher_weight_calls_mode(monkeypatch):
     trainer.sd.apply_turbo_teacher_mode.assert_called_with(True)
     assert trainer.train_config.turbo_teacher_weight is True
     assert trainer._last_applied_runtime_turbo_teacher_weight is True
+    assert trainer.network is trainer.sd.network
 
 
 # --- Mode false: FM-only, no teacher MSE path ---
@@ -654,3 +659,144 @@ def test_apply_turbo_teacher_mode_residency_order(monkeypatch):
     )
     move_main_idx = next(i for i, c in enumerate(false_order) if c[0] == "move_main")
     assert samp_cpu_idx < flush_before_main < move_main_idx
+
+
+# --- Turbo LoRA is_active desync (P1 red test; passes after P2 trainer.network sync) ---
+
+
+def _tiny_shared_lora_pair():
+    """Two tiny UNets + LoRASpecialNetworks; sampling shares params with base (CPU)."""
+    from toolkit.lora_special import LoRASpecialNetwork
+
+    class DummyTextEncoder(nn.Module):
+        def __init__(self):
+            super().__init__()
+
+    class LoRACompatibleLinear(nn.Linear):
+        pass
+
+    class UNet2DConditionModel(nn.Module):  # type: ignore[override]
+        def __init__(self):
+            super().__init__()
+            self.block = nn.Module()
+            self.block.linear = LoRACompatibleLinear(4, 4)
+
+        def forward(self, x):
+            return self.block.linear(x)
+
+    text_enc = DummyTextEncoder()
+    mod_a = UNet2DConditionModel()
+    mod_b = UNet2DConditionModel()
+    common = dict(
+        text_encoder=text_enc,
+        train_text_encoder=False,
+        train_unet=True,
+        lora_dim=2,
+        alpha=1.0,
+        target_lin_modules=LoRASpecialNetwork.UNET_TARGET_REPLACE_MODULE,
+        target_conv_modules=LoRASpecialNetwork.UNET_TARGET_REPLACE_MODULE_CONV2D_3X3,
+    )
+    base_net = LoRASpecialNetwork(unet=mod_a, **common)
+    sampling_net = LoRASpecialNetwork(unet=mod_b, **common)
+    assert base_net.unet_loras, "expected base unet LoRA modules"
+    assert sampling_net.unet_loras, "expected sampling unet LoRA modules"
+    sampling_net.share_parameters_with(base_net)
+    sampling_net._update_torch_multiplier()
+    base_net._update_torch_multiplier()
+    base_net.apply_to(text_enc, mod_a, False, True)
+    sampling_net.apply_to(text_enc, mod_b, False, True)
+    return mod_a, mod_b, base_net, sampling_net
+
+
+def _stub_sd_for_turbo_lora(mod_b, base_net, sampling_net):
+    """Real apply_turbo_teacher_mode on __new__ instance; residency moves are no-ops."""
+    from extensions_built_in.diffusion_models.z_image_diffsynth.model import (
+        ZImageDiffSynthModel,
+    )
+
+    sd = ZImageDiffSynthModel.__new__(ZImageDiffSynthModel)
+    sd.device_torch = torch.device("cpu")
+    sd.torch_dtype = torch.float32
+    sd._train_on_turbo = False
+    sd._saved_train_network = None
+    sd._raw_dit = object()
+    sd.model = None
+    sd.gradient_checkpointing = False
+    sd.network = base_net
+    sd._sampling_network = sampling_net
+    sd._sampling_transformer = mod_b
+    sd._place_training_dit = lambda device: None
+    sd._move_sampling_transformer = lambda device: None
+    sd._move_main_network = lambda device: None
+    sd._flush_cuda = lambda: None
+    sd._force_network_to = lambda net, device: None
+    return sd
+
+
+def test_turbo_lora_is_active_desync_with_base_context():
+    """with base_net: sampling hooks stay inactive → shared LoRA .grad is None."""
+    _mod_a, mod_b, base_net, sampling_net = _tiny_shared_lora_pair()
+    x = torch.randn(1, 4)
+    with base_net:
+        assert base_net.is_active
+        assert not sampling_net.is_active
+        loss = mod_b(x).sum()
+        loss.backward()
+    for p in sampling_net.parameters():
+        if p.requires_grad:
+            assert p.grad is None
+
+
+def test_trainer_network_not_synced_after_turbo_teacher_mode(monkeypatch):
+    """
+    After apply_turbo_teacher_mode, trainer.network must track sd.network (sampling LoRA)
+    so ``with self.network`` activates Turbo hooks and LoRA grads/SGD step succeed.
+    """
+    from extensions_built_in.diffusion_models.z_image_diffsynth.trainer import (
+        ZImageDiffSynthTrainer,
+    )
+    from extensions_built_in.sd_trainer.DiffusionTrainer import DiffusionTrainer
+    from extensions_built_in.sd_trainer.SDTrainer import SDTrainer
+
+    _mod_a, mod_b, base_net, sampling_net = _tiny_shared_lora_pair()
+    sd = _stub_sd_for_turbo_lora(mod_b, base_net, sampling_net)
+
+    monkeypatch.setattr(
+        "extensions_built_in.diffusion_models.z_image_diffsynth.model.unwrap_model",
+        lambda x: x,
+    )
+    monkeypatch.setattr(SDTrainer, "hook_before_train_loop", lambda self: None)
+    monkeypatch.setattr(DiffusionTrainer, "hook_before_train_loop", lambda self: None)
+
+    _patch_diffusion_trainer_init(
+        monkeypatch,
+        turbo_teacher_weight=True,
+        sampling_name_or_path="/tmp/turbo",
+    )
+    trainer = ZImageDiffSynthTrainer(0, None, _base_cfg())
+    trainer.is_ui_trainer = False
+    trainer.network = base_net
+    trainer.sd = sd
+
+    # Do NOT assign trainer.network = sd.network here (that is P2).
+    trainer.hook_before_train_loop()
+    assert trainer.sd.network is sampling_net
+    assert trainer.network is trainer.sd.network
+
+    trainer.apply_runtime_turbo_teacher_mode(True)
+    assert trainer.network is trainer.sd.network
+
+    shared = [p for p in sampling_net.parameters() if p.requires_grad]
+    assert shared
+    for p in shared:
+        if p.grad is not None:
+            p.grad = None
+    before = [p.detach().clone() for p in shared]
+    opt = torch.optim.SGD(shared, lr=1.0)
+    x = torch.randn(1, 4)
+    with trainer.network:
+        loss = mod_b(x).sum()
+        loss.backward()
+    assert all(p.grad is not None for p in shared)
+    opt.step()
+    assert any(not torch.equal(p, b) for p, b in zip(shared, before))
