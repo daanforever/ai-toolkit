@@ -65,7 +65,7 @@ Default `use_dynamic_shifting: false` keeps current behaviour: DiffSynth static 
 
 ### Example: Turbo-t prior (`timestep_type: turbo_prior`)
 
-Train-time `t` is sampled from the official 8-NFE Turbo grid (static `shift=3`) with Voronoi jitter, via `TimestepSampler` (toolkit loop). **Train on Z-Image** (`name_or_path`); **sample on Z-Image-Turbo** (`sampling_name_or_path`). Normative Turbo LoRA also sets `train.turbo_teacher_weight: 0.25` (LoRA↔Turbo velocity MSE regularizer; not Decoupled DMD) — see `README.turbo.md`. Full recipe: `README.turbo.md` and `config/examples/train_lora_zimage_diffsynth_turbo_prior.yaml`.
+Train-time `t` is sampled from the official 8-NFE Turbo grid (static `shift=3`) with Voronoi jitter, via `TimestepSampler` (toolkit loop). **Train on Z-Image** (`name_or_path`); **sample on Z-Image-Turbo** (`sampling_name_or_path`). Normative Turbo LoRA also sets `train.turbo_teacher_weight: 0.25` (LoRA↔Turbo velocity MSE regularizer; not Decoupled DMD; exclusive DiT residency so both are not on GPU at once) — see `README.turbo.md`. Full recipe: `README.turbo.md` and `config/examples/train_lora_zimage_diffsynth_turbo_prior.yaml`.
 
 **Raise contract** (hard fail, not warn/coerce):
 

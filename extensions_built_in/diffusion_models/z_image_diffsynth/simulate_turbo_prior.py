@@ -74,11 +74,17 @@ TURBO_PRIOR_STEPS = 8
 FORCE_COVERAGE_STEPS = 16  # 2 full passes over the 8 Turbo centers
 # Hard gate: frac of collected t with t < 300 must be strictly below this.
 FRAC_T_LT_300_MAX = 0.15
+# Hard gate: peak CUDA allocated must stay under this fraction of device total.
+PEAK_VRAM_FRAC_MAX = 0.85
 
 # Collected by monkeypatch during run_job (sim-only; debug logger skips turbo_prior).
 _COLLECTED_T: List[float] = []
 # (step_num, effective_jitter) per _sample_turbo_prior call — anneal check.
 _COLLECTED_JITTER: List[tuple] = []
+# VRAM / residency probe during get_turbo_teacher_prediction.
+_TEACHER_CALLS = 0
+# (main_device_str, sampling_device_str) snapped when sampling lands on CUDA.
+_TEACHER_RESIDENCY: List[tuple[str, str]] = []
 
 
 def _log(msg: str) -> None:
@@ -126,6 +132,110 @@ def _install_t_collector() -> None:
         return t
 
     TimestepSampler._sample_turbo_prior = _wrapped  # type: ignore[method-assign]
+
+
+def _weight_device(module) -> torch.device | None:
+    """Device of frozen base weights (quantized payload preferred)."""
+    if module is None:
+        return None
+    from extensions_built_in.diffusion_models.z_image_diffsynth.model import (
+        ZImageDiffSynthModel,
+    )
+    from toolkit.util.device import quantized_payload_device
+
+    p = ZImageDiffSynthModel._first_frozen_base_param(module)
+    if p is None:
+        try:
+            p = next(module.parameters())
+        except StopIteration:
+            return None
+    payload = quantized_payload_device(p)
+    return payload if payload is not None else p.device
+
+
+def _install_vram_probe() -> None:
+    """Snap main vs sampling devices when teacher moves sampling onto CUDA."""
+    global _TEACHER_CALLS
+    from extensions_built_in.diffusion_models.z_image_diffsynth.model import (
+        ZImageDiffSynthModel,
+    )
+
+    _TEACHER_CALLS = 0
+    _TEACHER_RESIDENCY.clear()
+    _orig = ZImageDiffSynthModel.get_turbo_teacher_prediction
+
+    def _wrapped(self, *args, **kwargs):
+        global _TEACHER_CALLS
+        orig_move = self._move_sampling_transformer
+
+        def _move_and_snap(device):
+            orig_move(device)
+            target = device if isinstance(device, torch.device) else torch.device(device)
+            if target.type != "cuda":
+                return
+            main_mod = getattr(self, "_raw_dit", None) or getattr(self, "model", None)
+            st = getattr(self, "_sampling_transformer", None)
+            samp_mod = st
+            if st is not None:
+                inner = getattr(st, "_inner_dit", None)
+                if inner is not None:
+                    samp_mod = inner
+            main_dev = _weight_device(main_mod)
+            samp_dev = _weight_device(samp_mod)
+            _TEACHER_RESIDENCY.append(
+                (
+                    str(main_dev) if main_dev is not None else "None",
+                    str(samp_dev) if samp_dev is not None else "None",
+                )
+            )
+
+        self._move_sampling_transformer = _move_and_snap  # type: ignore[method-assign]
+        try:
+            out = _orig(self, *args, **kwargs)
+            _TEACHER_CALLS += 1
+            return out
+        finally:
+            self._move_sampling_transformer = orig_move  # type: ignore[method-assign]
+
+    ZImageDiffSynthModel.get_turbo_teacher_prediction = _wrapped  # type: ignore[method-assign]
+
+
+def _assert_vram_acceptance(peak_alloc: int, device_total: int) -> None:
+    """Hard GREEN asserts on teacher residency + peak VRAM fraction."""
+    if _TEACHER_CALLS < 1:
+        raise RuntimeError(
+            "Acceptance fail: teacher_calls=0 (turbo_teacher_weight not exercised)"
+        )
+    co_resident = False
+    for main_s, samp_s in _TEACHER_RESIDENCY:
+        main_cuda = main_s.startswith("cuda")
+        samp_cuda = samp_s.startswith("cuda")
+        if main_cuda and samp_cuda:
+            co_resident = True
+            break
+    _log(
+        f"[vram] teacher_calls={_TEACHER_CALLS} residency_snaps={len(_TEACHER_RESIDENCY)} "
+        f"samples={_TEACHER_RESIDENCY[:3]}{'...' if len(_TEACHER_RESIDENCY) > 3 else ''}"
+    )
+    if co_resident:
+        raise RuntimeError(
+            "Acceptance fail: teacher co-resident main+sampling DiT on CUDA"
+        )
+    if device_total <= 0:
+        raise RuntimeError("Acceptance fail: CUDA device total memory unknown")
+    frac = float(peak_alloc) / float(device_total)
+    peak_gb = peak_alloc / (1024**3)
+    total_gb = device_total / (1024**3)
+    _log(
+        f"[vram] peak_alloc={peak_gb:.2f} GiB / total={total_gb:.2f} GiB "
+        f"(frac={frac:.3f}, max={PEAK_VRAM_FRAC_MAX})"
+    )
+    if frac >= PEAK_VRAM_FRAC_MAX:
+        raise RuntimeError(
+            f"Acceptance fail: CUDA peak {peak_gb:.2f} GiB ≥ "
+            f"{PEAK_VRAM_FRAC_MAX:.0%} of {total_gb:.2f} GiB"
+        )
+    _log("[vram] co-residency OK (main off CUDA while sampling on during teacher)")
 
 
 def _print_t_histogram(n_steps: int = TURBO_PRIOR_STEPS) -> tuple[Counter, float]:
@@ -362,11 +472,24 @@ def _train_lora(
     }
 
     _install_t_collector()
+    _install_vram_probe()
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+        torch.cuda.empty_cache()
     _log("[PHASE TRAIN] run_job: start")
     run_job(config)
     _log("[PHASE TRAIN] run_job: done")
+    peak_alloc = (
+        int(torch.cuda.max_memory_allocated()) if torch.cuda.is_available() else 0
+    )
+    device_total = (
+        int(torch.cuda.get_device_properties(0).total_memory)
+        if torch.cuda.is_available()
+        else 0
+    )
     slot_counts, frac_lt_300 = _print_t_histogram()
     _assert_t_acceptance(slot_counts, frac_lt_300)
+    _assert_vram_acceptance(peak_alloc, device_total)
 
     save_dir = output_root / train_name
     candidates = list(save_dir.glob("*.safetensors"))

@@ -146,6 +146,7 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
         # Set in _aggregate_flow_matching_mse_loss when DiffSynth weighting is already applied.
         self._skip_post_timestep_weighting_once = False
         self._turbo_teacher_embeds = None
+        self._turbo_teacher_pred = None
 
         # Always train Z-Image in flow-matching mode with 1000 train timesteps.
         # We let ZImageDiffSynthModel.get_train_scheduler() provide the actual
@@ -374,8 +375,29 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
         **kwargs,
     ):
         w = float(getattr(self.train_config, "turbo_teacher_weight", 0) or 0)
-        if is_primary_pred and w > 0 and conditional_embeds is not None:
-            self._turbo_teacher_embeds = conditional_embeds
+        # Teacher-first (before student graph): exclusive DiT residency inside helper.
+        if is_primary_pred and w > 0:
+            embeds = conditional_embeds
+            if embeds is None and batch is not None:
+                embeds = getattr(batch, "prompt_embeds", None)
+            if embeds is None:
+                raise ValueError(
+                    "turbo_teacher_weight>0 requires text embeddings for the Turbo teacher "
+                    "(primary predict_noise embeds or batch.prompt_embeds)."
+                )
+            self._turbo_teacher_embeds = embeds
+            sd = self.sd
+            if getattr(sd, "_sampling_transformer", None) is None:
+                raise ValueError(
+                    "turbo_teacher_weight>0 requires a loaded sampling transformer "
+                    "(set model.sampling_name_or_path to Z-Image-Turbo)."
+                )
+            self._turbo_teacher_pred = sd.get_turbo_teacher_prediction(
+                noisy_latents.detach(),
+                timesteps,
+                embeds,
+                batch=batch,
+            )
         return super().predict_noise(
             noisy_latents=noisy_latents,
             timesteps=timesteps,
@@ -445,28 +467,17 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
         if w <= 0:
             return loss_fm
 
-        embeds = getattr(self, "_turbo_teacher_embeds", None)
-        if embeds is None:
-            embeds = getattr(batch, "prompt_embeds", None)
-        if embeds is None:
+        turbo_pred = getattr(self, "_turbo_teacher_pred", None)
+        self._turbo_teacher_pred = None
+        if turbo_pred is None:
             raise ValueError(
-                "turbo_teacher_weight>0 requires text embeddings for the Turbo teacher "
-                "(primary predict_noise embeds or batch.prompt_embeds)."
+                "turbo_teacher_weight>0 requires a precomputed Turbo teacher pred "
+                "from primary predict_noise (teacher-first path)."
             )
-
-        sd = self.sd
-        if getattr(sd, "_sampling_transformer", None) is None:
-            raise ValueError(
-                "turbo_teacher_weight>0 requires a loaded sampling transformer "
-                "(set model.sampling_name_or_path to Z-Image-Turbo)."
-            )
-
-        turbo_pred = sd.get_turbo_teacher_prediction(
-            noisy_latents.detach(),
-            timesteps,
-            embeds,
-            batch=batch,
-        )
+        # Match student device/dtype for MSE (teacher ran under exclusive swap).
+        if isinstance(turbo_pred, torch.Tensor) and isinstance(noise_pred, torch.Tensor):
+            if turbo_pred.device != noise_pred.device or turbo_pred.dtype != noise_pred.dtype:
+                turbo_pred = turbo_pred.to(device=noise_pred.device, dtype=noise_pred.dtype)
         l_turbo = self._turbo_teacher_mse(
             noise_pred, turbo_pred, mask_multiplier, noise_pred
         )

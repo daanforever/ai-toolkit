@@ -84,9 +84,11 @@ L_turbo = MSE(student v_base+LoRA, teacher v_Turbo)   # MSE only, not cosine
 | --- | --- |
 | Teacher | Frozen `_sampling_transformer` (Z-Image-Turbo); `no_grad`; no train LoRA on teacher |
 | `w` | `train.turbo_teacher_weight` (TrainConfig default `0`; normative recipe `0.25`) |
-| Extra VRAM | Second DiT forward per step; sampling DiT may offload via `_move_sampling_transformer` |
+| VRAM | **Exclusive residency**: main DiT+LoRA off CUDA → Turbo teacher forward → restore main, then student forward. Never co-reside both DiTs on GPU (same spirit as sample / TE recache). Extra cost is PCIe moves + a second forward, not dual DiT weights. |
 
 This is **not** Decoupled DMD / DMDR. Do not omit `turbo_teacher_weight: 0.25` for the normative Turbo LoRA recipe (default `0` only disables the term for ablations / non-Turbo jobs).
+
+**Sim gate** (`simulate_turbo_prior`): hard-fails (no GREEN) if teacher ever sees main+sampling both on CUDA, if CUDA peak ≥ 85% of device total, or if the teacher path was never exercised.
 
 **Grid (static shift 3, 8 steps):** train-time centers are about
 

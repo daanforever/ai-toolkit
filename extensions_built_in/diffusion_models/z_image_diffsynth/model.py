@@ -559,6 +559,26 @@ class ZImageDiffSynthModel(BaseModel):
         )
         return noise_pred
 
+    def _offload_main_for_turbo_teacher(self) -> None:
+        """Park training DiT + LoRA on CPU (TE-recache pattern). ``_move_main_network`` no-ops CPU."""
+        self._place_training_dit("cpu")
+        net = getattr(self, "network", None)
+        if net is not None and hasattr(net, "force_to"):
+            net = unwrap_model(net)
+            p = next((p for p in net.parameters() if p.requires_grad), None)
+            dtype = p.dtype if p is not None else self.torch_dtype
+            try:
+                net.force_to("cpu", dtype)
+            except Exception:
+                pass
+        self._flush_cuda()
+
+    def _restore_main_after_turbo_teacher(self) -> None:
+        """Restore training DiT + LoRA to train device; keep sampling on CPU."""
+        self._move_sampling_transformer("cpu")
+        self._move_main_network(self.device_torch)
+        self._flush_cuda()
+
     def get_turbo_teacher_prediction(
         self,
         latent_model_input: torch.Tensor,
@@ -571,7 +591,8 @@ class ZImageDiffSynthModel(BaseModel):
         Frozen Z-Image-Turbo velocity pred on ``_sampling_transformer`` (no train LoRA).
 
         I/O matches ``get_noise_prediction`` (Diffusers list/CFHW + negate, or DiffSynth
-        ``run_forward``). Moves sampling DiT to device for the forward, then offloads.
+        ``run_forward``). Exclusive residency: main+LoRA off CUDA, sampling on, forward,
+        then sampling off and main restored (same spirit as sample / TE recache).
         """
         st = getattr(self, "_sampling_transformer", None)
         if st is None:
@@ -661,6 +682,8 @@ class ZImageDiffSynthModel(BaseModel):
             target_device = self.device_torch
 
         try:
+            # Exclusive: never co-reside main DiT and Turbo on CUDA.
+            self._offload_main_for_turbo_teacher()
             self._move_sampling_transformer(target_device)
             with torch.no_grad():
                 if getattr(self, "_sampling_is_diffusers", False):
@@ -680,10 +703,22 @@ class ZImageDiffSynthModel(BaseModel):
                             for p in text_embeds
                         ]
 
+                    if (
+                        isinstance(latent_model_input, torch.Tensor)
+                        and isinstance(target_device, torch.device)
+                        and latent_model_input.device != target_device
+                    ):
+                        latent_model_input = latent_model_input.to(target_device)
+                    if isinstance(timestep, torch.Tensor) and isinstance(
+                        target_device, torch.device
+                    ):
+                        timestep = timestep.to(target_device)
+
                     latent_list = list(latent_model_input.unsqueeze(2).unbind(dim=0))
                     timestep_model_input = (1000 - timestep) / 1000
                     use_autocast = (
-                        latent_model_input.device.type == "cuda"
+                        isinstance(target_device, torch.device)
+                        and target_device.type == "cuda"
                         and model_dtype in (torch.float16, torch.bfloat16)
                     )
                     from .spatial_attention import spatial_attention_context
@@ -705,6 +740,16 @@ class ZImageDiffSynthModel(BaseModel):
                     if noise_pred.dtype != train_dtype:
                         noise_pred = noise_pred.to(train_dtype)
                 else:
+                    if (
+                        isinstance(latent_model_input, torch.Tensor)
+                        and isinstance(target_device, torch.device)
+                        and latent_model_input.device != target_device
+                    ):
+                        latent_model_input = latent_model_input.to(target_device)
+                    if isinstance(timestep, torch.Tensor) and isinstance(
+                        target_device, torch.device
+                    ):
+                        timestep = timestep.to(target_device)
                     noise_pred = forward_mod.run_forward(
                         dit,
                         latent_model_input,
@@ -717,9 +762,7 @@ class ZImageDiffSynthModel(BaseModel):
                     )
                 return noise_pred.detach()
         finally:
-            self._move_sampling_transformer("cpu")
-            if getattr(self.model_config, "low_vram", False):
-                self._flush_cuda()
+            self._restore_main_after_turbo_teacher()
 
     def get_prompt_embeds(self, prompt: str) -> PromptEmbeds:
         te = self.text_encoder[0]
