@@ -203,7 +203,20 @@ def _ensure_cuda_params(proc) -> None:
     import torch
 
     sd = getattr(proc, "sd", None)
-    dit = getattr(sd, "_raw_dit", None) if sd is not None else None
+    # turbo_teacher_weight parks base DiT on CPU; gate the active train DiT.
+    dit = None
+    if sd is not None and getattr(sd, "_train_on_turbo", False):
+        try:
+            dit, _ = sd._dit_for_train_forward()
+        except Exception:
+            dit = None
+        if dit is None:
+            st = getattr(sd, "_sampling_transformer", None)
+            dit = getattr(st, "_inner_dit", None) if st is not None else None
+            if dit is None:
+                dit = st
+    if dit is None:
+        dit = getattr(sd, "_raw_dit", None) if sd is not None else None
     unet = getattr(sd, "unet", None) if sd is not None else None
     module = dit if dit is not None else unet
     if module is None:
