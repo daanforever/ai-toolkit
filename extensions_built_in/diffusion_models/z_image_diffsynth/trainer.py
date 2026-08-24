@@ -242,6 +242,9 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
         if sd is not None:
             dev = self.device_torch
             sd._move_main_network(dev)
+            sd.gradient_checkpointing = bool(
+                getattr(self.train_config, "gradient_checkpointing", True)
+            )
             if getattr(self, "_compile_dit_blocks", False) and hasattr(
                 sd, "compile_dit_blocks"
             ):

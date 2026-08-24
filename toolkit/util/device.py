@@ -29,6 +29,17 @@ def _is_quantized_param(param: torch.Tensor) -> bool:
     return False
 
 
+def quantized_payload_device(param: torch.Tensor) -> Optional[torch.device]:
+    """Device of torchao ``qdata`` / quanto ``_data``, else None."""
+    qdata = getattr(param, "qdata", None)
+    if qdata is not None:
+        return torch.device(qdata.device)
+    data = getattr(param, "_data", None)
+    if data is not None:
+        return torch.device(data.device)
+    return None
+
+
 def safe_module_to_device(
     module: torch.nn.Module,
     device: torch.device,
@@ -46,6 +57,9 @@ def safe_module_to_device(
 
     for name, param in list(module.named_parameters(recurse=False)):
         need_device = not devices_equal(param.device, device)
+        payload = quantized_payload_device(param)
+        if payload is not None and not devices_equal(payload, device):
+            need_device = True
         need_dtype = dtype is not None and param.dtype != dtype
         if not need_device and not need_dtype:
             continue

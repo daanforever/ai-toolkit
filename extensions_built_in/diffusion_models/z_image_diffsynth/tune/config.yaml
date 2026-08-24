@@ -154,3 +154,37 @@ config:
         sample_steps: 8
         num_frames: 1
         fps: 1
+      tune:
+        step_timeout_s: 2.0
+        load_budget_s: 180
+        sample_budget_s: 60
+        lrs: [1.0e-5, 3.0e-5, 1.0e-4, 3.0e-4, 1.0e-3]
+        stages: [a, b, c]
+        promote_top_k: {a: 3, b: 2}
+        clip_model: ViT-B-32
+        clip_pretrained: laion2b_s34b_b79k
+        instability_max: 1.0
+        lpips_dead: 0.04
+        safe_range: 100
+        lpips_boom: 0.45
+        a:
+          checkpoints: [10, 100]
+          warmup_steps: 8
+          linear: 4
+          resolution: 512
+          sample_width: 256
+          sample_height: 256
+          dataset: one_ref
+        b:
+          checkpoints: [10, 100, 1000]
+          warmup_steps: 30
+          linear: 128
+          resolution: 512
+          sample_width: 512
+          sample_height: 512
+          dataset: recipe
+        c:
+          checkpoints: [100, 1000]
+          warmup_steps: 100
+          linear: 128
+          dataset: recipe

@@ -11,6 +11,7 @@ from transformers import AutoTokenizer, Qwen3ForCausalLM
 from diffusers import AutoencoderKL
 
 from toolkit.paths import normalize_path
+from toolkit.util.device import safe_module_to_device
 from toolkit.util.quantize import quantize, get_qtype, quantize_model
 from toolkit.util.debug import is_debug_enabled
 from toolkit.basic import flush
@@ -208,7 +209,7 @@ def load_components(
                     )
             quantize_model(base_model, sampling_dit)
             flush()
-        sampling_dit.to("cpu")
+        safe_module_to_device(sampling_dit, torch.device("cpu"))
         flush()
 
     # 2) Main transformer (Diffusers or DiffSynth per loader_mode)
@@ -237,7 +238,7 @@ def load_components(
     # Move main DiT to CPU after (optional) quantization to reduce VRAM
     # usage during setup; training/device presets and call-sites will move
     # it back to the appropriate device when actually used.
-    dit.to("cpu")
+    safe_module_to_device(dit, torch.device("cpu"))
     flush()
 
     # 3) Tokenizer & text encoder (same as z_image)

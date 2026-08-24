@@ -142,27 +142,60 @@ class ZImageDiffSynthModel(BaseModel):
     def get_bucket_divisibility(self):
         return 16 * 2
 
+    def _place_training_dit(self, device):
+        """Move frozen DiT (quantized payload included) onto ``device``; fail if it stays off."""
+        target = device if isinstance(device, torch.device) else torch.device(device)
+        dit = getattr(self, "_raw_dit", None)
+        if dit is not None:
+            from .compile_blocks import move_dit_with_compiled_blocks
+
+            move_dit_with_compiled_blocks(dit, None, target)
+        elif self.model is not None:
+            self.model.to(target)
+        self._assert_dit_on_device(target)
+
+    def _assert_dit_on_device(self, device):
+        from toolkit.util.device import devices_equal, quantized_payload_device
+
+        target = device if isinstance(device, torch.device) else torch.device(device)
+        module = getattr(self, "_raw_dit", None) or self.model
+        if module is None:
+            return
+        p = self._first_frozen_base_param(module)
+        if p is None:
+            try:
+                p = next(module.parameters())
+            except StopIteration:
+                return
+        if not devices_equal(p.device, target):
+            raise RuntimeError(
+                f"Z-Image DiffSynth DiT param on {p.device}, expected {target}"
+            )
+        payload = quantized_payload_device(p)
+        if payload is not None and not devices_equal(payload, target):
+            raise RuntimeError(
+                f"Z-Image DiffSynth DiT quantized payload on {payload}, expected {target}"
+            )
+
     def _move_main_network(self, device):
-        """Re-pin training LoRA to CUDA; preserve network.dtype. Never move to CPU."""
+        """Pin DiT + training LoRA to CUDA; preserve network.dtype. Never move to CPU."""
         with memory_debug(self.print_and_status_update, "Move main network"):
             target = device if isinstance(device, torch.device) else torch.device(device)
             if target.type == "cpu":
                 return
+            self._place_training_dit(target)
             net = getattr(self, "network", None)
             if net is None or not hasattr(net, "force_to"):
                 return
             net = unwrap_model(net)
-            try:
-                # Preserve network.dtype (e.g. fp32 for optimizer); do not use model.dtype.
-                p = next((p for p in net.parameters() if p.requires_grad), None)
-                dtype = p.dtype if p is not None else self.torch_dtype
-                net.force_to(target, dtype)
-                if is_debug_enabled():
-                    self.print_and_status_update(
-                        f"\n[zimage_diffsynth] main network force_to {device}"
-                    )
-            except Exception:
-                pass
+            # Preserve network.dtype (e.g. fp32 for optimizer); do not use model.dtype.
+            p = next((p for p in net.parameters() if p.requires_grad), None)
+            dtype = p.dtype if p is not None else self.torch_dtype
+            net.force_to(target, dtype)
+            if is_debug_enabled():
+                self.print_and_status_update(
+                    f"\n[zimage_diffsynth] main network force_to {device}"
+                )
 
     @staticmethod
     def _first_frozen_base_param(module):
@@ -370,16 +403,17 @@ class ZImageDiffSynthModel(BaseModel):
         # already have moved the wrapper (and inner DiT) to the correct
         # device; for one-off calls like the smoke test this also brings a
         # freshly-loaded, CPU-resident DiT onto self.device_torch.
-        if isinstance(latent_model_input, torch.Tensor):
-            target_device = latent_model_input.device
+        # Never follow CPU latents onto the DiT while the trainer device is CUDA;
+        # that silently runs the frozen base on CPU (~30 s/it).
+        if (
+            isinstance(self.device_torch, torch.device)
+            and self.device_torch.type == "cuda"
+        ):
+            self._place_training_dit(self.device_torch)
+        elif isinstance(latent_model_input, torch.Tensor):
+            self._place_training_dit(latent_model_input.device)
         else:
-            target_device = self.device_torch
-        try:
-            self.model.to(target_device)
-        except Exception:
-            # If for some reason .to(...) is not supported on the inner DiT,
-            # fall back to its current placement and let the error surface.
-            pass
+            self._place_training_dit(self.device_torch)
         # Z-Image DiT is trained on latent-space tensors with a fixed
         # channel count (e.g. 16). If we accidentally receive 3‑channel BCHW
         # tensors here (RGB-like), they will eventually hit dit.all_x_embedder

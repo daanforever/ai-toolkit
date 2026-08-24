@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 
 from toolkit.util.debug import is_debug_enabled
-from toolkit.util.device import devices_equal, safe_module_to_device
+from toolkit.util.device import devices_equal, quantized_payload_device, safe_module_to_device
 
 try:
     from diffusers.utils.torch_utils import is_compiled_module
@@ -94,6 +94,9 @@ def _module_already_on_device(module: nn.Module, device: torch.device) -> bool:
     target = torch.device(device)
     for p in module.parameters():
         if not devices_equal(p.device, target):
+            return False
+        payload = quantized_payload_device(p)
+        if payload is not None and not devices_equal(payload, target):
             return False
     for b in module.buffers():
         if not devices_equal(b.device, target):
