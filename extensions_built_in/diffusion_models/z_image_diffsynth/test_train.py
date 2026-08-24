@@ -303,13 +303,27 @@ def _post_train_subprocess_worker() -> None:
 
 
 def _offload_text_encoder(sd) -> None:
+    # Same as SDTrainer when cache_text_embeddings=True: unload_text_encoder replaces
+    # model.text_encoder with FakeTextEncoder; training uses cached disk embeds only.
+    # Real TE is stashed on sd._real_text_encoder (CPU RAM keep-alive), not GC'd.
+    real_before = sd.text_encoder
     try:
-        # Same as SDTrainer when cache_text_embeddings=True: unload_text_encoder replaces
-        # model.text_encoder with FakeTextEncoder; training uses cached disk embeds only.
         unload_text_encoder(sd)
         _release_cuda("text_encoder_offload")
     except Exception:
-        pass
+        return
+    te_now = sd.text_encoder[0] if isinstance(sd.text_encoder, list) else sd.text_encoder
+    assert isinstance(te_now, FakeTextEncoder)
+    stashed = getattr(sd, "_real_text_encoder", None)
+    assert stashed is not None, "unload_text_encoder must stash real TE for runtime reload"
+    stashed_mod = stashed[0] if isinstance(stashed, list) else stashed
+    if isinstance(real_before, list):
+        assert stashed_mod is real_before[0] or stashed_mod in real_before
+    else:
+        assert stashed_mod is real_before
+    p = next(stashed_mod.parameters(), None)
+    if p is not None:
+        assert p.device.type == "cpu", f"stashed TE must be on CPU, got {p.device}"
 
 
 def _point_pipeline_te_at_model_placeholder(sd, pipeline) -> None:

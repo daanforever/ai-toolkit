@@ -185,6 +185,9 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
   const debug = loggingAny?.debug ?? false;
 
   const datasets = config?.config?.process?.[0]?.datasets;
+  const sampleSamples = (
+    sampleAny?.samples as Array<{ prompt?: string }> | undefined
+  ) ?? [];
 
   const handleApply = useCallback(async () => {
     if (!config || !train) return;
@@ -350,6 +353,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         gaussian_mean_2?: number;
         gaussian_std_2?: number;
         network_weights?: number[];
+        prompts?: string[];
         batch_size?: number;
         gradient_accumulation?: number;
         save_every?: number;
@@ -389,6 +393,11 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
       if (lr != null && Number.isFinite(lr)) patchBody.lr = lr;
       if (process.datasets?.length) {
         patchBody.network_weights = process.datasets.map((d: { network_weight?: number }) => d.network_weight ?? 1);
+      }
+      if (process.sample?.samples?.length) {
+        patchBody.prompts = process.sample.samples.map(
+          (s: { prompt?: string }) => s.prompt ?? ''
+        );
       }
 
       if (contentOrStyle === 'fixed_cycle') {
@@ -450,6 +459,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     minSnrGamma,
     debug,
     datasets,
+    sampleSamples,
     onRefresh,
     fixedCycleTimestepsInput,
     fixedCycleWeightPeaksStr,
@@ -752,6 +762,29 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
             />
           </div>
         </div>
+
+        {sampleSamples.length > 0 && (
+          <div className="space-y-2">
+            <p className="text-xs text-gray-400">Sample — Prompts</p>
+            <div className="space-y-3">
+              {sampleSamples.map((s, i) => (
+                <div key={i} className="space-y-1">
+                  <label className="block text-xs text-gray-500">Prompt {i + 1}</label>
+                  <textarea
+                    rows={2}
+                    value={s.prompt ?? ''}
+                    onChange={(e) => {
+                      setValue(e.target.value, `config.process[0].sample.samples[${i}].prompt`);
+                      setApplyStatus('idle');
+                    }}
+                    className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+                    placeholder="Enter prompt"
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         <div className="flex items-end gap-4 flex-wrap">
           <div className="space-y-2 flex-1 min-w-[140px]">

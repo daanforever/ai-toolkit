@@ -69,6 +69,7 @@ model RuntimeParams {
   runtime_gradient_accumulation Int?
   runtime_save_every       Int?
   runtime_sample_every     Int?
+  runtime_prompts          String?
   runtime_warmup_steps     Int?
   runtime_warmup_boost     Float?
   runtime_min_snr_gamma    Float?

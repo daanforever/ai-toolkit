@@ -54,6 +54,7 @@ class DiffusionTrainer(SDTrainer):
             self._last_applied_runtime_timestep_type = None
             self._last_applied_runtime_timestep_weighting = None
             self._last_applied_runtime_network_weights: Optional[tuple] = None
+            self._last_applied_runtime_prompts: Optional[tuple] = None
             self._last_applied_runtime_batch_size = None
             self._last_applied_runtime_gradient_accumulation = None
             self._last_applied_runtime_save_every = None
@@ -904,6 +905,142 @@ class DiffusionTrainer(SDTrainer):
         if is_debug_enabled():
             print_acc(f"\nruntime network_weights from UI/DB applied: {list(weights_tuple)}")
 
+    def get_runtime_prompts(self):
+        """Read runtime_prompts from DB (only when is_ui_trainer). Returns list of str or None."""
+        if not self.is_ui_trainer:
+            return None
+
+        def _read():
+            with self._db_connect() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT runtime_prompts FROM RuntimeParams WHERE jobId = ?",
+                    (self.job_id,),
+                )
+                row = cursor.fetchone()
+                if row is None or row[0] is None or (isinstance(row[0], str) and row[0].strip() == ""):
+                    return None
+                try:
+                    raw = row[0] if isinstance(row[0], str) else str(row[0])
+                    parsed = json.loads(raw)
+                    if not isinstance(parsed, list):
+                        return None
+                    return [x if isinstance(x, str) else None for x in parsed]
+                except (ValueError, TypeError, json.JSONDecodeError):
+                    return None
+
+        return _read()
+
+    def _offload_transformers_for_te_recache(self) -> None:
+        """Move training (+ sampling) transformers to CPU so TE can fit on GPU."""
+        from toolkit.basic import flush
+
+        sd = self.sd
+        if hasattr(sd, "_place_training_dit"):
+            sd._place_training_dit("cpu")
+            net = getattr(sd, "network", None)
+            if net is not None and hasattr(net, "force_to"):
+                dtype = getattr(sd, "torch_dtype", None)
+                try:
+                    net.force_to("cpu", dtype)
+                except Exception:
+                    pass
+            if hasattr(sd, "_move_sampling_transformer"):
+                sd._move_sampling_transformer("cpu")
+        else:
+            if getattr(sd, "unet", None) is not None:
+                sd.unet.to("cpu")
+            st = getattr(sd, "_sampling_transformer", None)
+            if st is not None:
+                st.to("cpu")
+        flush()
+
+    def _restore_training_transformer_after_te_recache(self) -> None:
+        """Put training transformer (+ LoRA) back on train device; keep sampling TE off GPU."""
+        from toolkit.basic import flush
+
+        sd = self.sd
+        device = self.device_torch
+        if hasattr(sd, "_move_main_network"):
+            # _move_main_network no-ops CPU; use it to restore CUDA DiT + LoRA
+            sd._move_main_network(device)
+            if hasattr(sd, "_move_sampling_transformer"):
+                sd._move_sampling_transformer("cpu")
+        else:
+            if getattr(sd, "unet", None) is not None:
+                sd.unet.to(device)
+            st = getattr(sd, "_sampling_transformer", None)
+            if st is not None:
+                st.to("cpu")
+        flush()
+
+    def _recache_sample_prompts_runtime(self) -> None:
+        """Recache sample prompt embeds with TE on GPU; transformers offloaded around it."""
+        from toolkit.basic import flush
+        from toolkit.unloader import reload_text_encoder, unload_text_encoder
+
+        caching = bool(getattr(self, "is_caching_text_embeddings", False))
+        unload_only = bool(getattr(self.train_config, "unload_text_encoder", False)) and not caching
+        if not caching and not unload_only:
+            return
+
+        self._offload_transformers_for_te_recache()
+        try:
+            if caching:
+                reload_text_encoder(self.sd)
+            self.sd.text_encoder_to(self.device_torch)
+            flush()
+            self.cache_sample_prompts()
+            if caching:
+                unload_text_encoder(self.sd)
+            else:
+                self.sd.text_encoder_to("cpu")
+                flush()
+        finally:
+            self._restore_training_transformer_after_te_recache()
+
+    def apply_runtime_prompts(self):
+        """If runtime_prompts are set in DB, update sample_config and recache embeds if needed."""
+        if not self.is_ui_trainer:
+            return
+        prompts = self.get_runtime_prompts()
+        if prompts is None:
+            return
+        if any(p is None for p in prompts):
+            return
+        prompts_tuple = tuple(prompts)
+        if prompts_tuple == getattr(self, "_last_applied_runtime_prompts", None):
+            return
+
+        samples = getattr(self.sample_config, "samples", None) or []
+        current = tuple((s.prompt if s.prompt is not None else "") for s in samples)
+        if prompts_tuple == current:
+            self._last_applied_runtime_prompts = prompts_tuple
+            return
+
+        changed = False
+        for i, prompt in enumerate(prompts):
+            if i >= len(samples):
+                break
+            if samples[i].prompt != prompt:
+                samples[i].prompt = prompt
+                changed = True
+
+        self._last_applied_runtime_prompts = prompts_tuple
+        if not changed:
+            return
+
+        need_recache = bool(getattr(self, "is_caching_text_embeddings", False)) or bool(
+            getattr(self.train_config, "unload_text_encoder", False)
+        )
+        if need_recache:
+            self._recache_sample_prompts_runtime()
+
+        if is_debug_enabled():
+            print_acc(
+                f"\nruntime prompts from UI/DB applied ({len(prompts_tuple)} prompts)"
+            )
+
     def _reset_fixed_cycle_sampling_cache(self) -> None:
         """Invalidate TimestepSampler fixed_cycle resolution after timesteps/seed change."""
         bp = getattr(self, "_batch_processor", None)
@@ -1088,6 +1225,7 @@ class DiffusionTrainer(SDTrainer):
         self._last_applied_runtime_timestep_type = None
         self._last_applied_runtime_timestep_weighting = None
         self._last_applied_runtime_network_weights = None
+        self._last_applied_runtime_prompts = None
         self._last_applied_runtime_batch_size = None
         self._last_applied_runtime_gradient_accumulation = None
         self._last_applied_runtime_save_every = None
@@ -1229,6 +1367,7 @@ class DiffusionTrainer(SDTrainer):
             self.apply_runtime_gradient_accumulation()
             self.apply_runtime_save_every()
             self.apply_runtime_sample_every()
+            self.apply_runtime_prompts()
             self.apply_runtime_warmup_steps()
             self.apply_runtime_warmup_boost()
             self.apply_runtime_min_snr_gamma()
