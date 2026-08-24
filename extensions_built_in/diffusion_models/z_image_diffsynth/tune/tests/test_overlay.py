@@ -57,6 +57,7 @@ def test_overlay_probe_stage_a_keys(overlay, recipe, tmp_path):
     assert p0["sample"]["guidance_scale"] == 0
     assert p0["sample"]["sample_steps"] == 8
     assert p0["train"]["content_or_style"] == "balanced"
+    assert p0["train"]["turbo_teacher_weight"] == 0.25
     assert p0["model"]["model_kwargs"]["use_diffsynth_training_loop"] is False
     assert p0["logging"]["use_ui_logger"] is False
     assert p0["logging"]["log_every"] != 1
@@ -67,6 +68,29 @@ def test_overlay_probe_stage_a_keys(overlay, recipe, tmp_path):
     assert p0["network"]["dtype"] == "fp32"
     assert p0["train"].get("disable_sampling") is not True
     assert p0["sample"]["sample_every"] == 10
+
+
+def test_overlay_probe_forces_turbo_teacher_weight(overlay, recipe, tmp_path):
+    """Probe always gets w=0.25 even if recipe train has another value."""
+    import copy
+
+    bad = copy.deepcopy(recipe)
+    bad["config"]["process"][0]["train"]["turbo_teacher_weight"] = 0.0
+    bad["config"]["process"][0]["tune"]["turbo_teacher_weight"] = 0.25
+    cfg = overlay.overlay_probe(
+        bad,
+        lr=1.0e-4,
+        steps=10,
+        stage_id="a",
+        training_folder=str(tmp_path / "t"),
+        is_first_segment=True,
+    )
+    p0 = _p0(cfg)
+    assert p0["train"]["turbo_teacher_weight"] == 0.25
+    assert p0["train"]["timestep_type"] == "turbo_prior"
+    stripped = overlay.strip_tune(cfg)
+    assert "tune" not in _p0(stripped)
+    assert _p0(stripped)["train"]["turbo_teacher_weight"] == 0.25
 
 
 def test_overlay_probe_stage_c_leaves_recipe_sample_wh(overlay, recipe, tmp_path):

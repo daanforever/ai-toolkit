@@ -559,6 +559,168 @@ class ZImageDiffSynthModel(BaseModel):
         )
         return noise_pred
 
+    def get_turbo_teacher_prediction(
+        self,
+        latent_model_input: torch.Tensor,
+        timestep: torch.Tensor,
+        text_embeddings: PromptEmbeds,
+        batch=None,
+        **kwargs,
+    ):
+        """
+        Frozen Z-Image-Turbo velocity pred on ``_sampling_transformer`` (no train LoRA).
+
+        I/O matches ``get_noise_prediction`` (Diffusers list/CFHW + negate, or DiffSynth
+        ``run_forward``). Moves sampling DiT to device for the forward, then offloads.
+        """
+        st = getattr(self, "_sampling_transformer", None)
+        if st is None:
+            raise ValueError(
+                "turbo_teacher_weight>0 requires a loaded sampling transformer "
+                "(set model.sampling_name_or_path to Z-Image-Turbo)."
+            )
+
+        text_embeds = text_embeddings.text_embeds
+        attention_mask = text_embeddings.attention_mask
+        if isinstance(text_embeds, torch.Tensor) and len(text_embeds.shape) == 3:
+            if attention_mask is not None:
+                text_embeds = [
+                    text_embeds[i][attention_mask[i].bool()]
+                    for i in range(text_embeds.shape[0])
+                ]
+            else:
+                text_embeds = [text_embeds[i] for i in range(text_embeds.shape[0])]
+        elif isinstance(text_embeds, list) and text_embeds and len(text_embeds[0].shape) == 3:
+            new_text_embeds = []
+            for i, t in enumerate(text_embeds):
+                if t is None:
+                    continue
+                if attention_mask is not None:
+                    if isinstance(attention_mask, (list, tuple)):
+                        mask = attention_mask[i]
+                    else:
+                        mask = (
+                            attention_mask[i]
+                            if attention_mask.dim() == 3
+                            else attention_mask
+                        )
+                    if isinstance(mask, torch.Tensor) and mask.dim() == 2:
+                        new_text_embeds += [
+                            t[j][mask[j].bool()] for j in range(t.shape[0])
+                        ]
+                    elif isinstance(mask, torch.Tensor):
+                        new_text_embeds += [
+                            t[j][mask.bool()] for j in range(t.shape[0])
+                        ]
+                    else:
+                        new_text_embeds += [t[j][mask] for j in range(t.shape[0])]
+                else:
+                    new_text_embeds += list(t.unbind(dim=0))
+            text_embeds = new_text_embeds
+
+        image_valid_patches = None
+        if (
+            batch is not None
+            and getattr(batch, "image_valid_mask_tensor", None) is not None
+            and isinstance(latent_model_input, torch.Tensor)
+            and latent_model_input.dim() == 4
+        ):
+            from .spatial_attention import pixel_valid_to_patch_valid
+
+            valid = batch.image_valid_mask_tensor
+            if valid.dim() == 3:
+                valid = valid.unsqueeze(1)
+            B, _, lh, lw = latent_model_input.shape
+            if valid.shape[0] != B:
+                raise ValueError(
+                    f"image_valid_mask_tensor batch {valid.shape[0]} != latents batch {B}"
+                )
+            valid = valid.to(device=latent_model_input.device)
+            patch_grid = pixel_valid_to_patch_valid(valid, lh, lw, patch_size=2)
+            patches = [patch_grid[b] for b in range(B)]
+            if any(not p.all().item() for p in patches):
+                image_valid_patches = patches
+
+        dit = getattr(st, "_inner_dit", None)
+        if dit is None:
+            dit = unwrap_model(st)
+            if hasattr(dit, "_inner_dit"):
+                dit = dit._inner_dit
+
+        train_dtype = getattr(self, "train_torch_dtype", None) or self.torch_dtype
+        model_dtype = self.torch_dtype
+        target_device = self.device_torch
+        if (
+            isinstance(target_device, torch.device)
+            and target_device.type == "cuda"
+        ):
+            pass
+        elif isinstance(latent_model_input, torch.Tensor):
+            target_device = latent_model_input.device
+        else:
+            target_device = self.device_torch
+
+        try:
+            self._move_sampling_transformer(target_device)
+            with torch.no_grad():
+                if getattr(self, "_sampling_is_diffusers", False):
+                    if (
+                        isinstance(latent_model_input, torch.Tensor)
+                        and latent_model_input.dtype != model_dtype
+                    ):
+                        latent_model_input = latent_model_input.to(model_dtype)
+                    if isinstance(text_embeds, torch.Tensor):
+                        if text_embeds.dtype != model_dtype:
+                            text_embeds = text_embeds.to(model_dtype)
+                    elif isinstance(text_embeds, list):
+                        text_embeds = [
+                            p.to(model_dtype)
+                            if isinstance(p, torch.Tensor) and p.dtype != model_dtype
+                            else p
+                            for p in text_embeds
+                        ]
+
+                    latent_list = list(latent_model_input.unsqueeze(2).unbind(dim=0))
+                    timestep_model_input = (1000 - timestep) / 1000
+                    use_autocast = (
+                        latent_model_input.device.type == "cuda"
+                        and model_dtype in (torch.float16, torch.bfloat16)
+                    )
+                    from .spatial_attention import spatial_attention_context
+
+                    with torch.autocast(
+                        device_type="cuda",
+                        dtype=model_dtype if use_autocast else torch.float32,
+                        enabled=use_autocast,
+                    ):
+                        with spatial_attention_context(dit, image_valid_patches):
+                            model_out_list = dit(
+                                latent_list,
+                                timestep_model_input,
+                                text_embeds,
+                                return_dict=False,
+                            )[0]
+                    noise_pred = torch.stack([t.float() for t in model_out_list], dim=0)
+                    noise_pred = -noise_pred.squeeze(2)
+                    if noise_pred.dtype != train_dtype:
+                        noise_pred = noise_pred.to(train_dtype)
+                else:
+                    noise_pred = forward_mod.run_forward(
+                        dit,
+                        latent_model_input,
+                        timestep,
+                        text_embeds,
+                        model_dtype=model_dtype,
+                        use_gradient_checkpointing=False,
+                        train_dtype=train_dtype,
+                        image_valid_patches=image_valid_patches,
+                    )
+                return noise_pred.detach()
+        finally:
+            self._move_sampling_transformer("cpu")
+            if getattr(self.model_config, "low_vram", False):
+                self._flush_cuda()
+
     def get_prompt_embeds(self, prompt: str) -> PromptEmbeds:
         te = self.text_encoder[0]
         tok = self.tokenizer[0]

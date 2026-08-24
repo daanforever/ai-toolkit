@@ -547,6 +547,8 @@ class TrainConfig:
         self.turbo_prior_steps: int = kwargs.get('turbo_prior_steps', 8)
         self.turbo_t_jitter: float = kwargs.get('turbo_t_jitter', 0.5)
         self.turbo_t_jitter_end: float = kwargs.get('turbo_t_jitter_end', 0.0)
+        # Soft Turbo-teacher consistency (MSE vs frozen sampling DiT). 0 = off.
+        self.turbo_teacher_weight: float = float(kwargs.get('turbo_teacher_weight', 0) or 0)
         # Not an A/B feature; if present and not dsigma, _sample_turbo_prior raises.
         if 'turbo_slot_weighting' in kwargs:
             self.turbo_slot_weighting = kwargs['turbo_slot_weighting']

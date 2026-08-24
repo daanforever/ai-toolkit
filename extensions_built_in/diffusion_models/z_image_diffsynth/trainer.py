@@ -1,5 +1,10 @@
 # ZImageDiffSynthTrainer: DiffusionTrainer for arch zimage_diffsynth (DiffSynth DiT/forward).
 
+from typing import Optional, Union
+
+import torch
+import torch.nn.functional as F
+
 from toolkit.extension import Extension
 from toolkit.print import print_acc
 from extensions_built_in.sd_trainer.DiffusionTrainer import DiffusionTrainer
@@ -116,11 +121,31 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
                     "(official Turbo uses static shift); true is not allowed."
                 )
 
+        turbo_w = float(getattr(tc, "turbo_teacher_weight", 0) or 0)
+        if turbo_w > 0:
+            if getattr(tc, "timestep_type", None) != "turbo_prior":
+                raise ValueError(
+                    "turbo_teacher_weight>0 requires train.timestep_type=turbo_prior "
+                    f"(got {getattr(tc, 'timestep_type', None)!r})."
+                )
+            if use_diffsynth_training_loop:
+                raise ValueError(
+                    "turbo_teacher_weight>0 requires use_diffsynth_training_loop=false "
+                    "(toolkit path); DiffSynth training loop is not allowed."
+                )
+            sampling_path = getattr(self.model_config, "sampling_name_or_path", None)
+            if not sampling_path:
+                raise ValueError(
+                    "turbo_teacher_weight>0 requires model.sampling_name_or_path "
+                    "(frozen Z-Image-Turbo / _sampling_transformer)."
+                )
+
         self.use_diffsynth_training_loop = use_diffsynth_training_loop
         self._requested_use_dynamic_shifting = use_dynamic_shifting
         self.use_dynamic_shifting = use_dynamic_shifting
         # Set in _aggregate_flow_matching_mse_loss when DiffSynth weighting is already applied.
         self._skip_post_timestep_weighting_once = False
+        self._turbo_teacher_embeds = None
 
         # Always train Z-Image in flow-matching mode with 1000 train timesteps.
         # We let ZImageDiffSynthModel.get_train_scheduler() provide the actual
@@ -337,6 +362,116 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
             self._skip_post_timestep_weighting_once = False
             return loss
         return super()._apply_flow_timestep_element_weights(loss, timesteps)
+
+    def predict_noise(
+        self,
+        noisy_latents: torch.Tensor,
+        timesteps: Union[int, torch.Tensor] = 1,
+        conditional_embeds=None,
+        unconditional_embeds=None,
+        batch=None,
+        is_primary_pred: bool = False,
+        **kwargs,
+    ):
+        w = float(getattr(self.train_config, "turbo_teacher_weight", 0) or 0)
+        if is_primary_pred and w > 0 and conditional_embeds is not None:
+            self._turbo_teacher_embeds = conditional_embeds
+        return super().predict_noise(
+            noisy_latents=noisy_latents,
+            timesteps=timesteps,
+            conditional_embeds=conditional_embeds,
+            unconditional_embeds=unconditional_embeds,
+            batch=batch,
+            is_primary_pred=is_primary_pred,
+            **kwargs,
+        )
+
+    def _turbo_teacher_mse(
+        self,
+        student_pred: torch.Tensor,
+        turbo_pred: torch.Tensor,
+        mask_multiplier: Union[torch.Tensor, float],
+        noise_pred: torch.Tensor,
+    ) -> torch.Tensor:
+        loss = F.mse_loss(student_pred, turbo_pred, reduction="none")
+        try:
+            mm = mask_multiplier
+            if self.train_config.train_turbo:
+                mm = mm[:, 3:, :, :]
+                mm = F.interpolate(
+                    mm, size=(student_pred.shape[2], student_pred.shape[3]), mode="nearest"
+                )
+            if len(noise_pred.shape) == 5:
+                mm = mm.unsqueeze(2)
+                mm = mm.repeat(1, 1, noise_pred.shape[2], 1, 1)
+            loss = loss * mm
+        except Exception:
+            pass
+        if len(noise_pred.shape) == 5:
+            loss = loss.mean([1, 2, 3, 4])
+        else:
+            loss = loss.mean([1, 2, 3])
+        return loss.mean()
+
+    def _log_turbo_teacher_loss(self, value: float) -> None:
+        if self.writer is not None and self.accelerator.is_main_process:
+            self.writer.add_scalar("loss/turbo_teacher", value, self.step_num)
+        logger = getattr(self, "logger", None)
+        if logger is not None:
+            logger.log({"loss/turbo_teacher": value})
+
+    def calculate_loss(
+        self,
+        noise_pred: torch.Tensor,
+        noise: torch.Tensor,
+        noisy_latents: torch.Tensor,
+        timesteps: torch.Tensor,
+        batch,
+        mask_multiplier: Union[torch.Tensor, float] = 1.0,
+        prior_pred: Optional[torch.Tensor] = None,
+        **kwargs,
+    ):
+        loss_fm = super().calculate_loss(
+            noise_pred=noise_pred,
+            noise=noise,
+            noisy_latents=noisy_latents,
+            timesteps=timesteps,
+            batch=batch,
+            mask_multiplier=mask_multiplier,
+            prior_pred=prior_pred,
+            **kwargs,
+        )
+        w = float(getattr(self.train_config, "turbo_teacher_weight", 0) or 0)
+        if w <= 0:
+            return loss_fm
+
+        embeds = getattr(self, "_turbo_teacher_embeds", None)
+        if embeds is None:
+            embeds = getattr(batch, "prompt_embeds", None)
+        if embeds is None:
+            raise ValueError(
+                "turbo_teacher_weight>0 requires text embeddings for the Turbo teacher "
+                "(primary predict_noise embeds or batch.prompt_embeds)."
+            )
+
+        sd = self.sd
+        if getattr(sd, "_sampling_transformer", None) is None:
+            raise ValueError(
+                "turbo_teacher_weight>0 requires a loaded sampling transformer "
+                "(set model.sampling_name_or_path to Z-Image-Turbo)."
+            )
+
+        turbo_pred = sd.get_turbo_teacher_prediction(
+            noisy_latents.detach(),
+            timesteps,
+            embeds,
+            batch=batch,
+        )
+        l_turbo = self._turbo_teacher_mse(
+            noise_pred, turbo_pred, mask_multiplier, noise_pred
+        )
+        self._log_turbo_teacher_loss(float(l_turbo.detach().item()))
+        return loss_fm + w * l_turbo
 
 
 class ZImageDiffSynthTrainerExtension(Extension):

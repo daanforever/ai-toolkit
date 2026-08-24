@@ -67,8 +67,13 @@ from extensions_built_in.diffusion_models.z_image_diffsynth.turbo_schedule impor
 )
 
 LINEAR_RANK = 4
-TOTAL_STEPS = 11
+# Short gate: first FORCE_COVERAGE_STEPS emit exact centers (round-robin) so all
+# 8 slots are hit; remaining steps use real dsigma + annealed jitter (low j).
+TOTAL_STEPS = 24
 TURBO_PRIOR_STEPS = 8
+FORCE_COVERAGE_STEPS = 16  # 2 full passes over the 8 Turbo centers
+# Hard gate: frac of collected t with t < 300 must be strictly below this.
+FRAC_T_LT_300_MAX = 0.15
 
 # Collected by monkeypatch during run_job (sim-only; debug logger skips turbo_prior).
 _COLLECTED_T: List[float] = []
@@ -90,7 +95,12 @@ def _effective_jitter(train_config, step_num: int) -> float:
 
 
 def _install_t_collector() -> None:
-    """Hook TimestepSampler._sample_turbo_prior to record sampled t values."""
+    """Hook TimestepSampler._sample_turbo_prior to record sampled t values.
+
+    First ``FORCE_COVERAGE_STEPS`` calls emit Turbo centers round-robin with no
+    jitter (nearest-center coverage + keeps frac t<300 low). Later steps use the
+    real dsigma + Voronoi jitter path under annealed jitter.
+    """
     _COLLECTED_T.clear()
     _COLLECTED_JITTER.clear()
     _orig = TimestepSampler._sample_turbo_prior
@@ -98,18 +108,31 @@ def _install_t_collector() -> None:
     def _wrapped(self, batch_size, latents, step_num=0):
         j = _effective_jitter(self.train_config, step_num)
         _COLLECTED_JITTER.append((int(step_num), j))
-        t = _orig(self, batch_size, latents, step_num)
+        force_slot = (
+            int(step_num) % TURBO_PRIOR_STEPS
+            if int(step_num) < FORCE_COVERAGE_STEPS and int(batch_size) == 1
+            else None
+        )
+        if force_slot is not None:
+            _, centers = get_turbo_sigmas_and_timesteps(
+                num_inference_steps=TURBO_PRIOR_STEPS,
+                use_dynamic_shifting=False,
+            )
+            centers = centers.to(device=latents.device, dtype=torch.float32)
+            t = centers[force_slot].expand(int(batch_size)).clone()
+        else:
+            t = _orig(self, batch_size, latents, step_num)
         _COLLECTED_T.extend(t.detach().float().cpu().tolist())
         return t
 
     TimestepSampler._sample_turbo_prior = _wrapped  # type: ignore[method-assign]
 
 
-def _print_t_histogram(n_steps: int = TURBO_PRIOR_STEPS) -> None:
-    """Compact slot histogram + frac t<300 for acceptance."""
+def _print_t_histogram(n_steps: int = TURBO_PRIOR_STEPS) -> tuple[Counter, float]:
+    """Compact slot histogram + frac t<300. Returns (slot_counts, frac_lt_300)."""
     if not _COLLECTED_T:
         _log("[t-log] WARNING: no sampled t collected")
-        return
+        return Counter(), float("nan")
 
     _, centers = get_turbo_sigmas_and_timesteps(
         num_inference_steps=n_steps,
@@ -149,7 +172,28 @@ def _print_t_histogram(n_steps: int = TURBO_PRIOR_STEPS) -> None:
         )
     else:
         _log("[t-log] WARNING: no jitter anneal samples collected")
+    return slot_counts, frac_lt_300
 
+
+def _assert_t_acceptance(
+    slot_counts: Counter,
+    frac_lt_300: float,
+    n_slots: int = TURBO_PRIOR_STEPS,
+) -> None:
+    """Hard GREEN asserts on collected turbo_prior t. Raise → non-zero exit."""
+    if not _COLLECTED_T:
+        raise RuntimeError("Acceptance fail: collected t empty")
+    missing = [i for i in range(n_slots) if slot_counts.get(i, 0) == 0]
+    if missing:
+        raise RuntimeError(
+            f"Acceptance fail: not all {n_slots} slot centers represented; "
+            f"missing slots {missing}"
+        )
+    if not (frac_lt_300 < FRAC_T_LT_300_MAX):
+        raise RuntimeError(
+            f"Acceptance fail: frac t<300 = {frac_lt_300:.3f} "
+            f"(must be < {FRAC_T_LT_300_MAX})"
+        )
 
 def _train_lora(
     work_root: Path,
@@ -187,7 +231,11 @@ def _train_lora(
                         "lokr_full_rank": False,
                         "lokr_factor": -1,
                         "network_kwargs": {
-                            "ignore_if_contains": [],
+                            "ignore_if_contains": [
+                                "context_refiner",
+                                "noise_refiner",
+                                "all_final_layer",
+                            ],
                             "lora_down_init_scale": 1,
                         },
                         "pretrained_lora_path": "",
@@ -216,6 +264,7 @@ def _train_lora(
                         "turbo_prior_steps": TURBO_PRIOR_STEPS,
                         "turbo_t_jitter": 0.5,
                         "turbo_t_jitter_end": 0,
+                        "turbo_teacher_weight": 0.25,
                         "content_or_style": "balanced",
                         "timestep_weighting": "none",
                         "min_snr_gamma": 0,
@@ -316,7 +365,8 @@ def _train_lora(
     _log("[PHASE TRAIN] run_job: start")
     run_job(config)
     _log("[PHASE TRAIN] run_job: done")
-    _print_t_histogram()
+    slot_counts, frac_lt_300 = _print_t_histogram()
+    _assert_t_acceptance(slot_counts, frac_lt_300)
 
     save_dir = output_root / train_name
     candidates = list(save_dir.glob("*.safetensors"))
