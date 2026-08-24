@@ -146,7 +146,6 @@ export interface TrainConfig {
     warmup_boost?: number;
     beta1?: number | null;
     beta2?: number;
-    min_lr?: number;
   };
   skip_first_sample: boolean;
   force_first_sample: boolean;

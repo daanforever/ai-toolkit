@@ -101,7 +101,23 @@ def get_optimizer(
         optimizer = torch.optim.Adagrad(params, lr=float(learning_rate), **optimizer_params)
     elif lower_type == 'adafactor':
         from toolkit.optimizers.adafactor import Adafactor
-        optimizer = Adafactor(params, lr=float(learning_rate), **optimizer_params)
+        op = dict(optimizer_params)
+        _ADAFACTOR_DROPPED_KEYS = (
+            'emergency_brake',
+            'saddle_point_window',
+            'saddle_point_threshold',
+            'saddle_point_step',
+            'min_lr',
+        )
+        dropped = [k for k in _ADAFACTOR_DROPPED_KEYS if k in op]
+        if dropped:
+            for k in dropped:
+                op.pop(k, None)
+            print(
+                f"Adafactor: ignoring unsupported optimizer_params keys: "
+                f"{', '.join(sorted(dropped))}"
+            )
+        optimizer = Adafactor(params, lr=float(learning_rate), **op)
     elif lower_type in ('hfadafactor', 'hf_adafactor'):
         from toolkit.optimizers.hf_adafactor import HFAdafactor
         _HF_ADAFACTOR_KEYS = frozenset({

@@ -68,26 +68,6 @@ def test_global_lr_applies_warmup_only_to_enabled_groups():
     assert "warmup_lr" in opt.param_groups[1]
 
 
-def test_emergency_brake_zero_init_uses_lr_fraction_fallback():
-    """With zero-init params, emergency brake must not clamp LR to exact zero."""
-    p = torch.nn.Parameter(torch.zeros(8))
-    opt = Adafactor(
-        [p],
-        lr=1e-3,
-        relative_step=False,
-        scale_parameter=False,
-        emergency_brake=0.1,
-        beta1=None,
-        weight_decay=0.0,
-    )
-    p.grad = torch.ones_like(p)
-    before = p.detach().clone()
-    opt.step()
-
-    assert opt.get_mean_learning_rate() == pytest.approx(1e-4, rel=1e-6)
-    assert not torch.allclose(p, before)
-
-
 def test_step_closure_runs_with_grad_enabled():
     """Closure with backward() must work like in standard PyTorch optimizers."""
     p = torch.nn.Parameter(torch.tensor([2.0], dtype=torch.float32))
@@ -168,30 +148,11 @@ def test_get_lr_none_uses_base_lr_one():
         scale_parameter=False,
         beta1=None,
         weight_decay=0.0,
-        emergency_brake=None,
     )
     state = {"RMS": torch.tensor(1.0)}
     opt.param_groups[0]["rms_max"] = torch.tensor(1.0)
-    # relative ≈ 1 with no brakes/saddle; scale=1 → new_lr ≈ 1.0
+    # relative = 1.0; scale=1 → new_lr ≈ 1.0
     assert opt._get_lr(opt.param_groups[0], state) == pytest.approx(1.0)
-
-
-def test_emergency_brake_hard_caps_nonzero_rms_max():
-    """Hard LR cap rms_max * 0.001 applies when emergency_brake is set."""
-    p = torch.nn.Parameter(torch.ones(2))
-    opt = Adafactor(
-        [p],
-        lr=1.0,
-        relative_step=False,
-        scale_parameter=False,
-        emergency_brake=0.1,
-        beta1=None,
-        weight_decay=0.0,
-    )
-    state = {"RMS": torch.tensor(1.0)}
-    opt.param_groups[0]["rms_max"] = torch.tensor(10.0)
-    # Uncapped would be 1.0; capped to 10.0 * 0.001
-    assert opt._get_lr(opt.param_groups[0], state) == pytest.approx(0.01)
 
 
 def test_step_survives_factored_flag_flip_both_ways():
@@ -223,50 +184,6 @@ def test_step_survives_factored_flag_flip_both_ways():
     assert "exp_avg_sq" in opt.state[p]
     assert "exp_avg_sq_row" not in opt.state[p]
     assert "exp_avg_sq_col" not in opt.state[p]
-
-
-def test_instability_score_gated_off_without_scale_or_relative():
-    """Score must not change when soft brakes cannot apply."""
-    p = torch.nn.Parameter(torch.ones(2, 2))
-    opt = Adafactor(
-        [p],
-        lr=1e-3,
-        relative_step=False,
-        scale_parameter=False,
-        emergency_brake=0.1,
-        beta1=None,
-        weight_decay=0.0,
-        factored=False,
-    )
-    p.grad = torch.ones_like(p)
-    opt.step()
-    opt.state[p]["dir_consistency"] = torch.tensor(-1.0)
-    opt.param_groups[0]["instability_score"] = 1.0
-    p.grad = torch.ones_like(p)
-    opt.step()
-    assert opt.param_groups[0]["instability_score"] == pytest.approx(1.0)
-
-
-def test_instability_score_accumulates_when_brakes_can_apply():
-    """Score rises on negative dir_consistency when all soft-brake flags are set."""
-    p = torch.nn.Parameter(torch.ones(2, 2))
-    opt = Adafactor(
-        [p],
-        lr=1e-3,
-        relative_step=True,
-        scale_parameter=True,
-        emergency_brake=0.1,
-        beta1=None,
-        weight_decay=0.0,
-        factored=False,
-    )
-    p.grad = torch.ones_like(p)
-    opt.step()
-    opt.state[p]["dir_consistency"] = torch.tensor(-1.0)
-    opt.param_groups[0]["instability_score"] = 0.0
-    p.grad = torch.ones_like(p)
-    opt.step()
-    assert opt.param_groups[0]["instability_score"] == pytest.approx(0.1)
 
 
 def test_set_lr_preserves_per_group_ratios():

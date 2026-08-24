@@ -66,15 +66,11 @@ config:
           warmup_init: true
           warmup_steps: 100
           warmup_boost: 1
-          min_lr: 0.00001
           rms_max_decay_rate: 0.99
           stochastic_accumulation: true
           stochastic_rounding: true
           factored: true
           beta1: 0
-          saddle_point_window: 100
-          saddle_point_threshold: 0.0001
-          saddle_point_step: 0.5
           weight_decay_mode: "absolute"
           weight_decay_increment: 0
         unload_text_encoder: false

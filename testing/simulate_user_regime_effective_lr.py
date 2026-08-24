@@ -28,7 +28,6 @@ from toolkit.optimizers.adafactor import Adafactor
 
 USER = dict(
     lr=1e-4,
-    min_lr=1e-6,
     eps=(1e-30, 1e-3),
     clip_threshold=1.0,
     beta2=0.99,
@@ -36,9 +35,6 @@ USER = dict(
     scale_parameter=True,
     relative_step=True,
     rms_max=0.01,
-    emergency_brake=None,
-    instability_score=0.0,
-    saddle_point_boost=1.0,
 )
 
 
@@ -199,7 +195,6 @@ def real_adafactor_check():
         scale_parameter=True,
         relative_step=True,
         weight_decay=0.0,
-        min_lr=USER["min_lr"],
         eps=USER["eps"],
         clip_threshold=USER["clip_threshold"],
     )

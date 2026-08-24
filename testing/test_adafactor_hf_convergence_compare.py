@@ -81,7 +81,6 @@ def _make_local(
         stochastic_accumulation=False,
         stochastic_rounding=False,
         factored=None,
-        emergency_brake=None,
         beta2_adaptive=False,
     )
 

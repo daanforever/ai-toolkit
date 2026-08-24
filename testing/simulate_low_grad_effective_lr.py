@@ -27,7 +27,6 @@ from simulate_adafactor_effective_lr import adafactor_step, get_lr, rms  # noqa:
 def make_group(**overrides):
     group = {
         "lr": 1e-4,
-        "min_lr": 1e-6,
         "eps": (1e-30, 1e-3),
         "clip_threshold": 1.0,
         "beta2": 0.99,
@@ -35,9 +34,6 @@ def make_group(**overrides):
         "scale_parameter": True,
         "relative_step": True,
         "rms_max": 0.01,
-        "emergency_brake": None,
-        "instability_score": 0.0,
-        "saddle_point_boost": 1.0,
     }
     group.update(overrides)
     return group
@@ -213,7 +209,6 @@ def main():
         ("no scale_parameter", make_group(scale_parameter=False, relative_step=False)),
         ("beta1=None", make_group(beta1=None)),
         ("beta2=0.9", make_group(beta2=0.9)),
-        ("emergency_brake=0.2", make_group(emergency_brake=0.2)),
     ]
 
     for name, group in configs:

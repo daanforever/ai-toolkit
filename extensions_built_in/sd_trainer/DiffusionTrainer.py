@@ -41,7 +41,6 @@ class DiffusionTrainer(SDTrainer):
             # Track all async tasks
             self._async_tasks = []
             self._last_applied_runtime_lr = None
-            self._last_applied_runtime_min_lr = None
             self._last_applied_runtime_gaussian_mean = None
             self._last_applied_runtime_gaussian_std = None
             self._last_applied_runtime_gaussian_mean_2 = None
@@ -234,36 +233,6 @@ class DiffusionTrainer(SDTrainer):
                     f"\nruntime_lr from DB not applied: optimizer has no set_lr (type: {type(optimizer).__name__})"
                 )
         self._last_applied_runtime_lr = value
-
-    def get_runtime_min_lr(self):
-        """Read runtime_min_lr from DB (only when is_ui_trainer). Returns float or None."""
-        return self._get_runtime_scalar("runtime_min_lr", float)
-
-    def apply_runtime_min_lr(self):
-        """If runtime_min_lr is set in DB, apply it to the optimizer (e.g. Adafactor)."""
-        if not self.is_ui_trainer:
-            return
-        value = self.get_runtime_min_lr()
-        if value is None:
-            return
-        if value == self._last_applied_runtime_min_lr:
-            return
-        optimizer = unwrap_model(self.optimizer)
-        while getattr(optimizer, "optimizer", None) is not None:
-            optimizer = optimizer.optimizer
-        if hasattr(optimizer, "set_min_lr"):
-            if getattr(optimizer, "_min_lr", None) == value:
-                self._last_applied_runtime_min_lr = value
-                return
-            if is_debug_enabled():
-                print_acc(f"\nruntime_min_lr from UI/DB: {value}")
-            optimizer.set_min_lr(value)
-            self._last_applied_runtime_min_lr = value
-        else:
-            if is_debug_enabled():
-                print_acc(
-                    f"\nruntime_min_lr from DB not applied: optimizer has no set_min_lr (type: {type(optimizer).__name__})"
-                )
 
     def get_runtime_gaussian_params(self):
         """Read runtime_gaussian_mean, runtime_gaussian_std from DB (only when is_ui_trainer). Returns (mean, std) or (None, None)."""
@@ -1106,7 +1075,6 @@ class DiffusionTrainer(SDTrainer):
     def _reset_last_applied_runtime(self):
         """Reset all cached runtime parameter values to None."""
         self._last_applied_runtime_lr = None
-        self._last_applied_runtime_min_lr = None
         self._last_applied_runtime_gaussian_mean = None
         self._last_applied_runtime_gaussian_std = None
         self._last_applied_runtime_gaussian_mean_2 = None
@@ -1244,7 +1212,6 @@ class DiffusionTrainer(SDTrainer):
             self.update_step()
             self.maybe_stop()
             self.apply_runtime_lr()
-            self.apply_runtime_min_lr()
             self.apply_runtime_gaussian_params()
             self.apply_runtime_gaussian_peak2_params()
             self.apply_runtime_weight_decay()

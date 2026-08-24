@@ -6,7 +6,6 @@ from toolkit.print import print_acc
 from toolkit.util.debug import is_debug_enabled
 from optimum.quanto import QBytesTensor
 import random
-from toolkit.lora_utils.stagnation_detector import StagnationDetector
 
 
 class Adafactor(torch.optim.Optimizer):
@@ -27,10 +26,8 @@ class Adafactor(torch.optim.Optimizer):
             Iterable of parameters to optimize or dictionaries defining parameter groups.
         lr (`float`, *optional*, defaults to `1e-4`):
             Base learning rate (`base_lr`). Effective LR is ``base_lr * scale * relative``
-            (see `_get_lr`). Not an upper bound: with `relative_step=True`, `relative` can exceed 1
-            (e.g. saddle boost). If `lr=None`, `_get_lr` treats `base_lr` as `1.0` (footgun for the
-            raw API; toolkit `get_optimizer` always passes a float). Hard upper bound exists only when
-            `emergency_brake` is set: ``rms_max * 0.001`` (with zero-init fallback ``base_lr * 0.1``).
+            (see `_get_lr`). If `lr=None`, `_get_lr` treats `base_lr` as `1.0` (footgun for the
+            raw API; toolkit `get_optimizer` always passes a float).
         eps (`Tuple[float, float]`, *optional*, defaults to `(1e-30, 1e-3)`):
             Regularization constants for square gradient and parameter scale respectively
         clip_threshold (`float`, *optional*, defaults to 1.0):
@@ -80,9 +77,8 @@ class Adafactor(torch.optim.Optimizer):
             If True, learning rate is scaled by parameter RMS
             (``scale = max(eps1, param_rms)`` in `_get_lr`).
         relative_step (`bool`, *optional*, defaults to `False`):
-            If True, apply this fork's adaptive relative LR factors (``min_lr * ratio``, optional
-            emergency brakes, saddle boost) on top of `base_lr * scale`. Not Hugging Face's
-            time/step-decay schedule.
+            If True, apply this fork's adaptive relative LR path (parameter RMS ratio vs group
+            ``rms_max``) on top of `base_lr * scale`. Not Hugging Face's time/step-decay schedule.
         warmup_init (`bool`, *optional*, defaults to `False`):
             When True, the group learning rate `lr` is approached smoothly: one interpolation segment per change of
             `lr`, progress tracked once per group per step (see `_global_lr`). Works with both `relative_step=True` and
@@ -90,9 +86,6 @@ class Adafactor(torch.optim.Optimizer):
             starts from the current interpolated level toward the new `lr` (up or down). Each param group stops
             warmup independently when it reaches its own target LR (effective LR after `scale_lr_by_index` when
             enabled). Runtime toggling of `warmup_init` is not supported.
-        min_lr (`float`, *optional*, defaults to `1e-6`):
-            Term in the relative-step learning-rate factor when `relative_step=True`: ``relative`` includes
-            ``(1 + min_lr * ratio)`` (see `_get_lr`).
         warmup_steps (`int`, *optional*, defaults to `100`):
             When `warmup_init=True`, number of optimizer steps to interpolate each warmup segment from its start
             toward `lr`. Progress is advanced once per group per `step()` (see `_warmup_update_group`).
@@ -115,18 +108,6 @@ class Adafactor(torch.optim.Optimizer):
         factored (`bool | None`, *optional*, defaults to `None`):
             If True, use factored second-moment (row/col) for all parameters. If False, use full second-moment.
             If None, auto-detect: use factored for parameters with 2+ dimensions (current default behavior).
-        emergency_brake (`float | None`, *optional*, defaults to `None`):
-            When set, enables two layers: (1) instant/soft brake multipliers on relative LR — require
-            `relative_step=True` and `scale_parameter=True`, and use this value as the floor for
-            `brake` / `soft_brake`; (2) a hard LR cap ``rms_max * 0.001`` that applies whenever
-            `emergency_brake` is set (independent of those flags). `None` disables both.
-        saddle_point_window (`int`, *optional*, defaults to `100`):
-            Window size for `StagnationDetector` on parameter RMS.
-        saddle_point_threshold (`float`, *optional*, defaults to `0.001`):
-            Max coefficient of variation below which RMS is treated as stagnant.
-        saddle_point_step (`float`, *optional*, defaults to `0.01`):
-            Amount added to / subtracted from global `_saddle_point_boost` (floor `1.0`, no hard cap).
-            Boost multiplies `relative` only when `relative_step=True`.
         scale_lr_by_index (`bool`, *optional*, defaults to `False`):
             If True, scales `base_lr` and effective weight decay by group `index` vs
             resolved `_max_index` (requires at least one group with `index`, and
@@ -202,7 +183,6 @@ class Adafactor(torch.optim.Optimizer):
         scale_parameter=False,
         relative_step=False,
         warmup_init=False,
-        min_lr=1e-6,
         warmup_steps: int = 100,
         warmup_boost: float = 1.0,
         do_parameter_swapping=False,
@@ -210,10 +190,6 @@ class Adafactor(torch.optim.Optimizer):
         stochastic_accumulation=True,
         stochastic_rounding=True,
         factored=None,
-        emergency_brake: float | None = None,
-        saddle_point_window: int = 100,
-        saddle_point_threshold: float = 0.001,
-        saddle_point_step: float = 0.01,
         scale_lr_by_index: bool = False,
         scale_lr_factor: float = 1.0,
         weight_decay_max: float = 0.1,
@@ -248,10 +224,7 @@ class Adafactor(torch.optim.Optimizer):
             "warmup_init": warmup_init,
             "warmup_steps": warmup_steps,
             "warmup_boost": warmup_boost,
-            "min_lr": min_lr,
             "factored": factored,
-            "emergency_brake": emergency_brake,
-            "instability_score": 0.0,  # cumulative instability tracking for soft brake
         }
         super().__init__(params, defaults)
 
@@ -263,19 +236,8 @@ class Adafactor(torch.optim.Optimizer):
             scale_lr_by_index, scale_lr_factor, weight_decay_max
         )
 
-        # Create stagnation detector for RMS(parameter) based heuristic.
-        self._saddle_point_detector = StagnationDetector(
-            window_size=saddle_point_window,
-            threshold=saddle_point_threshold,
-            epsilon=float(eps[0]),
-        )
-        # Applied to saddle_point_boost each step when stagnant (add) or not (decay toward 1.0).
-        self._saddle_point_step = float(saddle_point_step)
-        self._saddle_point_boost = 1.0
-
         # Store config reapplied after load_state_dict (checkpoint param_groups may omit keys).
         self._lr = lr
-        self._min_lr = min_lr
         self._eps = eps
         self._clip_threshold = clip_threshold
         self._rms_max_decay_rate = rms_max_decay_rate
@@ -292,7 +254,6 @@ class Adafactor(torch.optim.Optimizer):
         self._beta2_adaptive = beta2_adaptive
         self._beta2_min = beta2_min
         self._factored = factored
-        self._emergency_brake = emergency_brake
         self.is_stochastic_rounding_accumulation = False
         self.stochastic_rounding = stochastic_rounding
 
@@ -395,14 +356,6 @@ class Adafactor(torch.optim.Optimizer):
             return base_lr
         return base_lr * self._index_lr_multiplier(group) + float(group["eps"][0])
 
-    def set_min_lr(self, value: float) -> None:
-        """Update min_lr at runtime (e.g. from UI)."""
-        self._min_lr = value
-        for group in self.param_groups:
-            group["min_lr"] = value
-        if is_debug_enabled():
-            print_acc(f"Adafactor: applied runtime min_lr={value}")
-
     def set_weight_decay(self, value: float) -> None:
         """Update weight_decay at runtime (e.g. from UI)."""
         self._weight_decay = value
@@ -427,14 +380,6 @@ class Adafactor(torch.optim.Optimizer):
             group["weight_decay_mode"] = mode
         if is_debug_enabled():
             print_acc(f"Adafactor: applied runtime weight_decay_mode={mode}")
-
-    def set_emergency_brake(self, value: float | None) -> None:
-        """Update emergency_brake at runtime (e.g. from UI). None disables."""
-        self._emergency_brake = value
-        for group in self.param_groups:
-            group["emergency_brake"] = value
-        if is_debug_enabled():
-            print_acc(f"Adafactor: applied runtime emergency_brake={value}")
 
     def set_beta1(self, value: float | None) -> None:
         """Update beta1 at runtime (e.g. from UI). None disables momentum."""
@@ -469,14 +414,11 @@ class Adafactor(torch.optim.Optimizer):
             print_acc(f"Adafactor: applied runtime beta2_min={self._beta2_min}")
 
     def state_dict(self):
-        sd = super().state_dict()
-        sd["adafactor_stagnation"] = self._saddle_point_detector.state_dict()
-        return sd
+        return super().state_dict()
 
     def load_state_dict(self, state_dict):
         config_keys = (
             "lr",
-            "min_lr",
             "eps",
             "clip_threshold",
             "rms_max_decay_rate",
@@ -492,7 +434,6 @@ class Adafactor(torch.optim.Optimizer):
             "beta2_adaptive",
             "beta2_min",
             "factored",
-            "emergency_brake",
         )
         # Keep current run configuration as source of truth on resume.
         current_group_configs = []
@@ -504,15 +445,9 @@ class Adafactor(torch.optim.Optimizer):
             current_group_configs.append(cfg)
 
         sd = dict(state_dict)  # do not mutate caller
-        stag = sd.pop("adafactor_stagnation", None)
+        sd.pop("adafactor_stagnation", None)
 
         super().load_state_dict(sd)
-
-        # Boost is not checkpointed; always start fresh after load.
-        # Detector history is restored when present (current window/threshold win).
-        self._saddle_point_boost = 1.0
-        if stag is not None:
-            self._saddle_point_detector.load_state_dict(stag)
 
         # Reapply current run config with per-group priority over checkpoint values.
         for idx, group in enumerate(self.param_groups):
@@ -526,7 +461,9 @@ class Adafactor(torch.optim.Optimizer):
                 elif key in self.defaults:
                     group.setdefault(key, self.defaults[key])
             group["eps"] = self._normalize_eps(group.get("eps", self._eps), fallback_eps1=self._eps[1])
-            group["instability_score"] = group.get("instability_score", 0.0)
+            group.pop("instability_score", None)
+            group.pop("emergency_brake", None)
+            group.pop("min_lr", None)
 
         self._migrate_optimizer_state_buffers()
 
@@ -831,8 +768,8 @@ class Adafactor(torch.optim.Optimizer):
           If scale_parameter=True, multiplies by max(eps1, param_rms).
 
         Adaptive mode (relative_step=True):
-          Same group-lr handling; additional relative LR factors from parameter RMS ratio,
-          optional emergency brakes, and saddle boost (not a HF time-based schedule).
+          Same group-lr handling; computes parameter RMS ratio vs group ``rms_max``
+          (relative factor is currently 1.0; not a HF time-based schedule).
 
         Returns:
             float: learning rate for this parameter
@@ -851,7 +788,6 @@ class Adafactor(torch.optim.Optimizer):
                 base_lr = 1.0
             base_lr = self._to_effective_lr(base_lr, param_group)
 
-        min_lr     = param_group["min_lr"]          # Minimum learning rate
         eps0       = param_group["eps"][0]          # Small constant for numerical stability (division guard)
         eps1       = param_group["eps"][1]          # Parameter scale regularization constant
         param_rms  = param_state["RMS"].item()      # Current parameter RMS magnitude
@@ -865,56 +801,19 @@ class Adafactor(torch.optim.Optimizer):
             scale = max(eps1, param_rms)
 
         if param_group["relative_step"]:
-            # Adaptive LR mode: relative factors from param RMS ratio / brakes / saddle
-            # Running max of parameter RMS over the group (decayed each step, then max with each p).
+            # Adaptive LR mode: RMS ratio vs group running max (infrastructure for relative_step).
             group_param_rms_max = param_group.get("rms_max", torch.tensor(eps1)).item()
             if not math.isfinite(group_param_rms_max):
                 group_param_rms_max = eps1
 
-            brake = 1.0
-            soft_brake = 1.0
-
-            emergency_brake = param_group.get("emergency_brake", None)
-            if param_group["scale_parameter"] and emergency_brake is not None:
-                emergency_brake = float(emergency_brake)
-                # Instant Brake: multiplicative factor based on current directional consistency
-                # Prefer fresh per-parameter dir_consistency; default 0.0 when absent (e.g. first step)
-                dc = param_state.get("dir_consistency")
-                if dc is not None:
-                    dir_val = dc.item() if isinstance(dc, torch.Tensor) else float(dc)
-                else:
-                    dir_val = 0.0
-
-                brake = max(emergency_brake, min(1 + dir_val, 1.0))
-
-                # Soft Brake: exponential damping based on cumulative instability
-                # exp(-score) smoothly reduces LR: score=0 → 1.0, score=2 → 0.135, score=4 → 0.018
-                instability_score = param_group.get("instability_score") or 0.0
-                soft_brake = math.exp(-instability_score)
-                soft_brake = max(emergency_brake, soft_brake)
-
-            # Ratio of parameter RMS to group RMS max
+            # Ratio of parameter RMS to group RMS max (kept for relative_step path).
             ratio = max(
                 eps0,
                 (group_param_rms_max - param_rms) / (group_param_rms_max + eps0),
             )
+            relative = 1.0  # was (1 + min_lr * ratio) * brakes * saddle
 
-            saddle_point_mult = max(1.0, float(self._saddle_point_boost))
-            relative = (1 + min_lr * ratio) * brake * soft_brake * saddle_point_mult
-
-        new_lr = base_lr * scale * relative
-
-        # Group-level update safeguard: cap LR by group RMS scale
-        if param_group.get("emergency_brake", None) is not None:
-            group_param_rms_max = param_group.get("rms_max", torch.tensor(eps1)).item()
-            max_allowed_lr = group_param_rms_max * 0.001
-            if group_param_rms_max <= eps0:
-                # Prevent zero-init groups (e.g. LoRA B=0) from being hard-frozen by a zero cap.
-                max_allowed_lr = max(max_allowed_lr, float(base_lr) * 0.1)
-            if new_lr > max_allowed_lr:
-                new_lr = max_allowed_lr
-
-        return new_lr
+        return base_lr * scale * relative
 
     def _update_beta1_from_dynamic_gain(self, group, global_mean_dynamic_gain: Optional[float]) -> None:
         """
@@ -1107,18 +1006,6 @@ class Adafactor(torch.optim.Optimizer):
             return 0.0
         return torch.tensor(per_group_list, dtype=torch.float64).mean().item()
 
-    def _mean_group_rms_ema_for_saddle(self) -> float:
-        """Mean of group-level ``rms_ema`` across groups (for stagnation detector)."""
-        vals = []
-        for g in self.param_groups:
-            t = g.get("rms_ema")
-            if t is None:
-                continue
-            vals.append(t.item() if isinstance(t, torch.Tensor) else float(t))
-        if not vals:
-            return 0.0
-        return sum(vals) / len(vals)
-
     @staticmethod
     def _group_scalar_item(group, key: str, default: float = 0.0) -> float:
         t = group.get(key)
@@ -1258,22 +1145,6 @@ class Adafactor(torch.optim.Optimizer):
                     param.grad = param._accum_grad
                     del param._accum_grad
 
-    def _update_saddle_point_boost(self, is_stagnant: bool) -> float:
-        step = self._saddle_point_step
-        b = self._saddle_point_boost
-        if is_stagnant:
-            # Expected experimental behavior: no hard upper cap by design.
-            b = b + step
-        else:
-            b = max(1.0, b - step)
-        self._saddle_point_boost = b
-        return b
-
-    def _detect_saddle_point(self, current_rms: float) -> None:
-        """Update saddle_point_boost from RMS(parameter) stagnation (loss-independent)."""
-        is_stagnant, _cv = self._saddle_point_detector.check(current_rms)
-        self._update_saddle_point_boost(is_stagnant)
-
     # adafactor manages its own lr
     def get_learning_rates(self):
         """
@@ -1300,10 +1171,6 @@ class Adafactor(torch.optim.Optimizer):
             with torch.enable_grad():
                 loss = closure()
 
-        # Detect RMS(parameter) stagnation from previous steps.
-        current_rms = self._mean_group_rms_ema_for_saddle()
-        self._detect_saddle_point(current_rms)
-
         self._global_lr()
 
         for group in self.param_groups:
@@ -1314,30 +1181,6 @@ class Adafactor(torch.optim.Optimizer):
                 group["rms_min"] = group["rms_min"] / decay_rate
             if "grad_rms_max" in group:
                 group["grad_rms_max"] = group["grad_rms_max"] * decay_rate
-
-            prev_dir_consistency = self._get_group_scalars(
-                group, "dir_consistency", default=0.0, reduction="mean"
-            )
-
-            # Soft Brake: accumulate only when soft brakes can affect LR
-            if (
-                group.get("emergency_brake", None) is not None
-                and group.get("scale_parameter")
-                and group.get("relative_step")
-            ):
-                dc_mean = prev_dir_consistency
-                score = group.get("instability_score") or 0.0
-
-                if dc_mean < 0:
-                    # Accumulate penalty for inconsistent directions (gradient reversals)
-                    # Penalty scales with magnitude: stronger for -1.0 (180° reversal) than -0.1
-                    score += abs(dc_mean) * 0.1
-                else:
-                    # Decay penalty when directions are consistent
-                    score *= 0.95
-
-                # Clamp score to [0.0, 4.0] to prevent LR from dropping to zero permanently
-                group["instability_score"] = min(max(score, 0.0), 4.0)
 
             metrics: List[
                 Tuple[torch.nn.Parameter, torch.Tensor, float, Optional[torch.Tensor]]
@@ -1442,7 +1285,7 @@ class Adafactor(torch.optim.Optimizer):
                     self._maybe_finite_or_eps_inplace(exp_avg_sq, eps0, unsigned=True)
                     update = exp_avg_sq.clamp(min=eps0).rsqrt().mul_(grad)
 
-                # Preconditioned + clipped direction (before LR) for fresh brake signal
+                # Preconditioned + clipped direction (before LR) for metrics / GNS
                 update_hat = update.div_(
                     (self._rms(update) / group["clip_threshold"]).clamp_(min=1.0))
                 update_hat = self._finite_or_eps(update_hat, eps0)
@@ -1655,27 +1498,6 @@ class Adafactor(torch.optim.Optimizer):
     def get_mean_dir_consistency(self):
         """Mean Directional Consistency across all parameter groups."""
         return self._scalars_per_group_to_mean(self.get_dir_consistency())
-
-    def get_instability_score(self):
-        """Get instability_score per parameter group (soft brake cumulative score)."""
-        out = []
-        for group in self.param_groups:
-            score = group.get("instability_score", 0.0)
-            out.append(score if score is not None else 0.0)
-        return out
-
-    def get_mean_instability_score(self):
-        """Mean instability_score across all parameter groups."""
-        return self._scalars_per_group_to_mean(self.get_instability_score())
-
-    def get_saddle_point_boost(self):
-        """Same global saddle_point_boost repeated per group (for API shape); used in relative_step only."""
-        b = float(self._saddle_point_boost)
-        return [b] * len(self.param_groups)
-
-    def get_mean_saddle_point_boost(self):
-        """Global saddle_point_boost (identical across groups)."""
-        return float(self._saddle_point_boost)
 
     def get_beta1(self):
         """Get beta1 (momentum coefficient) for each parameter group (legacy metric)."""

@@ -18,7 +18,6 @@ USER_BETA2 = 0.99
 def base_group(**overrides):
     g = {
         "lr": USER_LR,
-        "min_lr": 1e-6,
         "eps": (1e-30, 1e-3),
         "clip_threshold": 1.0,
         "beta2": USER_BETA2,
@@ -26,9 +25,6 @@ def base_group(**overrides):
         "scale_parameter": True,
         "relative_step": True,
         "rms_max": 0.05,
-        "emergency_brake": None,
-        "instability_score": 0.0,
-        "saddle_point_boost": 1.0,
     }
     g.update(overrides)
     return g

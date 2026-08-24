@@ -24,7 +24,6 @@ def approx_sq_grad(exp_avg_sq_row, exp_avg_sq_col):
 def get_lr(param_rms, grad_rms, group, dir_consistency=None):
     """Mirror adafactor._get_lr (relative_step + scale_parameter path)."""
     base_lr = group["lr"]
-    min_lr = group["min_lr"]
     eps0, eps1 = group["eps"]
     scale = 1.0
     relative = 1.0
@@ -34,23 +33,10 @@ def get_lr(param_rms, grad_rms, group, dir_consistency=None):
 
     if group["relative_step"]:
         group_param_rms_max = group.get("rms_max", eps1)
-        brake = 1.0
-        soft_brake = 1.0
-        eb = group.get("emergency_brake")
-        if group["scale_parameter"] and eb is not None:
-            dir_val = dir_consistency if dir_consistency is not None else 0.0
-            brake = max(eb, min(1 + dir_val, 1.0))
-            score = group.get("instability_score", 0.0)
-            soft_brake = max(eb, math.exp(-score))
         ratio = max(eps0, (group_param_rms_max - param_rms) / (group_param_rms_max + eps0))
-        relative = (1 + min_lr * ratio) * brake * soft_brake * group.get("saddle_point_boost", 1.0)
+        relative = 1.0  # was (1 + min_lr * ratio) * brakes * saddle
 
-    new_lr = base_lr * scale * relative
-    if group.get("emergency_brake") is not None:
-        group_param_rms_max = group.get("rms_max", eps1)
-        max_allowed = group_param_rms_max / 1000.0
-        new_lr = min(new_lr, max_allowed)
-    return new_lr
+    return base_lr * scale * relative
 
 
 def adafactor_step(grad, state, group):
@@ -115,7 +101,6 @@ def adafactor_step(grad, state, group):
 def run_scenario(name, grad_schedule, group_overrides=None):
     group = {
         "lr": 1e-3,
-        "min_lr": 1e-6,
         "eps": (1e-30, 1e-3),
         "clip_threshold": 1.0,
         "beta2": 0.99,
@@ -123,9 +108,6 @@ def run_scenario(name, grad_schedule, group_overrides=None):
         "scale_parameter": True,
         "relative_step": True,
         "rms_max": 0.05,
-        "emergency_brake": None,
-        "instability_score": 0.0,
-        "saddle_point_boost": 1.0,
     }
     if group_overrides:
         group.update(group_overrides)
@@ -163,7 +145,6 @@ def main():
     run_scenario("no momentum (beta1=None)", decay, {"beta1": None})
     run_scenario("fast v decay (beta2=0.9)", decay, {"beta2": 0.9})
     run_scenario("no relative_step", decay, {"relative_step": False})
-    run_scenario("emergency_brake=0.2", decay, {"emergency_brake": 0.2})
 
     # isolate preconditioner: sudden grad drop after warm v_ema
     print("\n=== sudden grad drop (v_ema stale) ===")
@@ -176,7 +157,6 @@ def compare_to_naive_lr():
     """Actual |update| vs |lr * grad| when grad decays."""
     group = {
         "lr": 1e-3,
-        "min_lr": 1e-6,
         "eps": (1e-30, 1e-3),
         "clip_threshold": 1.0,
         "beta2": 0.99,
@@ -184,9 +164,6 @@ def compare_to_naive_lr():
         "scale_parameter": True,
         "relative_step": True,
         "rms_max": 0.05,
-        "emergency_brake": None,
-        "instability_score": 0.0,
-        "saddle_point_boost": 1.0,
     }
     shape = (8, 16)
     direction = torch.randn(shape)
@@ -219,7 +196,6 @@ def convergence_plateau():
     """Stable direction, grad shrinks; track dynamic_gain = |update|/|grad|."""
     group = {
         "lr": 1e-3,
-        "min_lr": 1e-6,
         "eps": (1e-30, 1e-3),
         "clip_threshold": 1.0,
         "beta2": 0.99,
@@ -227,8 +203,6 @@ def convergence_plateau():
         "scale_parameter": True,
         "relative_step": True,
         "rms_max": 0.05,
-        "emergency_brake": None,
-        "saddle_point_boost": 1.0,
     }
     shape = (8, 16)
     d = torch.randn(shape)
@@ -276,11 +250,9 @@ def simulate_old_vs_new_lr():
     print("grad_rms   old_lr      current_lr   activity")
     for g in [1e-2, 1e-3, 1e-4, 1e-5, 1e-6]:
         old = old_activity_lr(g, grad_rms_max, param_rms, group_rms_max, cap_lr, eps0, eps1)
-        # current: scale * (1 + min_lr * ratio), no grad_rms
-        min_lr = 1e-6
+        # current: scale * relative (=1.0), no grad_rms / min_lr
         scale = max(eps1, param_rms)
-        ratio = max(eps0, (group_rms_max - param_rms) / (group_rms_max + eps0))
-        current = cap_lr * scale * (1 + min_lr * ratio)
+        current = cap_lr * scale
         act = g / (grad_rms_max + eps0)
         print(f"{g:.1e}  {old:.2e}  {current:.2e}  {act:.4f}")
 
@@ -288,7 +260,7 @@ def simulate_old_vs_new_lr():
 def clip_boost_effect():
     """Isolate clip_threshold: boost disappears when grad shrinks."""
     group = {
-        "lr": 1e-3, "min_lr": 1e-6, "eps": (1e-30, 1e-3), "clip_threshold": 1.0,
+        "lr": 1e-3, "eps": (1e-30, 1e-3), "clip_threshold": 1.0,
         "beta2": 0.99, "beta1": None, "scale_parameter": False, "relative_step": False,
     }
     shape = (8, 16)
@@ -317,9 +289,9 @@ def clip_boost_effect():
 def sudden_grad_drop_stale_v():
     """After large-grad warmup, tiny grad: stale v_ema vs fresh."""
     group = {
-        "lr": 1e-3, "min_lr": 1e-6, "eps": (1e-30, 1e-3), "clip_threshold": 1.0,
+        "lr": 1e-3, "eps": (1e-30, 1e-3), "clip_threshold": 1.0,
         "beta2": 0.99, "beta1": 0.9, "scale_parameter": True, "relative_step": True,
-        "rms_max": 0.05, "emergency_brake": None, "saddle_point_boost": 1.0,
+        "rms_max": 0.05,
     }
     shape = (8, 16)
     d = torch.randn(shape)
@@ -353,9 +325,9 @@ def sudden_grad_drop_stale_v():
 def sustained_small_grad_momentum():
     """Many steps at tiny grad after warmup: does dyn_gain (eff LR proxy) fall?"""
     group = {
-        "lr": 1e-3, "min_lr": 1e-6, "eps": (1e-30, 1e-3), "clip_threshold": 1.0,
+        "lr": 1e-3, "eps": (1e-30, 1e-3), "clip_threshold": 1.0,
         "beta2": 0.99, "beta1": 0.9, "scale_parameter": True, "relative_step": True,
-        "rms_max": 0.05, "emergency_brake": None, "saddle_point_boost": 1.0,
+        "rms_max": 0.05,
     }
     shape = (8, 16)
     d = torch.randn(shape)
