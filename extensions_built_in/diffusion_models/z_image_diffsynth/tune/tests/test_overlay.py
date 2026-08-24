@@ -63,7 +63,7 @@ def test_overlay_probe_stage_a_keys(overlay, recipe, tmp_path):
     assert p0["logging"]["log_every"] != 1
     assert p0["performance_log_every"] == 0
     assert p0["train"]["gradient_checkpointing"] is True
-    assert p0["model"]["compile"] is True
+    assert p0["model"]["compile"] is False
     assert p0["train"]["dtype"] == "bf16"
     assert p0["network"]["dtype"] == "fp32"
     assert p0["train"].get("disable_sampling") is not True

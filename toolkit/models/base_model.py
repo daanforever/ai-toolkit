@@ -365,6 +365,14 @@ class BaseModel:
     def add_status_update_hook(self, func):
         self._status_update_hooks.append(func)
 
+    def _unload_sampling_transformer_after_generate(self):
+        if self._sampling_transformer is None:
+            return
+        if getattr(self, "_train_on_turbo", False):
+            return
+        self._sampling_transformer.to('cpu', dtype=self.torch_dtype)
+        print_acc("\nUnloaded sampling transformer to CPU")
+
     @torch.no_grad()
     def generate_images(
             self,
@@ -693,12 +701,7 @@ class BaseModel:
 
         finally:
             # Unload sampling transformer from GPU and restore main model to device
-            if self._sampling_transformer is not None:
-                self._sampling_transformer.to('cpu', dtype=self.torch_dtype)
-                # self._sampling_network.force_to('cpu', self.torch_dtype)
-                # self.model.to(self.device_torch, dtype=self.torch_dtype)
-                # self.network.force_to(self.device_torch, torch.float32)
-                print_acc("\nUnloaded sampling transformer to CPU")
+            self._unload_sampling_transformer_after_generate()
 
             # Clear pipeline and cache to reduce vram usage (only if we created pipeline here)
             if pipeline_created:

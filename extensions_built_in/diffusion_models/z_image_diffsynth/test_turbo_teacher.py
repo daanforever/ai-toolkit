@@ -800,3 +800,59 @@ def test_trainer_network_not_synced_after_turbo_teacher_mode(monkeypatch):
     assert all(p.grad is not None for p in shared)
     opt.step()
     assert any(not torch.equal(p, b) for p, b in zip(shared, before))
+
+
+# --- Unload sampling transformer after generate ---
+
+
+def _stub_base_for_unload(*, train_on_turbo=None):
+    from toolkit.models.base_model import BaseModel
+
+    to_devices = []
+    model = BaseModel.__new__(BaseModel)
+    model.torch_dtype = torch.float32
+    sampling = MagicMock()
+
+    def _to(device, *args, **kwargs):
+        to_devices.append(device)
+        return sampling
+
+    sampling.to = _to
+    model._sampling_transformer = sampling
+    if train_on_turbo is not None:
+        model._train_on_turbo = train_on_turbo
+    return model, to_devices
+
+
+def test_unload_sampling_transformer_after_generate_respects_train_on_turbo(
+    monkeypatch,
+):
+    prints = []
+    monkeypatch.setattr(
+        "toolkit.models.base_model.print_acc",
+        lambda *a, **k: prints.append(a[0] if a else ""),
+    )
+    model, to_devices = _stub_base_for_unload(train_on_turbo=True)
+
+    model._unload_sampling_transformer_after_generate()
+    assert to_devices == []
+    assert prints == []
+
+    model._train_on_turbo = False
+    model._unload_sampling_transformer_after_generate()
+    assert to_devices == ["cpu"]
+    assert any("Unloaded sampling transformer to CPU" in p for p in prints)
+
+
+def test_unload_sampling_transformer_when_train_on_turbo_unset(monkeypatch):
+    prints = []
+    monkeypatch.setattr(
+        "toolkit.models.base_model.print_acc",
+        lambda *a, **k: prints.append(a[0] if a else ""),
+    )
+    model, to_devices = _stub_base_for_unload()
+    assert not hasattr(model, "_train_on_turbo")
+
+    model._unload_sampling_transformer_after_generate()
+    assert to_devices == ["cpu"]
+    assert any("Unloaded sampling transformer to CPU" in p for p in prints)
