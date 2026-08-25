@@ -58,3 +58,15 @@ def turbo_slot_dsigma_weights(n: int) -> torch.Tensor:
     next_sigma = torch.cat([sigmas[1:], sigmas.new_zeros(1)])
     dsigma = (sigmas - next_sigma).abs()
     return dsigma / dsigma.sum()
+
+
+def turbo_slot_sampling_weights(n: int, content_or_style: str) -> torch.Tensor:
+    """Slot sampling weights from dsigma, optionally reversed for content.
+
+    balanced/style = dsigma (last slot heaviest, ~30% on 8-step Turbo).
+    content = reversed dsigma (first slot heaviest).
+    """
+    dsigma = turbo_slot_dsigma_weights(n)
+    if content_or_style == "content":
+        return dsigma.flip(0)
+    return dsigma

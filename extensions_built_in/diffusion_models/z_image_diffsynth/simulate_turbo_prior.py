@@ -445,7 +445,8 @@ def _install_t_collector() -> None:
 
     First ``FORCE_COVERAGE_STEPS`` calls emit Turbo centers round-robin with no
     jitter (nearest-center coverage + keeps frac t<300 low). Later steps use the
-    real dsigma + Voronoi jitter path under annealed jitter.
+    real dsigma + Voronoi jitter path under annealed jitter
+    (content may reverse dsigma).
     Install once per process (must not nest wrappers).
     """
     global _PROBES_INSTALLED
@@ -455,7 +456,7 @@ def _install_t_collector() -> None:
         return
     _orig = TimestepSampler._sample_turbo_prior
 
-    def _wrapped(self, batch_size, latents, step_num=0):
+    def _wrapped(self, batch_size, latents, step_num=0, content_or_style="balanced"):
         j = _effective_jitter(self.train_config, step_num)
         _COLLECTED_JITTER.append((int(step_num), j))
         force_slot = (
@@ -471,7 +472,7 @@ def _install_t_collector() -> None:
             centers = centers.to(device=latents.device, dtype=torch.float32)
             t = centers[force_slot].expand(int(batch_size)).clone()
         else:
-            t = _orig(self, batch_size, latents, step_num)
+            t = _orig(self, batch_size, latents, step_num, content_or_style)
         _COLLECTED_T.extend(t.detach().float().cpu().tolist())
         return t
 

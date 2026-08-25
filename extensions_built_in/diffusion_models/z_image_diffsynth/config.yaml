@@ -42,7 +42,7 @@ config:
         noise_scheduler: "flowmatch"
         prediction_type: "flowmatch"
         timestep_type: "turbo_prior"
-        content_or_style: "balanced"
+        content_or_style: "content"
         gaussian_mean: 1000
         gaussian_std: 0.55
         gaussian_mean_2: 120

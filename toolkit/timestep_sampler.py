@@ -107,7 +107,9 @@ class TimestepSampler:
         # turbo_prior must run before content_or_style gaussian branches, which would
         # otherwise steal sampling when both are set in YAML.
         if self.train_config.timestep_type == 'turbo_prior':
-            timesteps = self._sample_turbo_prior(batch_size, latents, step_num)
+            timesteps = self._sample_turbo_prior(
+                batch_size, latents, step_num, content_or_style
+            )
             return TimestepSamplerResult(timesteps=timesteps, timestep_indices=None)
 
         # Gaussian modes are chosen by `content_or_style` and must not be overridden by
@@ -163,12 +165,15 @@ class TimestepSampler:
         batch_size: int,
         latents: torch.Tensor,
         step_num: int,
+        content_or_style: str = "balanced",
     ) -> torch.Tensor:
         """Sample float t from the official Turbo NFE grid with Voronoi jitter.
 
-        Slots are always multinomial-sampled by |Δσ| weights (dsigma). No MSE
+        Slots are multinomial-sampled from dsigma; ``content`` reverses dsigma
+        (first-heavy); ``balanced``/``style`` keep dsigma (last-heavy). No MSE
         slot-weight multiply. ``turbo_slot_weighting`` is not an A/B option: if
-        present and not ``dsigma``, raise; if omitted, still dsigma.
+        present and not ``dsigma``, raise; if omitted, still dsigma family
+        (content may then flip).
 
         Jitter anneals from ``turbo_t_jitter`` (start) to ``turbo_t_jitter_end``
         over training steps: j = lerp(start, end, step_num / max(steps-1, 1)).
@@ -176,7 +181,7 @@ class TimestepSampler:
         """
         from extensions_built_in.diffusion_models.z_image_diffsynth.turbo_schedule import (
             get_turbo_sigmas_and_timesteps,
-            turbo_slot_dsigma_weights,
+            turbo_slot_sampling_weights,
         )
 
         if hasattr(self.train_config, "turbo_slot_weighting"):
@@ -215,7 +220,7 @@ class TimestepSampler:
                 d_next = (centers[i] - centers[i + 1]) * 0.5
                 deltas[i] = torch.minimum(d_prev, d_next)
 
-        weights = turbo_slot_dsigma_weights(n).to(
+        weights = turbo_slot_sampling_weights(n, content_or_style).to(
             device=latents.device, dtype=torch.float32
         )
         slot = torch.multinomial(weights, batch_size, replacement=True)

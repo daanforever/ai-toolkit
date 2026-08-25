@@ -2,7 +2,7 @@
 # Z-Image DiffSynth — Turbo-t prior LoRA (train SFT Z-Image, sample Z-Image-Turbo)
 # process.type: z_image_diffsynth_trainer, model.arch: zimage_diffsynth.
 # Train on Tongyi-MAI/Z-Image; sample/infer on Tongyi-MAI/Z-Image-Turbo at 8 steps, CFG 0.
-# Slot sampling is always dsigma — do not set turbo_slot_weighting.
+# Omit turbo_slot_weighting (dsigma family). content_or_style: content reverses slot weights toward composition; balanced/style keep last-heavy dsigma.
 # See extensions_built_in/diffusion_models/z_image_diffsynth/README.turbo.md
 job: extension
 config:

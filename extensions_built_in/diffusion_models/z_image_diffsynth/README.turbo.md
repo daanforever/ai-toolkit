@@ -31,7 +31,7 @@ With `timestep_type: turbo_prior`, the trainer / sampler **raises** (does not si
 | `model.model_kwargs.use_diffsynth_training_loop` | `true` | `false` |
 | `model.model_kwargs.use_diffsynth_prompt_encoding` | explicit `false` | `true` (or omit → defaulted on) |
 | `model.model_kwargs.use_dynamic_shifting` | `true` | `false` |
-| `train.content_or_style` | `gaussian` or `gaussian_bimodal` | `balanced` (or another non-gaussian mode) |
+| `train.content_or_style` | `gaussian` or `gaussian_bimodal` | `balanced`, `content`, or `style` (any non-gaussian mode) |
 | `train.turbo_slot_weighting` | any value other than `dsigma` | omit the key (always dsigma) |
 
 When `train.turbo_teacher_weight` is `true`, the trainer also **raises** if:
@@ -42,7 +42,7 @@ When `train.turbo_teacher_weight` is `true`, the trainer also **raises** if:
 | `model.model_kwargs.use_diffsynth_training_loop` is `true` | `false` |
 | Sampling DiT missing (`model.sampling_name_or_path` unset / unloaded) | Z-Image-Turbo sampling transformer loaded |
 
-There is **no A/B slot-weighting dropdown**. Slots are always multinomial-sampled by `|Δσ|` (dsigma). Do not put `turbo_slot_weighting` in the YAML.
+There is **no A/B `turbo_slot_weighting` dropdown**. Omit the key (or set `dsigma` only). Slot multinomial uses dsigma; `content_or_style: content` **reverses** those weights (first-heavy); `balanced`/`style` keep dsigma (last-heavy).
 
 ## Required settings
 
@@ -67,7 +67,7 @@ Strongly recommended so training `t` and preview sampling stay on the Turbo traj
 
 | Location | Parameter | Recommended value | Notes |
 | --- | --- | --- | --- |
-| `train` | `content_or_style` | `balanced` | `gaussian` / `gaussian_bimodal` **raise**. |
+| `train` | `content_or_style` | `balanced` | `gaussian` / `gaussian_bimodal` **raise**. Under `turbo_prior` this is **slot** bias (not a dense 1000-step cubic): `balanced`/`style` = dsigma last-heavy (`t≈300` ~30%); `content` = reversed dsigma first-heavy (`t≈1000` ~30%, composition). |
 | `train` | `timestep_weighting` | `none` | Do not re-weight a dense 1000-step SNR/gaussian schedule; `t` is already on eight Turbo slots. |
 | `train` | `min_snr_gamma` | `0` | Disable min-SNR reweighting for this prior. |
 | `train` | `turbo_prior_steps` | `8` | Number of Turbo slots (default 8). Keep in lockstep with `sample.sample_steps`. |
@@ -122,7 +122,7 @@ Do **not** expand this recipe to assistant LoRA, trajectory imitation, or full D
 
 | Avoid | Instead |
 | --- | --- |
-| `timestep_type: linear` or `shift` plus `content_or_style: gaussian` | `timestep_type: turbo_prior` + `content_or_style: balanced` |
+| `timestep_type: linear` or `shift` plus `content_or_style: gaussian` | `timestep_type: turbo_prior` + `content_or_style: balanced` (ODE default). `content` is the composition experiment, not a replacement of that default. |
 | `use_diffsynth_training_loop: true` | `false` (required; `true` raises) |
 | `use_diffsynth_prompt_encoding: false` | `true` (explicit `false` raises) |
 | `use_dynamic_shifting: true` | `false` (`true` raises) |
