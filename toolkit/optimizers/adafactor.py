@@ -46,7 +46,7 @@ class Adafactor(torch.optim.Optimizer):
             If False, use fixed `group["beta2"]`. If True, `_effective_beta2` blends with
             activity ``grad_rms / (grad_rms_max + eps0)`` between `beta2_min` and configured
             `group["beta2"]` (honors ctor / `set_beta2`).
-        beta2_min (`float`, *optional*, defaults to `0.9`):
+        beta2_min (`float`, *optional*, defaults to `0.0`):
             Lower bound for adaptive beta2 mixing:
             ``beta2_min + (beta2 - beta2_min) * activity``, with `beta2` clamped to ``[0, 1)``
             and `beta2_min` clamped into ``[0, beta2]``. If ``beta2 <= beta2_min``, returns
@@ -175,7 +175,7 @@ class Adafactor(torch.optim.Optimizer):
         beta1=None,
         beta2=0.99,
         beta2_adaptive: bool = False,
-        beta2_min: float = 0.9,
+        beta2_min: float = 0.0,
         rms_max_decay_rate=0.97,
         weight_decay=0.0,
         weight_decay_increment=0.0,
@@ -1068,7 +1068,7 @@ class Adafactor(torch.optim.Optimizer):
 
         # Configured beta2 is the activity-blend high end (honors ctor / set_beta2).
         beta2 = max(0.0, min(beta2, 1.0 - 1e-12))
-        beta2_min = float(group.get("beta2_min", 0.9))
+        beta2_min = float(group.get("beta2_min", 0.0))
         beta2_min = max(0.0, min(beta2, beta2_min))
         if beta2 <= beta2_min:
             return beta2_min

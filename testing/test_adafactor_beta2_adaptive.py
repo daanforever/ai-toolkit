@@ -93,6 +93,34 @@ def test_effective_beta2_low_activity_near_beta2_min():
     assert beta2 == pytest.approx(0.9, abs=1e-4)
 
 
+def test_effective_beta2_omitted_min_defaults_to_zero():
+    group = {
+        "beta2": 0.99,
+        "beta2_adaptive": True,
+        "grad_rms_max": torch.tensor(1.0),
+    }
+    beta2 = Adafactor._effective_beta2(group, torch.tensor(1e-12), eps0=1e-30)
+    assert beta2 == pytest.approx(0.0, abs=1e-4)
+
+
+def test_ctor_default_beta2_min_is_zero():
+    p = torch.nn.Parameter(torch.ones(2, 2))
+    opt = Adafactor(
+        [p],
+        lr=1e-4,
+        beta2=0.99,
+        beta2_adaptive=True,
+        scale_parameter=False,
+        relative_step=False,
+        weight_decay=0.0,
+    )
+    group = opt.param_groups[0]
+    assert group["beta2_min"] == pytest.approx(0.0)
+    group["grad_rms_max"] = torch.tensor(1.0)
+    beta2 = Adafactor._effective_beta2(group, torch.tensor(1e-12), eps0=1e-30)
+    assert beta2 == pytest.approx(0.0, abs=1e-4)
+
+
 def test_effective_beta2_honors_set_beta2_high_end():
     p = torch.nn.Parameter(torch.ones(2, 2))
     opt = Adafactor(
