@@ -452,3 +452,109 @@ def test_scale_wd_negative_factor_decreases_later_layers():
         assert math.isfinite(got)
         assert got == pytest.approx(exp)
     assert effective[0] > effective[1] > effective[2]
+
+
+def test_set_scale_lr_by_index_enables_after_init_false():
+    p0 = torch.nn.Parameter(torch.ones(2))
+    p1 = torch.nn.Parameter(torch.ones(2))
+    p2 = torch.nn.Parameter(torch.ones(2))
+    lr = 1e-3
+    eps = (1e-30, 1e-3)
+    opt = Adafactor(
+        [
+            {"params": [p0], "index": 0},
+            {"params": [p1], "index": 1},
+            {"params": [p2], "index": 2},
+        ],
+        lr=lr,
+        eps=eps,
+        relative_step=False,
+        scale_parameter=False,
+        warmup_init=False,
+        beta1=None,
+        weight_decay=0.0,
+        scale_lr_by_index=False,
+    )
+    assert opt.scale_lr_by_index is False
+    assert opt._max_index is None
+
+    opt.set_scale_lr_by_index(True)
+    assert opt.scale_lr_by_index is True
+    assert opt._max_index == 2
+
+    for idx in (0, 1, 2):
+        state = _state_with_rms(opt, group_idx=idx)
+        got = opt._get_lr(opt.param_groups[idx], state)
+        expected = lr * math.exp(-idx / 2) + eps[0]
+        assert got == pytest.approx(expected)
+
+
+def test_set_scale_lr_factor_changes_curve():
+    p0 = torch.nn.Parameter(torch.ones(2))
+    p1 = torch.nn.Parameter(torch.ones(2))
+    p2 = torch.nn.Parameter(torch.ones(2))
+    lr = 1e-3
+    eps = (1e-30, 1e-3)
+    opt = Adafactor(
+        [
+            {"params": [p0], "index": 0},
+            {"params": [p1], "index": 1},
+            {"params": [p2], "index": 2},
+        ],
+        lr=lr,
+        eps=eps,
+        relative_step=False,
+        scale_parameter=False,
+        warmup_init=False,
+        beta1=None,
+        weight_decay=0.0,
+        scale_lr_by_index=True,
+        scale_lr_factor=1.0,
+    )
+    opt.set_scale_lr_factor(2.0)
+    assert opt.scale_lr_factor == 2.0
+    for idx in (0, 1, 2):
+        state = _state_with_rms(opt, group_idx=idx)
+        got = opt._get_lr(opt.param_groups[idx], state)
+        expected = lr * math.exp(-2.0 * idx / 2) + eps[0]
+        assert got == pytest.approx(expected)
+
+
+def test_set_scale_lr_by_index_disables():
+    p0 = torch.nn.Parameter(torch.ones(2))
+    p1 = torch.nn.Parameter(torch.ones(2))
+    lr = 1e-3
+    opt = Adafactor(
+        [
+            {"params": [p0], "index": 0},
+            {"params": [p1], "index": 1},
+        ],
+        lr=lr,
+        relative_step=False,
+        scale_parameter=False,
+        warmup_init=False,
+        beta1=None,
+        weight_decay=0.0,
+        scale_lr_by_index=True,
+    )
+    opt.set_scale_lr_by_index(False)
+    assert opt.scale_lr_by_index is False
+    assert opt._max_index is None
+    state = _state_with_rms(opt, 1)
+    assert opt._get_lr(opt.param_groups[1], state) == pytest.approx(lr)
+
+
+def test_set_scale_lr_by_index_errors_without_indices():
+    p = torch.nn.Parameter(torch.ones(2))
+    opt = Adafactor(
+        [{"params": [p]}],
+        lr=1e-3,
+        relative_step=False,
+        scale_parameter=False,
+        warmup_init=False,
+        beta1=None,
+        weight_decay=0.0,
+        scale_lr_by_index=False,
+    )
+    with pytest.raises(ValueError, match="cannot determine max_index"):
+        opt.set_scale_lr_by_index(True)

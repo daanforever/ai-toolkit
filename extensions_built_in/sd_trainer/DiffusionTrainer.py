@@ -61,6 +61,8 @@ class DiffusionTrainer(SDTrainer):
             self._last_applied_runtime_sample_every = None
             self._last_applied_runtime_warmup_steps = None
             self._last_applied_runtime_warmup_boost = None
+            self._last_applied_runtime_scale_lr_by_index = None
+            self._last_applied_runtime_scale_lr_factor = None
             self._last_applied_runtime_min_snr_gamma = None
             self._last_applied_runtime_debug = None
             self._last_applied_runtime_fc_key: Optional[
@@ -437,6 +439,96 @@ class DiffusionTrainer(SDTrainer):
     def get_runtime_warmup_boost(self):
         """Read runtime_warmup_boost from DB (only when is_ui_trainer). Returns float or None."""
         return self._get_runtime_scalar("runtime_warmup_boost", float)
+
+    def get_runtime_scale_lr_by_index(self):
+        """Read runtime_scale_lr_by_index from DB. Returns bool or None."""
+        if not self.is_ui_trainer:
+            return None
+
+        def _read():
+            try:
+                return self._get_runtime_scalar("runtime_scale_lr_by_index", bool)
+            except sqlite3.OperationalError:
+                return None
+
+        return _read()
+
+    def get_runtime_scale_lr_factor(self):
+        """Read runtime_scale_lr_factor from DB. Returns float or None."""
+        if not self.is_ui_trainer:
+            return None
+
+        def _read():
+            try:
+                return self._get_runtime_scalar("runtime_scale_lr_factor", float)
+            except sqlite3.OperationalError:
+                return None
+
+        return _read()
+
+    def apply_runtime_scale_lr_factor(self):
+        """If runtime_scale_lr_factor is set in DB, apply it to optimizer (e.g. Adafactor)."""
+        if not self.is_ui_trainer:
+            return
+        value = self.get_runtime_scale_lr_factor()
+        if value is None:
+            return
+        if value == self._last_applied_runtime_scale_lr_factor:
+            return
+        optimizer = unwrap_model(self.optimizer)
+        while getattr(optimizer, "optimizer", None) is not None:
+            optimizer = optimizer.optimizer
+        if hasattr(optimizer, "set_scale_lr_factor"):
+            if getattr(optimizer, "scale_lr_factor", None) == value:
+                self._last_applied_runtime_scale_lr_factor = value
+                return
+            if is_debug_enabled():
+                print_acc(f"\nruntime_scale_lr_factor from UI/DB: {value}")
+            try:
+                optimizer.set_scale_lr_factor(value)
+            except ValueError as e:
+                print_acc(f"\nruntime_scale_lr_factor from DB not applied: {e}")
+                self._last_applied_runtime_scale_lr_factor = value
+                return
+        else:
+            if is_debug_enabled():
+                print_acc(
+                    f"\nruntime_scale_lr_factor from DB not applied: optimizer has no "
+                    f"set_scale_lr_factor (type: {type(optimizer).__name__})"
+                )
+        self._last_applied_runtime_scale_lr_factor = value
+
+    def apply_runtime_scale_lr_by_index(self):
+        """If runtime_scale_lr_by_index is set in DB, apply it to optimizer (e.g. Adafactor)."""
+        if not self.is_ui_trainer:
+            return
+        value = self.get_runtime_scale_lr_by_index()
+        if value is None:
+            return
+        if value == self._last_applied_runtime_scale_lr_by_index:
+            return
+        optimizer = unwrap_model(self.optimizer)
+        while getattr(optimizer, "optimizer", None) is not None:
+            optimizer = optimizer.optimizer
+        if hasattr(optimizer, "set_scale_lr_by_index"):
+            if getattr(optimizer, "scale_lr_by_index", None) == value:
+                self._last_applied_runtime_scale_lr_by_index = value
+                return
+            if is_debug_enabled():
+                print_acc(f"\nruntime_scale_lr_by_index from UI/DB: {value}")
+            try:
+                optimizer.set_scale_lr_by_index(value)
+            except ValueError as e:
+                print_acc(f"\nruntime_scale_lr_by_index from DB not applied: {e}")
+                self._last_applied_runtime_scale_lr_by_index = value
+                return
+        else:
+            if is_debug_enabled():
+                print_acc(
+                    f"\nruntime_scale_lr_by_index from DB not applied: optimizer has no "
+                    f"set_scale_lr_by_index (type: {type(optimizer).__name__})"
+                )
+        self._last_applied_runtime_scale_lr_by_index = value
 
     def get_runtime_min_snr_gamma(self):
         """Read runtime_min_snr_gamma from DB (only when is_ui_trainer). Returns float or None."""
@@ -1273,6 +1365,8 @@ class DiffusionTrainer(SDTrainer):
         self._last_applied_runtime_sample_every = None
         self._last_applied_runtime_warmup_steps = None
         self._last_applied_runtime_warmup_boost = None
+        self._last_applied_runtime_scale_lr_by_index = None
+        self._last_applied_runtime_scale_lr_factor = None
         self._last_applied_runtime_min_snr_gamma = None
         self._last_applied_runtime_debug = None
         self._last_applied_runtime_fc_key = None
@@ -1413,6 +1507,8 @@ class DiffusionTrainer(SDTrainer):
             self.apply_runtime_prompts()
             self.apply_runtime_warmup_steps()
             self.apply_runtime_warmup_boost()
+            self.apply_runtime_scale_lr_factor()
+            self.apply_runtime_scale_lr_by_index()
             self.apply_runtime_min_snr_gamma()
             self.apply_runtime_debug()
 

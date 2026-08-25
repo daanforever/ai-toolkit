@@ -73,6 +73,8 @@ model RuntimeParams {
   runtime_prompts          String?
   runtime_warmup_steps     Int?
   runtime_warmup_boost     Float?
+  runtime_scale_lr_by_index Boolean?
+  runtime_scale_lr_factor  Float?
   runtime_min_snr_gamma    Float?
   runtime_debug            Boolean?
   updated_at               DateTime @updatedAt

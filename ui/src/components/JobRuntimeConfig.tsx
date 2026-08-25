@@ -93,6 +93,14 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
   const weightDecayMode = optimizerParams?.weight_decay_mode ?? 'absolute';
   const warmupSteps = optimizerParams?.warmup_steps ?? 100;
   const warmupBoost = optimizerParams?.warmup_boost ?? 1.0;
+  const scaleLrByIndex =
+    optimizerParams?.scale_lr_by_index === true ||
+    (optimizerParams as Record<string, unknown> | undefined)?.scale_lr_by_index === 1;
+  const scaleLrFactor =
+    optimizerParams?.scale_lr_factor != null &&
+      Number.isFinite(Number(optimizerParams.scale_lr_factor))
+      ? Number(optimizerParams.scale_lr_factor)
+      : 1.0;
   const beta1 = optimizerParams?.beta1 != null
     ? Number(optimizerParams.beta1)
     : null;
@@ -211,13 +219,15 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     process.train.content_or_style = contentOrStyle;
     const optimizerName = (process.train.optimizer || '').toLowerCase();
     const isHfAdafactor = optimizerName === 'hfadafactor' || optimizerName === 'hf_adafactor';
-    const op = process.train.optimizer_params as Record<string, number | string | null>;
+    const op = process.train.optimizer_params as Record<string, number | string | boolean | null>;
     op.weight_decay = weightDecay;
     if (isHfAdafactor) {
       delete op.weight_decay_increment;
       delete op.weight_decay_mode;
       delete op.warmup_steps;
       delete op.warmup_boost;
+      delete op.scale_lr_by_index;
+      delete op.scale_lr_factor;
       delete op.beta2;
       delete op.min_lr;
       if (beta1 != null) {
@@ -230,6 +240,8 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
       op.weight_decay_mode = weightDecayMode;
       op.warmup_steps = warmupSteps;
       op.warmup_boost = warmupBoost;
+      op.scale_lr_by_index = scaleLrByIndex;
+      op.scale_lr_factor = scaleLrFactor;
       op.beta1 = beta1;
       op.beta2 = beta2;
       delete op.min_lr;
@@ -368,6 +380,8 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         sample_every?: number;
         warmup_steps?: number;
         warmup_boost?: number;
+        scale_lr_by_index?: boolean;
+        scale_lr_factor?: number;
         min_snr_gamma?: number;
         debug?: boolean;
         fixed_cycle_timesteps?: number[];
@@ -396,6 +410,8 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         sample_every: sampleEvery,
         warmup_steps: warmupSteps,
         warmup_boost: warmupBoost,
+        scale_lr_by_index: scaleLrByIndex,
+        scale_lr_factor: scaleLrFactor,
         min_snr_gamma: minSnrGamma,
         debug,
       };
@@ -466,6 +482,8 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     sampleEvery,
     warmupSteps,
     warmupBoost,
+    scaleLrByIndex,
+    scaleLrFactor,
     minSnrGamma,
     debug,
     datasets,
@@ -605,6 +623,43 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
                 const v = parseFloat(e.target.value);
                 if (Number.isFinite(v)) setValue(v, `${OPTIMIZER_PARAMS_PATH}.beta2`);
                 setApplyStatus('idle');
+              }}
+              className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+            />
+          </div>
+        </div>
+
+        <div className="flex items-end gap-4 flex-wrap">
+          <div className="space-y-2 flex-1 min-w-[140px] flex items-center gap-2">
+            <p className="text-xs text-gray-400">Scale LR by index</p>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={scaleLrByIndex}
+              onClick={() => {
+                setValue(!scaleLrByIndex, `${OPTIMIZER_PARAMS_PATH}.scale_lr_by_index`);
+                setApplyStatus('idle');
+              }}
+              className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-900 ${scaleLrByIndex ? 'bg-blue-600' : 'bg-gray-600'}`}
+            >
+              <span
+                className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition-transform ${scaleLrByIndex ? 'translate-x-5' : 'translate-x-1'}`}
+              />
+            </button>
+          </div>
+          <div className="space-y-2 flex-1 min-w-[140px]">
+            <p className="text-xs text-gray-400">Scale LR factor</p>
+            <input
+              type="number"
+              step="any"
+              placeholder="e.g. 1.2"
+              value={scaleLrFactor}
+              onChange={(e) => {
+                const v = parseFloat(e.target.value);
+                if (Number.isFinite(v)) {
+                  setValue(v, `${OPTIMIZER_PARAMS_PATH}.scale_lr_factor`);
+                  setApplyStatus('idle');
+                }
               }}
               className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
             />

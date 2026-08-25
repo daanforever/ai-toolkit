@@ -17,7 +17,7 @@ export async function PATCH(
     return NextResponse.json({ error: 'Job not found' }, { status: 404 });
   }
 
-  let body: { lr?: number; gaussian_mean?: number; gaussian_std?: number; gaussian_mean_2?: number; gaussian_std_2?: number; fixed_cycle_timesteps?: number[]; fixed_cycle_seed?: number | null; fixed_cycle_weight_peak_timesteps?: number[] | null; fixed_cycle_weight_sigma?: number; turbo_prior_steps?: number; turbo_t_jitter?: number; turbo_teacher_weight?: boolean; weight_decay?: number; weight_decay_increment?: number; weight_decay_mode?: string; beta1?: number | null; beta2?: number; content_or_style?: string; timestep_type?: string; timestep_weighting?: string; network_weights?: number[]; prompts?: string[]; batch_size?: number; gradient_accumulation?: number; save_every?: number; sample_every?: number; warmup_steps?: number; warmup_boost?: number; min_snr_gamma?: number; debug?: boolean };
+  let body: { lr?: number; gaussian_mean?: number; gaussian_std?: number; gaussian_mean_2?: number; gaussian_std_2?: number; fixed_cycle_timesteps?: number[]; fixed_cycle_seed?: number | null; fixed_cycle_weight_peak_timesteps?: number[] | null; fixed_cycle_weight_sigma?: number; turbo_prior_steps?: number; turbo_t_jitter?: number; turbo_teacher_weight?: boolean; weight_decay?: number; weight_decay_increment?: number; weight_decay_mode?: string; beta1?: number | null; beta2?: number; content_or_style?: string; timestep_type?: string; timestep_weighting?: string; network_weights?: number[]; prompts?: string[]; batch_size?: number; gradient_accumulation?: number; save_every?: number; sample_every?: number; warmup_steps?: number; warmup_boost?: number; scale_lr_by_index?: boolean; scale_lr_factor?: number; min_snr_gamma?: number; debug?: boolean };
   try {
     body = await request.json();
   } catch {
@@ -32,7 +32,7 @@ export async function PATCH(
   const TIMESTEP_WEIGHTING_VALUES = ['none', 'weighted', 'gaussian', 'gaussian_bimodal'] as const;
   const WEIGHT_DECAY_MODE_VALUES = ['update_rms', 'param_rms', 'absolute'] as const;
 
-  const data: { runtime_lr?: number; runtime_gaussian_mean?: number; runtime_gaussian_std?: number; runtime_gaussian_mean_2?: number; runtime_gaussian_std_2?: number; runtime_fixed_cycle_timesteps?: string; runtime_fixed_cycle_seed?: number | null; runtime_fixed_cycle_weight_peak_timesteps?: string | null; runtime_fixed_cycle_weight_sigma?: number; runtime_turbo_prior_steps?: number; runtime_turbo_t_jitter?: number; runtime_turbo_teacher_weight?: boolean; runtime_weight_decay?: number; runtime_weight_decay_increment?: number; runtime_weight_decay_mode?: string; runtime_beta1?: number | null; runtime_beta2?: number; runtime_content_or_style?: string; runtime_timestep_type?: string; runtime_timestep_weighting?: string; runtime_network_weights?: string; runtime_prompts?: string; runtime_batch_size?: number; runtime_gradient_accumulation?: number; runtime_save_every?: number; runtime_sample_every?: number; runtime_warmup_steps?: number; runtime_warmup_boost?: number; runtime_min_snr_gamma?: number; runtime_debug?: boolean } = {};
+  const data: { runtime_lr?: number; runtime_gaussian_mean?: number; runtime_gaussian_std?: number; runtime_gaussian_mean_2?: number; runtime_gaussian_std_2?: number; runtime_fixed_cycle_timesteps?: string; runtime_fixed_cycle_seed?: number | null; runtime_fixed_cycle_weight_peak_timesteps?: string | null; runtime_fixed_cycle_weight_sigma?: number; runtime_turbo_prior_steps?: number; runtime_turbo_t_jitter?: number; runtime_turbo_teacher_weight?: boolean; runtime_weight_decay?: number; runtime_weight_decay_increment?: number; runtime_weight_decay_mode?: string; runtime_beta1?: number | null; runtime_beta2?: number; runtime_content_or_style?: string; runtime_timestep_type?: string; runtime_timestep_weighting?: string; runtime_network_weights?: string; runtime_prompts?: string; runtime_batch_size?: number; runtime_gradient_accumulation?: number; runtime_save_every?: number; runtime_sample_every?: number; runtime_warmup_steps?: number; runtime_warmup_boost?: number; runtime_scale_lr_by_index?: boolean; runtime_scale_lr_factor?: number; runtime_min_snr_gamma?: number; runtime_debug?: boolean } = {};
 
   const lr = body.lr;
   if (lr !== undefined) {
@@ -388,6 +388,28 @@ export async function PATCH(
     data.runtime_warmup_boost = warmupBoost;
   }
 
+  const scaleLrByIndex = body.scale_lr_by_index;
+  if (scaleLrByIndex !== undefined) {
+    if (typeof scaleLrByIndex !== 'boolean') {
+      return NextResponse.json(
+        { error: 'scale_lr_by_index must be a boolean' },
+        { status: 400 }
+      );
+    }
+    data.runtime_scale_lr_by_index = scaleLrByIndex;
+  }
+
+  const scaleLrFactor = body.scale_lr_factor;
+  if (scaleLrFactor !== undefined) {
+    if (typeof scaleLrFactor !== 'number' || !Number.isFinite(scaleLrFactor)) {
+      return NextResponse.json(
+        { error: 'scale_lr_factor must be a finite number' },
+        { status: 400 }
+      );
+    }
+    data.runtime_scale_lr_factor = scaleLrFactor;
+  }
+
   const minSnrGamma = body.min_snr_gamma;
   if (minSnrGamma !== undefined) {
     if (typeof minSnrGamma !== 'number' || !Number.isFinite(minSnrGamma)) {
@@ -412,7 +434,7 @@ export async function PATCH(
 
   if (Object.keys(data).length === 0) {
     return NextResponse.json(
-        { error: 'At least one of lr, gaussian_mean, gaussian_std, gaussian_mean_2, gaussian_std_2, fixed_cycle_timesteps, fixed_cycle_seed, fixed_cycle_weight_peak_timesteps, fixed_cycle_weight_sigma, turbo_prior_steps, turbo_t_jitter, turbo_teacher_weight, weight_decay, weight_decay_increment, weight_decay_mode, beta1, beta2, content_or_style, timestep_type, timestep_weighting, network_weights, prompts, batch_size, gradient_accumulation, save_every, sample_every, warmup_steps, warmup_boost, min_snr_gamma, debug must be provided' },
+      { error: 'At least one of lr, gaussian_mean, gaussian_std, gaussian_mean_2, gaussian_std_2, fixed_cycle_timesteps, fixed_cycle_seed, fixed_cycle_weight_peak_timesteps, fixed_cycle_weight_sigma, turbo_prior_steps, turbo_t_jitter, turbo_teacher_weight, weight_decay, weight_decay_increment, weight_decay_mode, beta1, beta2, content_or_style, timestep_type, timestep_weighting, network_weights, prompts, batch_size, gradient_accumulation, save_every, sample_every, warmup_steps, warmup_boost, scale_lr_by_index, scale_lr_factor, min_snr_gamma, debug must be provided' },
       { status: 400 }
     );
   }

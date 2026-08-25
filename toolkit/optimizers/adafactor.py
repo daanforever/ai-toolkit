@@ -356,6 +356,26 @@ class Adafactor(torch.optim.Optimizer):
             return base_lr
         return base_lr * self._index_lr_multiplier(group) + float(group["eps"][0])
 
+    def set_scale_lr_by_index(self, value: bool) -> None:
+        """Enable/disable index-based LR scaling at runtime (e.g. from UI)."""
+        self._init_scale_lr_by_index(
+            bool(value), self.scale_lr_factor, self.weight_decay_max
+        )
+        if is_debug_enabled():
+            print_acc(
+                f"Adafactor: applied runtime scale_lr_by_index={self.scale_lr_by_index}"
+            )
+
+    def set_scale_lr_factor(self, value: float) -> None:
+        """Update scale_lr_factor at runtime (e.g. from UI)."""
+        self._init_scale_lr_by_index(
+            self.scale_lr_by_index, float(value), self.weight_decay_max
+        )
+        if is_debug_enabled():
+            print_acc(
+                f"Adafactor: applied runtime scale_lr_factor={self.scale_lr_factor}"
+            )
+
     def set_weight_decay(self, value: float) -> None:
         """Update weight_decay at runtime (e.g. from UI)."""
         self._weight_decay = value

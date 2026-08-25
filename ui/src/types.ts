@@ -144,6 +144,8 @@ export interface TrainConfig {
     weight_decay_mode?: WeightDecayMode;
     warmup_steps?: number;
     warmup_boost?: number;
+    scale_lr_by_index?: boolean;
+    scale_lr_factor?: number;
     beta1?: number | null;
     beta2?: number;
   };
