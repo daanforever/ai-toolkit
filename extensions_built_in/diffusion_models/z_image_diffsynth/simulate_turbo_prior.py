@@ -78,6 +78,10 @@ from extensions_built_in.diffusion_models.z_image_diffsynth.turbo_schedule impor
     get_turbo_sigmas_and_timesteps,
 )
 
+# Standalone HF TE for verify path (root-level CausalLM; no Z-Image subfolders).
+# Override with ZIMAGE_DIFFSYNTH_TE_PATH; set empty to use Z-Image snapshot TE.
+DEFAULT_ZIMAGE_TE_PATH = "huihui-ai/Huihui-Qwen3.5-4B-abliterated"
+
 LINEAR_RANK = 4
 # Short gate: first FORCE_COVERAGE_STEPS emit exact centers (round-robin) so all
 # 8 slots are hit; remaining steps use real dsigma + annealed jitter (low j).
@@ -801,6 +805,7 @@ def _train_lora(
     model_path: str,
     sampling_path: str | None,
     *,
+    te_name_or_path: str | None = None,
     batch_size: int = 1,
     turbo_teacher_weight: bool = False,
     profile: bool = False,
@@ -920,6 +925,7 @@ def _train_lora(
                         "debug_zimage_load": False,
                         "name_or_path": model_path,
                         "sampling_name_or_path": sampling_path,
+                        "te_name_or_path": te_name_or_path,
                         "dtype": "bf16",
                         "quantize": True,
                         "qtype": "qfloat8",
@@ -1081,7 +1087,7 @@ def _assert_pass_artifacts(
     )
 
 
-def _resolve_paths() -> tuple[str, str]:
+def _resolve_paths() -> tuple[str, str, str | None]:
     model_path = (
         os.environ.get("ZIMAGE_DIFFSYNTH_MODEL_PATH", "").strip()
         or DEFAULT_ZIMAGE_MODEL_PATH
@@ -1091,6 +1097,11 @@ def _resolve_paths() -> tuple[str, str]:
         or DEFAULT_ZIMAGE_SAMPLING_PATH
         or None
     )
+    # Unset → DEFAULT_ZIMAGE_TE_PATH; empty string → stock Z-Image snapshot TE.
+    if "ZIMAGE_DIFFSYNTH_TE_PATH" in os.environ:
+        te_path = os.environ.get("ZIMAGE_DIFFSYNTH_TE_PATH", "").strip() or None
+    else:
+        te_path = DEFAULT_ZIMAGE_TE_PATH
     if sampling_path and not os.path.isdir(sampling_path):
         sampling_path = None
     if not model_path or not os.path.isdir(model_path):
@@ -1099,7 +1110,7 @@ def _resolve_paths() -> tuple[str, str]:
         raise RuntimeError(
             "Sampling (Turbo) path missing; required for _sampling_transformer PNGs."
         )
-    return model_path, sampling_path
+    return model_path, sampling_path, te_path
 
 
 def _run_single_pass(
@@ -1108,6 +1119,7 @@ def _run_single_pass(
     dataset_dir: Path,
     model_path: str,
     sampling_path: str,
+    te_name_or_path: str | None = None,
     train_on_turbo: bool,
     batch_size: int = 1,
     profile: bool = False,
@@ -1124,6 +1136,7 @@ def _run_single_pass(
         dataset_dir,
         model_path,
         sampling_path,
+        te_name_or_path=te_name_or_path,
         batch_size=batch_size,
         turbo_teacher_weight=train_on_turbo,
         profile=profile,
@@ -1143,7 +1156,7 @@ def main() -> None:
         dataset_dir = Path(os.environ["SIM_TURBO_PRIOR_DATASET"])
         profile = _env_flag("SIM_TURBO_PRIOR_PROFILE")
         production_overlay = _env_flag("SIM_TURBO_PRIOR_PRODUCTION")
-        model_path, sampling_path = _resolve_paths()
+        model_path, sampling_path, te_path = _resolve_paths()
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA not available; GPU required for this sim.")
         _run_single_pass(
@@ -1151,6 +1164,7 @@ def main() -> None:
             dataset_dir=dataset_dir,
             model_path=model_path,
             sampling_path=sampling_path,
+            te_name_or_path=te_path,
             train_on_turbo=train_on_turbo,
             profile=profile,
             production_overlay=production_overlay,
@@ -1190,11 +1204,13 @@ def main() -> None:
     _populate_dataset_from_cache(image_cache, dataset_dir)
     _log(f"1) Dataset from cache {image_cache} -> {dataset_dir} (prompt={prompt!r})")
 
-    model_path, sampling_path = _resolve_paths()
+    model_path, sampling_path, te_path = _resolve_paths()
     _log(
         "[sim] use_diffsynth_prompt_encoding omitted → true "
         "(turbo_prior DiffSynth encoding locked on)"
     )
+    if te_path:
+        _log(f"[sim] te_name_or_path={te_path!r}")
     work_root = base_work / ("turbo" if train_on_turbo else "base")
     work_root.mkdir(parents=True, exist_ok=True)
     _log(

@@ -408,7 +408,12 @@ def test_load_components_te_name_or_path_override():
     with (
         patches["ensure"],
         patches["tok"] as mock_tok,
-        patches["te"] as mock_te,
+        patch.object(
+            loader_mod.AutoModelForCausalLM,
+            "from_pretrained",
+            return_value=MagicMock(name="te"),
+        ) as mock_te,
+        patches["te"] as mock_qwen3_te,
         patches["vae"] as mock_vae,
         patches["wrap"],
         patches["norm"],
@@ -427,10 +432,11 @@ def test_load_components_te_name_or_path_override():
 
     tok_args, tok_kwargs = mock_tok.call_args
     assert tok_args[0] == "/te"
-    assert tok_kwargs["subfolder"] == "tokenizer"
+    assert "subfolder" not in tok_kwargs
     te_args, te_kwargs = mock_te.call_args
     assert te_args[0] == "/te"
-    assert te_kwargs["subfolder"] == "text_encoder"
+    assert "subfolder" not in te_kwargs
+    mock_qwen3_te.assert_not_called()
     vae_args, vae_kwargs = mock_vae.call_args
     assert vae_args[0] == "/base"
     assert vae_kwargs["subfolder"] == "vae"

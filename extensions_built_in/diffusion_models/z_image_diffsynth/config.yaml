@@ -99,7 +99,9 @@ config:
         debug_zimage_load: false
         name_or_path: "e:/Backup/huggingface/hub/models--Tongyi-MAI--Z-Image/snapshots/04cc4abb7c5069926f75c9bfde9ef43d49423021/"
         sampling_name_or_path: "e:/Backup/huggingface/hub/models--Tongyi-MAI--Z-Image-Turbo/snapshots/0e36c2b379e66fa531d01cc531c44919e5f1c6fd/"
-        # te_name_or_path: "path/to/te-snapshot"  # optional; tokenizer+TE from this snapshot if set
+        # te_name_or_path: standalone HF CausalLM root (no tokenizer/text_encoder subfolders).
+        # te_name_or_path: "huihui-ai/Huihui-Qwen3.5-4B-abliterated"
+        # te_name_or_path: "huihui-ai/Huihui-Qwen3-4B-abliterated-v2"
         quantize: true
         qtype: "qfloat8"
         quantize_te: true

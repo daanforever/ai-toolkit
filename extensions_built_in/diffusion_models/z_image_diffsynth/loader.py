@@ -7,7 +7,7 @@ import glob
 from typing import Optional, Tuple, List, Any
 
 import torch
-from transformers import AutoTokenizer, Qwen3ForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, Qwen3ForCausalLM
 from diffusers import AutoencoderKL
 
 from toolkit.paths import normalize_path
@@ -163,8 +163,10 @@ def load_components(
     """
     Load tokenizer, text_encoder, vae, dit (and optionally sampling dit) from paths.
     Paths resolved like z_image: model_path, base_model_path (extras_name_or_path), transformer in model_path/transformer.
-    te_name_or_path optionally overrides tokenizer and text encoder root; VAE stays on base_model_path.
-    loader_mode (\"auto\"|\"diffusers\"|\"diffsynth\") applies to both main and sampling transformers.
+    te_name_or_path: when set, load tokenizer + TE from that HF id / local root without
+    subfolders (standalone CausalLM repos). When falsy, use base_model_path with
+    subfolder=\"tokenizer\" / \"text_encoder\" and Qwen3ForCausalLM (Z-Image snapshot layout).
+    VAE always from base_model_path. loader_mode applies to both transformers.
     Returns dict with: tokenizer, text_encoder, vae, vae_encoder, vae_decoder, dit,
     dit_is_diffusers, sampling_dit (optional), sampling_is_diffusers.
     """
@@ -243,15 +245,19 @@ def load_components(
     safe_module_to_device(dit, torch.device("cpu"))
     flush()
 
-    # 3) Tokenizer & text encoder (same as z_image)
+    # 3) Tokenizer & text encoder (Lumina2-style override vs Z-Image snapshot)
     log("Loading tokenizer and text encoder")
     if te_name_or_path:
-        te_name_or_path = normalize_path(te_name_or_path)
-    te_root = te_name_or_path or base_model_path
-    tokenizer = AutoTokenizer.from_pretrained(te_root, subfolder="tokenizer")
-    text_encoder = Qwen3ForCausalLM.from_pretrained(
-        te_root, subfolder="text_encoder", dtype=dtype
-    )
+        te_root = normalize_path(te_name_or_path)
+        log(f"Loading standalone TE from {te_root} (no subfolder)")
+        tokenizer = AutoTokenizer.from_pretrained(te_root)
+        text_encoder = AutoModelForCausalLM.from_pretrained(te_root, dtype=dtype)
+    else:
+        te_root = base_model_path
+        tokenizer = AutoTokenizer.from_pretrained(te_root, subfolder="tokenizer")
+        text_encoder = Qwen3ForCausalLM.from_pretrained(
+            te_root, subfolder="text_encoder", dtype=dtype
+        )
     text_encoder.to(device)
     if quantize_te:
         qtype = get_qtype(qtype_te or "float8")
