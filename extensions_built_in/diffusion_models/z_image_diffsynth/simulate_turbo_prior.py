@@ -30,6 +30,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, List, Optional
 
+# Allow HF hub downloads for standalone te_name_or_path (override shell offline).
+os.environ["HF_HUB_OFFLINE"] = "0"
+
 import torch
 
 _REPO_ROOT = os.path.abspath(
@@ -80,7 +83,7 @@ from extensions_built_in.diffusion_models.z_image_diffsynth.turbo_schedule impor
 
 # Standalone HF TE for verify path (root-level CausalLM; no Z-Image subfolders).
 # Override with ZIMAGE_DIFFSYNTH_TE_PATH; set empty to use Z-Image snapshot TE.
-DEFAULT_ZIMAGE_TE_PATH = "huihui-ai/Huihui-Qwen3.5-4B-abliterated"
+DEFAULT_ZIMAGE_TE_PATH = "huihui-ai/Huihui-Qwen3-4B-abliterated-v2"
 
 LINEAR_RANK = 4
 # Short gate: first FORCE_COVERAGE_STEPS emit exact centers (round-robin) so all

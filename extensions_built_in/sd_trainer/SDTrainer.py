@@ -412,6 +412,10 @@ class SDTrainer(BaseSDTrainProcess):
                     with memory_debug(print_acc, "UNLOAD TEXT ENCODER", kind="all"):
                         unload_text_encoder(self.sd)
                         flush()
+                    # TE is off GPU; restore main transformer for train loop.
+                    if getattr(self.sd, "unet", None) is not None:
+                        self.sd.unet.to(self.device_torch)
+                        flush()
                 else:
                     # todo once every model is tested to work, unload properly. Though, this will all be merged into one thing.
                     # keep legacy usage for now. 

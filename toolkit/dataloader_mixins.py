@@ -2234,6 +2234,11 @@ class TextEmbeddingCachingMixin:
                             pass
                 if not os.path.exists(text_embedding_path):
                     if not did_move:
+                        # Park main transformer on CPU before TE encode so DiT and TE
+                        # are not co-resident (avoids VRAM peak during quantized .to).
+                        if getattr(self.sd, "unet", None) is not None:
+                            self.sd.unet.to("cpu")
+                            flush()
                         self.sd.set_device_state_preset('cache_text_encoder')
                         did_move = True
                         
