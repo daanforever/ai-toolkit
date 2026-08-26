@@ -472,6 +472,9 @@ class ZImageDiffSynthModel(BaseModel):
         )
         if sampling_path:
             sampling_path = normalize_path(sampling_path)
+        te_path = getattr(self.model_config, "te_name_or_path", None)
+        if te_path:
+            te_path = normalize_path(te_path)
 
         def log(msg):
             self.print_and_status_update(msg)
@@ -494,6 +497,7 @@ class ZImageDiffSynthModel(BaseModel):
                 quantize_te=getattr(self.model_config, "quantize_te", False),
                 qtype_te=getattr(self.model_config, "qtype_te", "float8"),
                 sampling_transformer_path=sampling_path,
+                te_name_or_path=te_path,
                 quantize_transformer=getattr(self.model_config, "quantize", False),
                 base_model=self,
                 loader_mode=loader_mode,

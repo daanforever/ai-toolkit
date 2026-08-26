@@ -155,6 +155,7 @@ def load_components(
     quantize_te: bool = False,
     qtype_te: str = "float8",
     sampling_transformer_path: Optional[str] = None,
+    te_name_or_path: Optional[str] = None,
     quantize_transformer: bool = False,
     base_model: Optional[Any] = None,
     loader_mode: str = "auto",
@@ -162,6 +163,7 @@ def load_components(
     """
     Load tokenizer, text_encoder, vae, dit (and optionally sampling dit) from paths.
     Paths resolved like z_image: model_path, base_model_path (extras_name_or_path), transformer in model_path/transformer.
+    te_name_or_path optionally overrides tokenizer and text encoder root; VAE stays on base_model_path.
     loader_mode (\"auto\"|\"diffusers\"|\"diffsynth\") applies to both main and sampling transformers.
     Returns dict with: tokenizer, text_encoder, vae, vae_encoder, vae_decoder, dit,
     dit_is_diffusers, sampling_dit (optional), sampling_is_diffusers.
@@ -243,9 +245,12 @@ def load_components(
 
     # 3) Tokenizer & text encoder (same as z_image)
     log("Loading tokenizer and text encoder")
-    tokenizer = AutoTokenizer.from_pretrained(base_model_path, subfolder="tokenizer")
+    if te_name_or_path:
+        te_name_or_path = normalize_path(te_name_or_path)
+    te_root = te_name_or_path or base_model_path
+    tokenizer = AutoTokenizer.from_pretrained(te_root, subfolder="tokenizer")
     text_encoder = Qwen3ForCausalLM.from_pretrained(
-        base_model_path, subfolder="text_encoder", dtype=dtype
+        te_root, subfolder="text_encoder", dtype=dtype
     )
     text_encoder.to(device)
     if quantize_te:
