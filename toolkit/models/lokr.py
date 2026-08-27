@@ -317,7 +317,10 @@ class LokrModule(ToolkitModuleMixin, nn.Module):
 
         orig_weight = self.get_orig_weight(x.device)
         lokr_weight = self.get_weight(orig_weight).to(dtype=orig_weight.dtype)
-        multiplier = self.network_ref().torch_multiplier
+        # Match PEFT / classic LoRA: plain torch_multiplier can lag force_to remount.
+        multiplier = self.network_ref().torch_multiplier.to(
+            device=lokr_weight.device, dtype=lokr_weight.dtype
+        )
 
         if x.dtype != orig_weight.dtype:
             x = x.to(dtype=orig_weight.dtype)

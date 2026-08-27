@@ -292,7 +292,10 @@ class ToolkitModuleMixin:
         # always cast to float32
         lora_input = x.to(self.lora_down.weight.dtype)
         lora_output = self._call_forward(lora_input)
-        multiplier = self.network_ref().torch_multiplier
+        # Match PEFT: multiplier is a plain tensor and can lag force_to / shared remount.
+        multiplier = self.network_ref().torch_multiplier.to(
+            device=lora_output.device, dtype=lora_output.dtype
+        )
 
         lora_output_batch_size = lora_output.size(0)
         multiplier_batch_size = multiplier.size(0)
@@ -789,6 +792,9 @@ class ToolkitNetworkMixin:
             loras += self.text_encoder_loras
         for lora in loras:
             lora.to(device, dtype)
+        # torch_multiplier is not a Parameter; rebuild from weight device after move.
+        if self.get_all_modules():
+            self._update_torch_multiplier()
 
     def get_all_modules(self: Network) -> List[Module]:
         loras = []

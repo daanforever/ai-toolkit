@@ -388,9 +388,14 @@ def _move_network_owner_to_device(
     After ``force_to``, verify registered + list-held tensors/payloads; use
     ``safe_module_to_device`` only to finish payloads without replacing shared
     trainable Parameter identities.
+
+    Always refresh ``torch_multiplier`` afterward: it is a plain tensor and can
+    stay on the pre-move device when ``force_to`` is skipped because shared
+    Parameters are already on ``target``.
     """
     target = torch.device(device)
     if not _network_needs_device_move(network, target):
+        _refresh_one_network_torch_multiplier(network)
         return
     source = _network_source_device(network)
     dtype = _resolve_network_dtype(network, model)
@@ -426,6 +431,33 @@ def _move_network_owner_to_device(
             f"text-cache residency: component {name!r} still not on {target} "
             f"after move (source was {source})"
         )
+    _refresh_one_network_torch_multiplier(network)
+
+
+def _refresh_one_network_torch_multiplier(network: Any) -> None:
+    """Rebuild classic/PEFT ``torch_multiplier`` from current weight device if supported."""
+    updater = getattr(network, "_update_torch_multiplier", None)
+    if callable(updater):
+        updater()
+
+
+def _refresh_network_torch_multipliers(model: Any) -> None:
+    """Refresh ``torch_multiplier`` on every text-cache network owner.
+
+    Needed after exit remount when ``_sampling_network`` shares Parameters with
+    ``network`` and therefore skips ``force_to`` — its own multiplier tensor
+    would otherwise remain on the creation device (CPU).
+    """
+    seen: set[int] = set()
+    for name in _TEXT_CACHE_NETWORK_OWNER_ATTRS:
+        network = getattr(model, name, None)
+        if network is None or not isinstance(network, torch.nn.Module):
+            continue
+        oid = id(network)
+        if oid in seen:
+            continue
+        seen.add(oid)
+        _refresh_one_network_torch_multiplier(network)
 
 
 def _iter_live_real_text_encoders(model: Any) -> List[Tuple[str, torch.nn.Module]]:
@@ -889,6 +921,8 @@ def exit_text_cache_residency(
         _restore_normal_train_layout(model, target)
     _restore_aux_owners_from_snapshot(model)
     _remount_secondary_owners_after_text_cache(model, target)
+    # Shared sampling/main LoRA may skip force_to; refresh plain torch_multiplier tensors.
+    _refresh_network_torch_multipliers(model)
     flush()
     setattr(model, _TEXT_CACHE_RESIDENCY_ACTIVE, False)
     _clear_aux_restore_snapshot(model)
