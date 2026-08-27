@@ -359,11 +359,32 @@ def test_jitter_stays_in_voronoi_cells_and_last_slot_not_toward_zero():
 
         assert float(ts.min()) >= last_floor - 1e-3
         assert float(ts.min()) > 50.0, f"jitter={jitter}: last slot must not extend toward t→0"
+        assert float(ts.max()) <= 1000.0 + 1e-3, f"jitter={jitter}: t must not exceed num_train_timesteps"
 
         mean_t = float(ts.mean())
         assert mean_t > 500.0, (
             f"jitter={jitter}: mean t={mean_t:.1f} should stay on 8-slot prior (~700+), "
             "not gaussian peak ~120"
+        )
+
+
+def test_jitter_clamped_to_num_train_timesteps():
+    """Slot-0 Voronoi jitter can exceed 1000 before clamp; after clamp t stays in [0, ntt]."""
+    for jitter in (0.5, 1.0):
+        result = _sample(
+            jitter=jitter,
+            batch_size=2048,
+            seed=1,
+            turbo_t_jitter_end=jitter,
+        )
+        ts = result.timesteps.float()
+        assert float(ts.min()) >= 0.0
+        assert float(ts.max()) <= 1000.0 + 1e-3
+        assert float(ts.max()) == pytest.approx(1000.0, abs=1e-3), (
+            f"jitter={jitter}: clamp must hit t=1000 on slot 0"
+        )
+        assert bool((ts < 1000.0 - 1e-3).any()), (
+            f"jitter={jitter}: some samples must still leave exact centers"
         )
 
 

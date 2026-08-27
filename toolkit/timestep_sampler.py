@@ -177,7 +177,8 @@ class TimestepSampler:
 
         Jitter anneals from ``turbo_t_jitter`` (start) to ``turbo_t_jitter_end``
         over training steps: j = lerp(start, end, step_num / max(steps-1, 1)).
-        Constant when end == start.
+        Constant when end == start. Returned ``t`` is clamped to
+        ``[0, num_train_timesteps]`` so slot-0 jitter cannot exceed the train scale.
         """
         from extensions_built_in.diffusion_models.z_image_diffsynth.turbo_schedule import (
             get_turbo_sigmas_and_timesteps,
@@ -199,6 +200,7 @@ class TimestepSampler:
         progress = float(step_num) / float(max(train_steps - 1, 1))
         progress = max(0.0, min(1.0, progress))
         jitter = jitter_start + (jitter_end - jitter_start) * progress
+        t_max = float(getattr(self.train_config, "num_train_timesteps", 1000) or 1000)
         _, centers = get_turbo_sigmas_and_timesteps(
             num_inference_steps=n_steps,
             use_dynamic_shifting=False,
@@ -226,9 +228,11 @@ class TimestepSampler:
         slot = torch.multinomial(weights, batch_size, replacement=True)
         t_i = centers[slot]
         if jitter == 0.0:
-            return t_i
-        u = (torch.rand(batch_size, device=latents.device, dtype=centers.dtype) * 2.0 - 1.0) * jitter
-        return t_i + u * 2.0 * deltas[slot]
+            t = t_i
+        else:
+            u = (torch.rand(batch_size, device=latents.device, dtype=centers.dtype) * 2.0 - 1.0) * jitter
+            t = t_i + u * 2.0 * deltas[slot]
+        return t.clamp(min=0.0, max=t_max)
 
     def _sample_next_sample(
         self,

@@ -93,7 +93,7 @@ Never co-reside both DiTs on GPU. Live Runtime checkbox flips the mode without r
 
 `1000, 955, 900, 833, 750, 643, 500, 300`
 
-Jitter spreads each sample in its Voronoi cell. Anneal from `turbo_t_jitter: 0.5` → `turbo_t_jitter_end: 0` so early steps explore cells and late steps pin centers. The last slot does not jitter toward `t → 0`. A mass of `t` near 120 means you are still on the old gaussian prior — check `timestep_type`.
+Jitter spreads each sample in its Voronoi cell. Anneal from `turbo_t_jitter: 0.5` → `turbo_t_jitter_end: 0` so early steps explore cells and late steps pin centers. The last slot does not jitter toward `t → 0`. After jitter, `t` is clamped to `[0, num_train_timesteps]` so slot 0 cannot exceed 1000. A mass of `t` near 120 means you are still on the old gaussian prior — check `timestep_type`.
 
 ## Recommended settings
 
