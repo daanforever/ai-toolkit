@@ -13,7 +13,7 @@ from toolkit.samplers.custom_flowmatch_sampler import (
 from .scheduler_config import STATIC_SHIFT, DYNAMIC_SHIFT_DEFAULTS
 
 # Mid-trajectory target for content_or_style=balanced under turbo_prior.
-TURBO_BALANCED_TARGET_T = 750.0
+TURBO_BALANCED_TARGET_T = 833.0
 
 
 def get_turbo_sigmas_and_timesteps(
@@ -73,7 +73,7 @@ def turbo_slot_sampling_weights(n: int, content_or_style: str) -> torch.Tensor:
 
     style = dsigma (last slot heaviest, ~30% on 8-step Turbo).
     content = reversed dsigma (first slot heaviest).
-    balanced = dsigma reflected onto the slot nearest to t=750.
+    balanced = dsigma reflected onto the slot nearest to t=833.
     """
     dsigma = turbo_slot_dsigma_weights(n)
     if content_or_style == "content":
