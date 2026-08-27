@@ -42,7 +42,7 @@ When `train.turbo_teacher_weight` is `true`, the trainer also **raises** if:
 | `model.model_kwargs.use_diffsynth_training_loop` is `true` | `false` |
 | Sampling DiT missing (`model.sampling_name_or_path` unset / unloaded) | Z-Image-Turbo sampling transformer loaded |
 
-There is **no A/B `turbo_slot_weighting` dropdown**. Omit the key (or set `dsigma` only). Slot multinomial uses dsigma; `content_or_style: content` **reverses** those weights (first-heavy); `balanced`/`style` keep dsigma (last-heavy).
+There is **no A/B `turbo_slot_weighting` dropdown**. Omit the key (or set `dsigma` only). Slot multinomial uses dsigma; `content_or_style: content` **reverses** those weights (first-heavy); `style` keeps dsigma (last-heavy); `balanced` reflects dsigma onto the slot nearest to `t=750` (slot 4 on 8-step Turbo).
 
 ## Required settings
 
@@ -67,7 +67,7 @@ Strongly recommended so training `t` and preview sampling stay on the Turbo traj
 
 | Location | Parameter | Recommended value | Notes |
 | --- | --- | --- | --- |
-| `train` | `content_or_style` | `balanced` | `gaussian` / `gaussian_bimodal` **raise**. Under `turbo_prior` this is **slot** bias (not a dense 1000-step cubic): `balanced`/`style` = dsigma last-heavy (`t≈300` ~30%); `content` = reversed dsigma first-heavy (`t≈1000` ~30%, composition). |
+| `train` | `content_or_style` | `balanced` | `gaussian` / `gaussian_bimodal` **raise**. Under `turbo_prior` this is **slot** bias (not a dense 1000-step cubic): `balanced` = dsigma reflected onto nearest `t=750` (slot 4 on 8-step, ~30% peak); `style` = dsigma last-heavy (`t≈300` ~30%); `content` = reversed dsigma first-heavy (`t≈1000` ~30%, composition). |
 | `train` | `timestep_weighting` | `none` | Do not re-weight a dense 1000-step SNR/gaussian schedule; `t` is already on eight Turbo slots. |
 | `train` | `min_snr_gamma` | `0` | Disable min-SNR reweighting for this prior. |
 | `train` | `turbo_prior_steps` | `8` | Number of Turbo slots (default 8). Keep in lockstep with `sample.sample_steps`. |

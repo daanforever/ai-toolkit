@@ -13,7 +13,9 @@ import pytest
 import torch
 
 from extensions_built_in.diffusion_models.z_image_diffsynth.turbo_schedule import (
+    TURBO_BALANCED_TARGET_T,
     get_turbo_sigmas_and_timesteps,
+    turbo_balanced_target_slot,
     turbo_slot_dsigma_weights,
     turbo_slot_sampling_weights,
 )
@@ -178,20 +180,45 @@ def test_sampling_weights_content_is_flipped_dsigma():
     wb = turbo_slot_sampling_weights(8, "balanced")
     ws = turbo_slot_sampling_weights(8, "style")
     wc = turbo_slot_sampling_weights(8, "content")
-    assert torch.allclose(wb, d)
+    assert not torch.allclose(wb, d)
     assert torch.allclose(ws, d)
     assert torch.allclose(wc, d.flip(0))
-    assert float(wb[-1]) == float(wb.max()) and float(wb[-1]) > 0.25
+    assert int(wb.argmax().item()) == 4
+    assert float(wb[4]) == float(wb.max())
+    assert float(ws[-1]) == float(ws.max()) and float(ws[-1]) > 0.25
     assert float(wc[0]) == float(wc.max()) and float(wc[0]) > 0.25
     assert torch.allclose(wb.sum(), torch.tensor(1.0), atol=1e-5)
+    assert torch.allclose(ws.sum(), torch.tensor(1.0), atol=1e-5)
     assert torch.allclose(wc.sum(), torch.tensor(1.0), atol=1e-5)
+    assert (wb > 0).all()
 
 
-def test_sampling_weights_jitter0_content_prefers_slot0_balanced_prefers_slot7():
+def test_sampling_weights_balanced_peaks_at_nearest_t750():
+    centers8 = _centers_static_8()
+    assert abs(float(centers8[4]) - TURBO_BALANCED_TARGET_T) < 1.0
+    assert turbo_balanced_target_slot(centers8) == 4
+    assert int(turbo_slot_sampling_weights(8, "balanced").argmax().item()) == 4
+
+    _, centers4 = get_turbo_sigmas_and_timesteps(
+        num_inference_steps=4,
+        use_dynamic_shifting=False,
+    )
+    target4 = turbo_balanced_target_slot(centers4)
+    wb4 = turbo_slot_sampling_weights(4, "balanced")
+    assert int(wb4.argmax().item()) == target4
+    assert torch.allclose(wb4.sum(), torch.tensor(1.0), atol=1e-5)
+    assert (wb4 > 0).all()
+
+    w1 = turbo_slot_sampling_weights(1, "balanced")
+    assert w1.numel() == 1
+    assert torch.allclose(w1, torch.tensor([1.0]), atol=1e-5)
+
+
+def test_sampling_weights_jitter0_content_prefers_slot0_balanced_prefers_t750():
     centers = _centers_static_8()
     center_keys = [round(float(x), 4) for x in centers.tolist()]
     want = set(center_keys)
-    slot0, slot7 = center_keys[0], center_keys[-1]
+    slot0, slot4, slot7 = center_keys[0], center_keys[4], center_keys[-1]
 
     def _counts(mode: str):
         result = _sample(
@@ -202,12 +229,14 @@ def test_sampling_weights_jitter0_content_prefers_slot0_balanced_prefers_slot7()
         )
         keys = [round(float(x), 4) for x in result.timesteps.tolist()]
         assert set(keys) == want
-        return keys.count(slot0), keys.count(slot7)
+        return keys.count(slot0), keys.count(slot4), keys.count(slot7)
 
-    c0, c7 = _counts("content")
+    c0, c4, c7 = _counts("content")
     assert c0 > c7
-    b0, b7 = _counts("balanced")
-    assert b7 > b0
+    b0, b4, b7 = _counts("balanced")
+    assert b4 > b0 and b4 > b7
+    s0, s4, s7 = _counts("style")
+    assert s7 > s0
 
 
 # --- turbo_slot_weighting ---

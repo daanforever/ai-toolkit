@@ -80,7 +80,7 @@ Runtime toggle swaps residency (`apply_turbo_teacher_mode`). When `true`, this i
 - `use_diffsynth_prompt_encoding: false` (explicit)
 - `use_dynamic_shifting: true`
 - `content_or_style: gaussian` or `gaussian_bimodal`
-- `turbo_slot_weighting` present and not `dsigma` — omit the key (no A/B). dsigma is the base; `content` flips it
+- `turbo_slot_weighting` present and not `dsigma` — omit the key (no A/B). dsigma is the base; `content` flips it; `balanced` remaps onto nearest t=750; `style` keeps last-heavy
 - with `turbo_teacher_weight: true`: also requires `timestep_type: turbo_prior`, `use_diffsynth_training_loop: false`, and a loaded sampling DiT
 
 Jitter anneals from `turbo_t_jitter` (default `0.5`) to `turbo_t_jitter_end` (default `0`) over training steps. Optional: `turbo_prior_steps` (default 8).
@@ -95,7 +95,7 @@ process:
       turbo_t_jitter: 0.5
       turbo_t_jitter_end: 0
       turbo_teacher_weight: false  # true = train LoRA on Turbo DiT
-      # content = reverse dsigma (composition); balanced/style = dsigma (style/ODE)
+      # content = reverse dsigma (composition); style = dsigma (last-heavy); balanced = peak nearest t=750
       content_or_style: balanced
       timestep_weighting: none
       min_snr_gamma: 0

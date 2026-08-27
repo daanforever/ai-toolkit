@@ -323,7 +323,7 @@ const docs: { [key: string]: ConfigDoc } = {
         <br /><br />
         <b>Fixed Cycle</b>: Deterministic cycle over a fixed list of timestep values. Same step number always gets the same timestep, so training is reproducible. Recommended for distilled/Turbo models (e.g. Z-Image-Turbo LoRA) that are sensitive to random timestep sampling. Configure via YAML: <code>fixed_cycle_timesteps</code>, <code>fixed_cycle_seed</code>, <code>fixed_cycle_weight_peak_timesteps</code>. With <code>content_or_style: fixed_cycle</code>, you can also adjust these from the job <b>Runtime config</b> UI (same pattern as Gaussian runtime fields).
         <br /><br />
-        <b>Note:</b> When <code>timestep_type</code> is <b>Turbo Prior</b> (<code>turbo_prior</code>), <code>content_or_style: gaussian</code> / <code>gaussian_bimodal</code> raise; use <code>balanced</code> (or another non-gaussian mode). Under <code>turbo_prior</code>, Bias reweights the 8 Turbo slots (not a dense cubic). <code>balanced</code>/<code>style</code> = dsigma last-heavy; <code>content</code> = reversed dsigma first-heavy. <code>gaussian</code>/<code>gaussian_bimodal</code> still raise.
+        <b>Note:</b> When <code>timestep_type</code> is <b>Turbo Prior</b> (<code>turbo_prior</code>), <code>content_or_style: gaussian</code> / <code>gaussian_bimodal</code> raise; use <code>balanced</code> (or another non-gaussian mode). Under <code>turbo_prior</code>, Bias reweights the 8 Turbo slots (not a dense cubic). <code>balanced</code> = dsigma reflected onto nearest <code>t=750</code> (slot 4 on 8-step); <code>style</code> = dsigma last-heavy; <code>content</code> = reversed dsigma first-heavy. <code>gaussian</code>/<code>gaussian_bimodal</code> still raise.
       </>
     ),
   },
