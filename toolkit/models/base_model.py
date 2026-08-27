@@ -26,7 +26,7 @@ from toolkit.prompt_utils import inject_trigger_into_prompt, PromptEmbeds, conca
 from toolkit.sample_prompts_cache import load_sample_prompt_pair
 from toolkit.reference_adapter import ReferenceAdapter
 from toolkit.sd_device_states_presets import empty_preset
-from toolkit.train_tools import get_torch_dtype, apply_noise_offset
+from toolkit.train_tools import get_torch_dtype, apply_noise_offset, text_encoder_param_requires_grad
 import torch
 from toolkit.pipelines import CustomStableDiffusionXLPipeline
 from diffusers import StableDiffusionPipeline, StableDiffusionXLPipeline, T2IAdapter, DDPMScheduler, \
@@ -1113,11 +1113,17 @@ class BaseModel:
 
         if prompt2 is not None and not isinstance(prompt2, list):
             prompt2 = [prompt2]
-        # if control_images in the signature, pass it. This keep from breaking plugins
-        if self.encode_control_in_text_embeddings:
-            return self.get_prompt_embeds(prompt, control_images=control_images)
 
-        return self.get_prompt_embeds(prompt)
+        def _encode() -> PromptEmbeds:
+            if self.encode_control_in_text_embeddings:
+                return self.get_prompt_embeds(prompt, control_images=control_images)
+            return self.get_prompt_embeds(prompt)
+
+        # Frozen TE still gets HF enable_input_require_grads from gradient checkpointing.
+        if text_encoder_param_requires_grad(self.text_encoder):
+            return _encode()
+        with torch.no_grad():
+            return _encode()
 
     @torch.no_grad()
     def encode_images(

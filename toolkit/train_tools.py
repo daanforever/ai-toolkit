@@ -230,6 +230,25 @@ def text_tokenize(
         return input_ids
 
 
+def text_encoder_param_requires_grad(text_encoder) -> bool:
+    """True if any live text-encoder Parameter needs grad (TE / embedding training).
+
+    Frozen TE + HF ``gradient_checkpointing_enable`` still sets input embedding
+    grads via ``enable_input_require_grads``; callers must use ``torch.no_grad()``
+    for cache/sample/inference encodes when this returns False.
+    """
+    if text_encoder is None:
+        return False
+    modules = text_encoder if isinstance(text_encoder, (list, tuple)) else (text_encoder,)
+    for te in modules:
+        if te is None or not isinstance(te, torch.nn.Module):
+            continue
+        for param in te.parameters():
+            if param.requires_grad:
+                return True
+    return False
+
+
 # https://github.com/huggingface/diffusers/blob/78922ed7c7e66c20aa95159c7b7a6057ba7d590d/src/diffusers/pipelines/stable_diffusion_xl/pipeline_stable_diffusion_xl.py#L334-L348
 def text_encode_xl(
         text_encoder: Union['CLIPTextModel', 'CLIPTextModelWithProjection'],

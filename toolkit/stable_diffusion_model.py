@@ -2391,132 +2391,139 @@ class StableDiffusion:
 
         if prompt2 is not None and not isinstance(prompt2, list):
             prompt2 = [prompt2]
-        if self.is_xl:
-            # todo make this a config
-            # 50% chance to use an encoder anyway even if it is disabled
-            # allows the other TE to compensate for the disabled one
-            # use_encoder_1 = self.use_text_encoder_1 or force_all or random.random() > 0.5
-            # use_encoder_2 = self.use_text_encoder_2 or force_all or random.random() > 0.5
-            use_encoder_1 = True
-            use_encoder_2 = True
 
-            return PromptEmbeds(
-                train_tools.encode_prompts_xl(
-                    self.tokenizer,
-                    self.text_encoder,
-                    prompt,
-                    prompt2,
-                    num_images_per_prompt=num_images_per_prompt,
-                    use_text_encoder_1=use_encoder_1,
-                    use_text_encoder_2=use_encoder_2,
-                    truncate=not long_prompts,
-                    max_length=max_length,
-                    dropout_prob=dropout_prob,
+        def _encode() -> PromptEmbeds:
+            if self.is_xl:
+                # todo make this a config
+                # 50% chance to use an encoder anyway even if it is disabled
+                # allows the other TE to compensate for the disabled one
+                # use_encoder_1 = self.use_text_encoder_1 or force_all or random.random() > 0.5
+                # use_encoder_2 = self.use_text_encoder_2 or force_all or random.random() > 0.5
+                use_encoder_1 = True
+                use_encoder_2 = True
+
+                return PromptEmbeds(
+                    train_tools.encode_prompts_xl(
+                        self.tokenizer,
+                        self.text_encoder,
+                        prompt,
+                        prompt2,
+                        num_images_per_prompt=num_images_per_prompt,
+                        use_text_encoder_1=use_encoder_1,
+                        use_text_encoder_2=use_encoder_2,
+                        truncate=not long_prompts,
+                        max_length=max_length,
+                        dropout_prob=dropout_prob,
+                    )
                 )
-            )
-        if self.is_v3:
-            return PromptEmbeds(
-                train_tools.encode_prompts_sd3(
-                    self.tokenizer,
-                    self.text_encoder,
-                    prompt,
-                    num_images_per_prompt=num_images_per_prompt,
-                    truncate=not long_prompts,
-                    max_length=max_length,
-                    dropout_prob=dropout_prob,
-                    pipeline=self.pipeline,
+            if self.is_v3:
+                return PromptEmbeds(
+                    train_tools.encode_prompts_sd3(
+                        self.tokenizer,
+                        self.text_encoder,
+                        prompt,
+                        num_images_per_prompt=num_images_per_prompt,
+                        truncate=not long_prompts,
+                        max_length=max_length,
+                        dropout_prob=dropout_prob,
+                        pipeline=self.pipeline,
+                    )
                 )
-            )
-        elif self.is_pixart:
-            embeds, attention_mask = train_tools.encode_prompts_pixart(
-                self.tokenizer,
-                self.text_encoder,
-                prompt,
-                truncate=not long_prompts,
-                max_length=300 if self.model_config.is_pixart_sigma else 120,
-                dropout_prob=dropout_prob
-            )
-            return PromptEmbeds(
-                embeds,
-                attention_mask=attention_mask,
-            )
-        elif self.is_auraflow:
-            embeds, attention_mask = train_tools.encode_prompts_auraflow(
-                self.tokenizer,
-                self.text_encoder,
-                prompt,
-                truncate=not long_prompts,
-                max_length=256,
-                dropout_prob=dropout_prob
-            )
-            return PromptEmbeds(
-                embeds,
-                attention_mask=attention_mask,  # not used
-            )
-        elif self.is_flux:
-            prompt_embeds, pooled_prompt_embeds = train_tools.encode_prompts_flux(
-                self.tokenizer,  # list
-                self.text_encoder,  # list
-                prompt,
-                truncate=not long_prompts,
-                max_length=512,
-                dropout_prob=dropout_prob,
-                attn_mask=self.model_config.attn_masking
-            )
-            pe = PromptEmbeds(
-                prompt_embeds
-            )
-            pe.pooled_embeds = pooled_prompt_embeds
-            return pe
-
-        elif self.is_lumina2:
-            (
-                prompt_embeds,
-                prompt_attention_mask,
-                negative_prompt_embeds,
-                negative_prompt_attention_mask,
-            ) = self.pipeline.encode_prompt(
-                prompt,
-                do_classifier_free_guidance=False,
-                num_images_per_prompt=1,
-                device=self.device_torch,
-                max_sequence_length=256, # should it be 512?
-            )
-            return PromptEmbeds(
-                prompt_embeds,
-                attention_mask=prompt_attention_mask,
-            )
-
-        elif isinstance(self.text_encoder, T5EncoderModel):
-            embeds, attention_mask = train_tools.encode_prompts_pixart(
-                self.tokenizer,
-                self.text_encoder,
-                prompt,
-                truncate=not long_prompts,
-                max_length=256,
-                dropout_prob=dropout_prob
-            )
-            
-            # just mask the attention mask
-            prompt_attention_mask = attention_mask.unsqueeze(-1).expand(embeds.shape)
-            embeds = embeds * prompt_attention_mask.to(dtype=embeds.dtype, device=embeds.device)
-            return PromptEmbeds(
-                embeds,
-                
-                # do we want attn mask here?
-                # attention_mask=attention_mask,
-            )
-        else:
-            return PromptEmbeds(
-                train_tools.encode_prompts(
+            elif self.is_pixart:
+                embeds, attention_mask = train_tools.encode_prompts_pixart(
                     self.tokenizer,
                     self.text_encoder,
                     prompt,
                     truncate=not long_prompts,
-                    max_length=max_length,
+                    max_length=300 if self.model_config.is_pixart_sigma else 120,
                     dropout_prob=dropout_prob
                 )
-            )
+                return PromptEmbeds(
+                    embeds,
+                    attention_mask=attention_mask,
+                )
+            elif self.is_auraflow:
+                embeds, attention_mask = train_tools.encode_prompts_auraflow(
+                    self.tokenizer,
+                    self.text_encoder,
+                    prompt,
+                    truncate=not long_prompts,
+                    max_length=256,
+                    dropout_prob=dropout_prob
+                )
+                return PromptEmbeds(
+                    embeds,
+                    attention_mask=attention_mask,  # not used
+                )
+            elif self.is_flux:
+                prompt_embeds, pooled_prompt_embeds = train_tools.encode_prompts_flux(
+                    self.tokenizer,  # list
+                    self.text_encoder,  # list
+                    prompt,
+                    truncate=not long_prompts,
+                    max_length=512,
+                    dropout_prob=dropout_prob,
+                    attn_mask=self.model_config.attn_masking
+                )
+                pe = PromptEmbeds(
+                    prompt_embeds
+                )
+                pe.pooled_embeds = pooled_prompt_embeds
+                return pe
+
+            elif self.is_lumina2:
+                (
+                    prompt_embeds,
+                    prompt_attention_mask,
+                    negative_prompt_embeds,
+                    negative_prompt_attention_mask,
+                ) = self.pipeline.encode_prompt(
+                    prompt,
+                    do_classifier_free_guidance=False,
+                    num_images_per_prompt=1,
+                    device=self.device_torch,
+                    max_sequence_length=256, # should it be 512?
+                )
+                return PromptEmbeds(
+                    prompt_embeds,
+                    attention_mask=prompt_attention_mask,
+                )
+
+            elif isinstance(self.text_encoder, T5EncoderModel):
+                embeds, attention_mask = train_tools.encode_prompts_pixart(
+                    self.tokenizer,
+                    self.text_encoder,
+                    prompt,
+                    truncate=not long_prompts,
+                    max_length=256,
+                    dropout_prob=dropout_prob
+                )
+            
+                # just mask the attention mask
+                prompt_attention_mask = attention_mask.unsqueeze(-1).expand(embeds.shape)
+                embeds = embeds * prompt_attention_mask.to(dtype=embeds.dtype, device=embeds.device)
+                return PromptEmbeds(
+                    embeds,
+                
+                    # do we want attn mask here?
+                    # attention_mask=attention_mask,
+                )
+            else:
+                return PromptEmbeds(
+                    train_tools.encode_prompts(
+                        self.tokenizer,
+                        self.text_encoder,
+                        prompt,
+                        truncate=not long_prompts,
+                        max_length=max_length,
+                        dropout_prob=dropout_prob
+                    )
+                )
+
+        if train_tools.text_encoder_param_requires_grad(self.text_encoder):
+            return _encode()
+        with torch.no_grad():
+            return _encode()
 
     @torch.no_grad()
     def encode_images(
