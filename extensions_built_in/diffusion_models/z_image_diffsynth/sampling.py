@@ -200,9 +200,12 @@ def _resolve_use_dynamic_shifting_from_sd_model(sd_model) -> bool:
 def get_generation_pipeline(sd_model):
     """Build pipeline for sd_model (ZImageDiffSynthModel). Uses sampling transformer if set.
     When loader=diffusers (or auto loaded as Diffusers), use ZImagePipeline with the
-    Diffusers transformer. Otherwise use DiffSynth DiT + model_fn_z_image_turbo wrapper."""
+    Diffusers transformer. Otherwise use DiffSynth DiT + model_fn_z_image_turbo wrapper.
+
+    Never ``ZImagePipeline.from_pretrained`` here: that reloads a second Qwen TE
+    (~8GB) plus a bf16 DiT from disk on every sample().
+    """
     from toolkit.accelerator import unwrap_model
-    from toolkit.paths import normalize_path
 
     sampling_is_diffusers = getattr(sd_model, "_sampling_is_diffusers", False)
     main_is_diffusers = getattr(sd_model, "_main_is_diffusers", False)
@@ -214,7 +217,7 @@ def get_generation_pipeline(sd_model):
         or (main_is_diffusers and sampling_is_diffusers)
     )
 
-    # Diffusers path: ZImagePipeline with Diffusers ZImageTransformer2DModel
+    # Diffusers path: ZImagePipeline with already-loaded transformer / VAE / TE.
     if use_diffusers_pipeline:
         from diffusers import ZImagePipeline
 
@@ -222,35 +225,9 @@ def get_generation_pipeline(sd_model):
             sampling_is_diffusers or main_is_diffusers
         ):
             tr_source = sampling_transformer
-            pretrained_path = getattr(
-                getattr(sd_model, "model_config", None), "sampling_name_or_path", None
-            )
         else:
             tr_source = getattr(sd_model, "model", None)
-            pretrained_path = getattr(
-                getattr(sd_model, "model_config", None), "name_or_path", None
-            )
 
-        if pretrained_path:
-            pretrained_path = normalize_path(pretrained_path)
-            try:
-                pipe = ZImagePipeline.from_pretrained(
-                    pretrained_path,
-                    torch_dtype=sd_model.torch_dtype,
-                )
-                tr = getattr(tr_source, "_inner_dit", getattr(tr_source, "dit", tr_source))
-                pipe.transformer = unwrap_model(tr)
-                use_dynamic_shifting = _resolve_use_dynamic_shifting_from_sd_model(
-                    sd_model
-                )
-                if use_dynamic_shifting:
-                    pipe.scheduler = CustomFlowMatchEulerDiscreteScheduler(
-                        **build_scheduler_config(use_dynamic_shifting=True)
-                    )
-                return pipe
-            except Exception:
-                pass
-        # Fallback: build from model components
         use_dynamic_shifting = _resolve_use_dynamic_shifting_from_sd_model(sd_model)
         scheduler = CustomFlowMatchEulerDiscreteScheduler(
             **build_scheduler_config(use_dynamic_shifting=use_dynamic_shifting)

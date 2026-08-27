@@ -1582,6 +1582,13 @@ class SDTrainer(BaseSDTrainProcess):
                     path = os.path.join(samples_dir, f'noised_step_{self.step_num:09d}_t{timestep_val}.jpg')
                     save_tensors(decoded, path)
                     self._last_noised_preview_step = self.step_num
+                    # decode_latents remounts VAE; training with cached latents
+                    # does not need it on CUDA (and it is not the sampling DiT).
+                    if self.is_latents_cached:
+                        self.sd.vae.to("cpu")
+                        flush()
+                    if hasattr(self.sd, "_log_device_state"):
+                        self.sd._log_device_state("after-sample-noised")
             if self.train_config.do_cfg or self.train_config.do_random_cfg:
                 # pick random negative prompts
                 if self.negative_prompt_pool is not None:

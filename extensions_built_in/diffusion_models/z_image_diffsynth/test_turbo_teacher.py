@@ -1353,3 +1353,88 @@ def test_hook_before_train_loop_turbo_false_clears_stale_intent(monkeypatch):
     assert inherited_snapshot["apply_call_count"] == 0
     assert apply_calls == [False]
     assert sd._train_on_turbo is False
+
+
+def test_set_device_state_batch_generate_keeps_unet_cpu(monkeypatch):
+    """generate preset must not remount main DiT while sampling generate is active."""
+    from toolkit.models.base_model import BaseModel
+    from extensions_built_in.diffusion_models.z_image_diffsynth.model import (
+        ZImageDiffSynthModel,
+    )
+
+    captured = {}
+
+    def _fake_set(self, state):
+        captured["unet_device"] = state["unet"]["device"]
+
+    monkeypatch.setattr(BaseModel, "set_device_state", _fake_set)
+    model = object.__new__(ZImageDiffSynthModel)
+    model._train_on_turbo = False
+    model._sampling_in_batch_generate = True
+    model._text_cache_residency_active = False
+    ZImageDiffSynthModel.set_device_state(
+        model,
+        {
+            "unet": {
+                "device": torch.device("cuda"),
+                "training": False,
+                "requires_grad": False,
+            },
+            "vae": {"device": "cpu", "training": False, "requires_grad": False},
+            "text_encoder": {
+                "device": "cpu",
+                "training": False,
+                "requires_grad": False,
+            },
+        },
+    )
+    assert torch.device(captured["unet_device"]).type == "cpu"
+
+
+def test_get_generation_pipeline_does_not_from_pretrained(monkeypatch):
+    """Sample() must reuse in-memory TE/DiT; not reload Turbo via from_pretrained."""
+    from extensions_built_in.diffusion_models.z_image_diffsynth import sampling as sampling_mod
+    from toolkit.unloader import FakeTextEncoder
+
+    captured = {}
+
+    class _FakePipe:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        @classmethod
+        def from_pretrained(cls, *args, **kwargs):
+            raise AssertionError(
+                "ZImagePipeline.from_pretrained must not reload TE/DiT on sample"
+            )
+
+    monkeypatch.setattr(sampling_mod, "ZImagePipeline", _FakePipe, raising=False)
+    import diffusers
+
+    monkeypatch.setattr(diffusers, "ZImagePipeline", _FakePipe)
+
+    te = FakeTextEncoder(device=torch.device("cpu"), dtype=torch.float32)
+    inner = nn.Linear(2, 2)
+    wrapper = SimpleNamespace(_inner_dit=inner)
+    vae = nn.Identity()
+    vae.vae_decoder = vae
+    sd = SimpleNamespace(
+        _sampling_is_diffusers=True,
+        _main_is_diffusers=True,
+        _sampling_transformer=wrapper,
+        model=wrapper,
+        model_config=SimpleNamespace(
+            model_kwargs={"loader": "diffusers"},
+            sampling_name_or_path="/would-reload-turbo",
+        ),
+        vae=vae,
+        text_encoder=[te],
+        tokenizer=["tok"],
+        device_torch=torch.device("cpu"),
+        torch_dtype=torch.float32,
+    )
+    pipe = sampling_mod.get_generation_pipeline(sd)
+    assert pipe is not None
+    assert captured["transformer"] is inner
+    assert captured["text_encoder"] is te
+

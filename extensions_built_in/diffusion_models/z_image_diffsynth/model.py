@@ -395,14 +395,19 @@ class ZImageDiffSynthModel(BaseModel):
     def set_device_state(self, state):
         """Presets move ``unet`` (base DiT) to CUDA and would co-reside with Turbo.
 
-        When training on Turbo, keep base on CPU and re-pin exclusive residency
-        after the preset (``set_device_state`` runs after ``hook_before_train_loop``).
+        Keep base on CPU when training on Turbo **or** during batch
+        ``generate_images`` (``_sampling_in_batch_generate``): the generate
+        preset would otherwise remount main DiT while sampling DiT is on CUDA.
+        After the preset (``set_device_state`` runs after ``hook_before_train_loop``).
         Skip remount while text-cache residency is active so TE-only encode never
         co-resides with sampling DiT.
         """
         import copy
 
-        if getattr(self, "_train_on_turbo", False) and isinstance(state, dict):
+        if isinstance(state, dict) and (
+            getattr(self, "_train_on_turbo", False)
+            or getattr(self, "_sampling_in_batch_generate", False)
+        ):
             state = copy.deepcopy(state)
             unet_state = dict(state.get("unet") or {})
             unet_state["device"] = torch.device("cpu")
