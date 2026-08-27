@@ -36,7 +36,11 @@ from toolkit.prompt_utils import PromptEmbeds
 from torchvision.transforms import functional as TF
 
 from toolkit.train_tools import get_torch_dtype
-from toolkit.unloader import abort_text_cache_residency, enter_text_cache_residency
+from toolkit.unloader import (
+    abort_text_cache_residency,
+    enter_text_cache_residency,
+    log_text_cache_cuda_residency,
+)
 from toolkit.util.debug import is_debug_enabled, memory_debug
 
 if TYPE_CHECKING:
@@ -2244,100 +2248,106 @@ class TextEmbeddingCachingMixin:
             # One long TE-only residency phase: enter before first encode; exit
             # happens later in SDTrainer after unload (multi-dataset share this phase).
             enter_text_cache_residency(self.sd)
+            log_text_cache_cuda_residency(print_acc, self.sd, "text-cache:after-enter")
 
             try:
                 # use tqdm to show progress
-                with memory_debug(print_acc, "Caching text embeddings to disk"):
-                    i = 0
-                    for file_item in tqdm(self.file_list, desc='Caching text embeddings to disk'):
-                        file_item.latent_load_device = self.sd.device
+                with torch.no_grad():
+                    with memory_debug(print_acc, "Caching text embeddings to disk"):
+                        i = 0
+                        for file_item in tqdm(self.file_list, desc='Caching text embeddings to disk'):
+                            file_item.latent_load_device = self.sd.device
 
-                        text_embedding_path = file_item.get_text_embedding_path(recalculate=True)
-                        if os.path.exists(text_embedding_path):
-                            M, R = PromptEmbeds.get_cache_metadata_from_file(text_embedding_path)
-                            if M < total_variants and R < total_variants:
-                                try:
-                                    os.remove(text_embedding_path)
-                                except OSError:
-                                    pass
-                        if not os.path.exists(text_embedding_path):
-                            if file_item.encode_control_in_text_embeddings:
-                                if file_item.control_path is None:
-                                    raise Exception(f"Could not find a control image for {file_item.path} which is needed for this model")
-                                ctrl_img_list = []
-                                control_path_list = file_item.control_path
-                                if not isinstance(file_item.control_path, list):
-                                    control_path_list = [control_path_list]
-                                for ii in range(len(control_path_list)):
+                            text_embedding_path = file_item.get_text_embedding_path(recalculate=True)
+                            if os.path.exists(text_embedding_path):
+                                M, R = PromptEmbeds.get_cache_metadata_from_file(text_embedding_path)
+                                if M < total_variants and R < total_variants:
                                     try:
-                                        img = Image.open(control_path_list[ii]).convert("RGB")
-                                        img = exif_transpose(img)
-                                        # convert to 0 to 1 tensor
-                                        img = (
-                                            TF.to_tensor(img)
-                                            .unsqueeze(0)
-                                            .to(self.sd.device_torch, dtype=self.sd.torch_dtype)
-                                        )
-                                        ctrl_img_list.append(img)
-                                    except Exception as e:
-                                        print_acc(f"Error: {e}")
-                                        print_acc(f"Error loading control image: {control_path_list[ii]}")
+                                        os.remove(text_embedding_path)
+                                    except OSError:
+                                        pass
+                            if not os.path.exists(text_embedding_path):
+                                if file_item.encode_control_in_text_embeddings:
+                                    if file_item.control_path is None:
+                                        raise Exception(f"Could not find a control image for {file_item.path} which is needed for this model")
+                                    ctrl_img_list = []
+                                    control_path_list = file_item.control_path
+                                    if not isinstance(file_item.control_path, list):
+                                        control_path_list = [control_path_list]
+                                    for ii in range(len(control_path_list)):
+                                        try:
+                                            img = Image.open(control_path_list[ii]).convert("RGB")
+                                            img = exif_transpose(img)
+                                            # convert to 0 to 1 tensor
+                                            img = (
+                                                TF.to_tensor(img)
+                                                .unsqueeze(0)
+                                                .to(self.sd.device_torch, dtype=self.sd.torch_dtype)
+                                            )
+                                            ctrl_img_list.append(img)
+                                        except Exception as e:
+                                            print_acc(f"Error: {e}")
+                                            print_acc(f"Error loading control image: {control_path_list[ii]}")
 
-                                if len(ctrl_img_list) == 0:
-                                    ctrl_img = None
-                                elif not self.sd.has_multiple_control_images:
-                                    ctrl_img = ctrl_img_list[0]
-                                else:
-                                    ctrl_img = ctrl_img_list
-                                keep_n = getattr(file_item.dataset_config, 'shuffle_tokens_keep', 1)
-                                split_re = file_item.dataset_config.shuffle_tokens_split_re
-                                join_str = file_item.dataset_config.shuffle_tokens_join
-                                if K == 1:
-                                    embeds_list = [self.sd.encode_prompt(file_item.caption, control_images=ctrl_img)]
-                                else:
-                                    embeds_list = [self.sd.encode_prompt(file_item.caption, control_images=ctrl_img)]
-                                    for _ in range(K - 1):
-                                        caption_shuffled = _shuffle_caption_by_commas(
-                                            file_item.caption, keep_n=keep_n, split_re=split_re, join_str=join_str,
+                                    if len(ctrl_img_list) == 0:
+                                        ctrl_img = None
+                                    elif not self.sd.has_multiple_control_images:
+                                        ctrl_img = ctrl_img_list[0]
+                                    else:
+                                        ctrl_img = ctrl_img_list
+                                    keep_n = getattr(file_item.dataset_config, 'shuffle_tokens_keep', 1)
+                                    split_re = file_item.dataset_config.shuffle_tokens_split_re
+                                    join_str = file_item.dataset_config.shuffle_tokens_join
+                                    if K == 1:
+                                        embeds_list = [self.sd.encode_prompt(file_item.caption, control_images=ctrl_img)]
+                                    else:
+                                        embeds_list = [self.sd.encode_prompt(file_item.caption, control_images=ctrl_img)]
+                                        for _ in range(K - 1):
+                                            caption_shuffled = _shuffle_caption_by_commas(
+                                                file_item.caption, keep_n=keep_n, split_re=split_re, join_str=join_str,
+                                            )
+                                            embeds_list.append(self.sd.encode_prompt(caption_shuffled, control_images=ctrl_img))
+                                    if has_dropout:
+                                        dropout_caption = _keep_caption_segments(
+                                            file_item.caption or '', dropout_keep, split_re=split_re, join_str=join_str,
                                         )
-                                        embeds_list.append(self.sd.encode_prompt(caption_shuffled, control_images=ctrl_img))
-                                if has_dropout:
-                                    dropout_caption = _keep_caption_segments(
-                                        file_item.caption or '', dropout_keep, split_re=split_re, join_str=join_str,
-                                    )
-                                    embeds_list.append(self.sd.encode_prompt(dropout_caption, control_images=ctrl_img))
-                                PromptEmbeds.save_multi(text_embedding_path, embeds_list, requested_variants=total_variants)
-                                for pe in embeds_list:
-                                    del pe
-                                embeds_list.clear()
-                            else:
-                                keep_n = getattr(file_item.dataset_config, 'shuffle_tokens_keep', 1)
-                                split_re = file_item.dataset_config.shuffle_tokens_split_re
-                                join_str = file_item.dataset_config.shuffle_tokens_join
-                                if K == 1:
-                                    embeds_list = [self.sd.encode_prompt(file_item.caption)]
+                                        embeds_list.append(self.sd.encode_prompt(dropout_caption, control_images=ctrl_img))
+                                    PromptEmbeds.save_multi(text_embedding_path, embeds_list, requested_variants=total_variants)
+                                    for pe in embeds_list:
+                                        del pe
+                                    embeds_list.clear()
                                 else:
-                                    unique_captions = _get_unique_caption_permutations(
-                                        file_item.caption,
-                                        max_permutations=K,
-                                        keep_n=keep_n,
-                                        split_re=split_re,
-                                        join_str=join_str,
-                                    )
-                                    embeds_list = []
-                                    for caption_text in unique_captions[:K]:
-                                        embeds_list.append(self.sd.encode_prompt(caption_text))
-                                if has_dropout:
-                                    dropout_caption = _keep_caption_segments(
-                                        file_item.caption or '', dropout_keep, split_re=split_re, join_str=join_str,
-                                    )
-                                    embeds_list.append(self.sd.encode_prompt(dropout_caption))
-                                PromptEmbeds.save_multi(text_embedding_path, embeds_list, requested_variants=total_variants)
-                                for pe in embeds_list:
-                                    del pe
-                                embeds_list.clear()
-                        file_item.is_text_embedding_cached = True
-                        i += 1
+                                    keep_n = getattr(file_item.dataset_config, 'shuffle_tokens_keep', 1)
+                                    split_re = file_item.dataset_config.shuffle_tokens_split_re
+                                    join_str = file_item.dataset_config.shuffle_tokens_join
+                                    if K == 1:
+                                        embeds_list = [self.sd.encode_prompt(file_item.caption)]
+                                    else:
+                                        unique_captions = _get_unique_caption_permutations(
+                                            file_item.caption,
+                                            max_permutations=K,
+                                            keep_n=keep_n,
+                                            split_re=split_re,
+                                            join_str=join_str,
+                                        )
+                                        embeds_list = []
+                                        for caption_text in unique_captions[:K]:
+                                            embeds_list.append(self.sd.encode_prompt(caption_text))
+                                    if has_dropout:
+                                        dropout_caption = _keep_caption_segments(
+                                            file_item.caption or '', dropout_keep, split_re=split_re, join_str=join_str,
+                                        )
+                                        embeds_list.append(self.sd.encode_prompt(dropout_caption))
+                                    PromptEmbeds.save_multi(text_embedding_path, embeds_list, requested_variants=total_variants)
+                                    for pe in embeds_list:
+                                        del pe
+                                    embeds_list.clear()
+                            file_item.is_text_embedding_cached = True
+                            i += 1
+                            if i == 1:
+                                log_text_cache_cuda_residency(
+                                    print_acc, self.sd, "text-cache:after-first-encode"
+                                )
                 # Leave residency active until TE unload + exit in SDTrainer.hook_before_train_loop.
             except Exception as err:
                 try:

@@ -1,5 +1,6 @@
 import torch
 from toolkit.basic import flush
+from toolkit.util.debug import is_debug_enabled
 from toolkit.util.device import devices_equal, quantized_payload_device, safe_module_to_device
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
@@ -499,6 +500,93 @@ def _any_real_te_on_cuda(model: Any) -> bool:
         if _module_has_cuda_residency(enc):
             return True
     return False
+
+
+def _module_cuda_footprint(module: torch.nn.Module) -> Tuple[int, str, str]:
+    """Return (cuda_bytes, param_devices, payload_devices) for a module."""
+    cuda_bytes = 0
+    param_devs: set[str] = set()
+    payload_devs: set[str] = set()
+    seen: set[int] = set()
+
+    def _add_tensor(t: Any) -> None:
+        nonlocal cuda_bytes
+        if not isinstance(t, torch.Tensor):
+            return
+        try:
+            ptr = t.data_ptr()
+        except Exception:
+            ptr = id(t)
+        if ptr in seen:
+            return
+        seen.add(ptr)
+        if t.device.type == "cuda":
+            cuda_bytes += t.numel() * t.element_size()
+        for attr in ("qdata", "_data", "scale", "_scale"):
+            val = getattr(t, attr, None)
+            if not isinstance(val, torch.Tensor):
+                continue
+            try:
+                vptr = val.data_ptr()
+            except Exception:
+                vptr = id(val)
+            if vptr in seen:
+                continue
+            seen.add(vptr)
+            if val.device.type == "cuda":
+                cuda_bytes += val.numel() * val.element_size()
+                payload_devs.add(str(val.device))
+
+    for p in module.parameters():
+        param_devs.add(str(p.device))
+        _add_tensor(p)
+        payload = quantized_payload_device(p)
+        if payload is not None:
+            payload_devs.add(str(payload))
+    for buf in module.buffers():
+        if buf is None:
+            continue
+        param_devs.add(str(buf.device))
+        _add_tensor(buf)
+    return (
+        cuda_bytes,
+        ",".join(sorted(param_devs)) or "none",
+        ",".join(sorted(payload_devs)) or "none",
+    )
+
+
+def log_text_cache_cuda_residency(print_fn, model: Any, label: str) -> None:
+    """Debug-only: per-component CUDA footprint after enter / first encode."""
+    if not is_debug_enabled() or not torch.cuda.is_available():
+        return
+    alloc = torch.cuda.memory_allocated()
+    lines = [
+        f"[DEBUG CUDA residency] {label} "
+        f"alloc={alloc / 1024**3:.2f}GB reserved={torch.cuda.memory_reserved() / 1024**3:.2f}GB"
+    ]
+    accounted = 0
+    owners: List[Tuple[str, torch.nn.Module]] = []
+    owners.extend(_iter_live_real_text_encoders(model))
+    for name, module in collect_persistent_non_te_owners(model).items():
+        owners.append((name, module))
+    seen_ids: set[int] = set()
+    for name, module in owners:
+        oid = id(module)
+        if oid in seen_ids:
+            continue
+        seen_ids.add(oid)
+        nbytes, param_devs, payload_devs = _module_cuda_footprint(module)
+        accounted += nbytes
+        lines.append(
+            f"  {name}: params={param_devs} payload={payload_devs} "
+            f"cuda={nbytes / 1024**3:.2f}GB"
+        )
+    unexplained = alloc - accounted
+    lines.append(
+        f"  accounted={accounted / 1024**3:.2f}GB unexplained={unexplained / 1024**3:.2f}GB"
+    )
+    print_fn("\n".join(lines))
+
 
 
 def _assert_modules_on_device(
