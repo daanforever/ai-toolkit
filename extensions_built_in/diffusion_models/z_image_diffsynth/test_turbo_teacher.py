@@ -1271,3 +1271,85 @@ def test_get_noise_prediction_first_park_off_cuda_flushes_then_noop():
             wrapper.to("cpu")
         except Exception:
             pass
+
+
+# --- Canonical turbo intent timing (Step 4) ---
+
+
+def _run_hook_before_train_loop_timing(monkeypatch, *, turbo_teacher_weight: bool):
+    """Drive ``hook_before_train_loop`` and snapshot intent at inherited-hook entry."""
+    from extensions_built_in.diffusion_models.z_image_diffsynth.trainer import (
+        ZImageDiffSynthTrainer,
+    )
+    from extensions_built_in.sd_trainer.SDTrainer import SDTrainer
+
+    apply_calls: list = []
+    inherited_snapshot: dict = {}
+
+    sampling = MagicMock()
+    # Stale True must be cleared when turbo_teacher_weight=False.
+    sd = SimpleNamespace(
+        _sampling_transformer=sampling,
+        _train_on_turbo=True,
+        network=MagicMock(name="base_net"),
+        gradient_checkpointing=True,
+    )
+
+    def _apply(enabled: bool):
+        apply_calls.append(bool(enabled))
+        sd._train_on_turbo = bool(enabled)
+
+    sd.apply_turbo_teacher_mode = _apply
+
+    def _inherited_hook(self):
+        # Record state at the moment the inherited SDTrainer hook is entered.
+        inherited_snapshot["train_on_turbo"] = bool(
+            getattr(self.sd, "_train_on_turbo", False)
+        )
+        inherited_snapshot["apply_call_count"] = len(apply_calls)
+
+    monkeypatch.setattr(SDTrainer, "hook_before_train_loop", _inherited_hook)
+    monkeypatch.setattr(
+        ZImageDiffSynthTrainer,
+        "internal_hook_before_train_loop",
+        lambda self: None,
+    )
+
+    _patch_diffusion_trainer_init(
+        monkeypatch,
+        turbo_teacher_weight=turbo_teacher_weight,
+        sampling_name_or_path="/tmp/turbo",
+    )
+    trainer = ZImageDiffSynthTrainer(0, None, _base_cfg())
+    trainer.is_ui_trainer = False
+    trainer._compile_dit_blocks = False
+    trainer.sd = sd
+    trainer.network = sd.network
+    trainer.train_config.turbo_teacher_weight = turbo_teacher_weight
+
+    trainer.hook_before_train_loop()
+    return inherited_snapshot, apply_calls, sd
+
+
+def test_hook_before_train_loop_turbo_true_sets_intent_before_apply(monkeypatch):
+    """turbo_teacher_weight=True: intent before inherited hook; apply only after."""
+    inherited_snapshot, apply_calls, sd = _run_hook_before_train_loop_timing(
+        monkeypatch, turbo_teacher_weight=True
+    )
+
+    assert inherited_snapshot["train_on_turbo"] is True
+    assert inherited_snapshot["apply_call_count"] == 0
+    assert apply_calls == [True]
+    assert sd._train_on_turbo is True
+
+
+def test_hook_before_train_loop_turbo_false_clears_stale_intent(monkeypatch):
+    """turbo_teacher_weight=False: stale _train_on_turbo cleared before inherited hook."""
+    inherited_snapshot, apply_calls, sd = _run_hook_before_train_loop_timing(
+        monkeypatch, turbo_teacher_weight=False
+    )
+
+    assert inherited_snapshot["train_on_turbo"] is False
+    assert inherited_snapshot["apply_call_count"] == 0
+    assert apply_calls == [False]
+    assert sd._train_on_turbo is False

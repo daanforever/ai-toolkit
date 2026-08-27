@@ -397,6 +397,8 @@ class ZImageDiffSynthModel(BaseModel):
 
         When training on Turbo, keep base on CPU and re-pin exclusive residency
         after the preset (``set_device_state`` runs after ``hook_before_train_loop``).
+        Skip remount while text-cache residency is active so TE-only encode never
+        co-resides with sampling DiT.
         """
         import copy
 
@@ -406,7 +408,9 @@ class ZImageDiffSynthModel(BaseModel):
             unet_state["device"] = torch.device("cpu")
             state["unet"] = unet_state
         super().set_device_state(state)
-        if getattr(self, "_train_on_turbo", False):
+        if getattr(self, "_train_on_turbo", False) and not getattr(
+            self, "_text_cache_residency_active", False
+        ):
             self.apply_turbo_teacher_mode(True)
 
     def _dit_for_train_forward(self):

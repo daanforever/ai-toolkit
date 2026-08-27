@@ -7,6 +7,7 @@ from extensions_built_in.sd_trainer.DiffusionTrainer import DiffusionTrainer
 from toolkit.data_transfer_object.data_loader import DataLoaderBatchDTO
 from toolkit.prompt_utils import PromptEmbeds, concat_prompt_embeds
 from toolkit.train_tools import get_torch_dtype
+from toolkit.unloader import abort_text_cache_residency, enter_text_cache_residency
 
 
 class ConceptSliderTrainerConfig:
@@ -50,47 +51,53 @@ class ConceptSliderTrainer(DiffusionTrainer):
         self.anchor_class_embeds: Optional[PromptEmbeds] = None
 
     def hook_before_train_loop(self):
-        # do this before calling parent as it unloads the text encoder if requested
-        if self.is_caching_text_embeddings:
-            # make sure model is on cpu for this part so we don't oom.
-            self.sd.unet.to("cpu")
+        # Concept prompts encode before parent; parent owns success unload+exit.
+        caching = bool(getattr(self, "is_caching_text_embeddings", False))
+        if caching:
+            enter_text_cache_residency(self.sd)
 
-        # cache unconditional embeds (blank prompt)
-        with torch.no_grad():
-            self.positive_prompt_embeds = (
-                self.sd.encode_prompt(
-                    [self.positive_prompt],
-                )
-                .to(self.device_torch, dtype=self.sd.torch_dtype)
-                .detach()
-            )
-
-            self.target_class_embeds = (
-                self.sd.encode_prompt(
-                    [self.target_class],
-                )
-                .to(self.device_torch, dtype=self.sd.torch_dtype)
-                .detach()
-            )
-
-            self.negative_prompt_embeds = (
-                self.sd.encode_prompt(
-                    [self.negative_prompt],
-                )
-                .to(self.device_torch, dtype=self.sd.torch_dtype)
-                .detach()
-            )
-
-            if self.anchor_class is not None:
-                self.anchor_class_embeds = (
+        try:
+            with torch.no_grad():
+                self.positive_prompt_embeds = (
                     self.sd.encode_prompt(
-                        [self.anchor_class],
+                        [self.positive_prompt],
                     )
                     .to(self.device_torch, dtype=self.sd.torch_dtype)
                     .detach()
                 )
 
-        # call parent
+                self.target_class_embeds = (
+                    self.sd.encode_prompt(
+                        [self.target_class],
+                    )
+                    .to(self.device_torch, dtype=self.sd.torch_dtype)
+                    .detach()
+                )
+
+                self.negative_prompt_embeds = (
+                    self.sd.encode_prompt(
+                        [self.negative_prompt],
+                    )
+                    .to(self.device_torch, dtype=self.sd.torch_dtype)
+                    .detach()
+                )
+
+                if self.anchor_class is not None:
+                    self.anchor_class_embeds = (
+                        self.sd.encode_prompt(
+                            [self.anchor_class],
+                        )
+                        .to(self.device_torch, dtype=self.sd.torch_dtype)
+                        .detach()
+                    )
+        except Exception as err:
+            if caching:
+                try:
+                    abort_text_cache_residency(self.sd)
+                except Exception as cleanup_err:
+                    raise err from cleanup_err
+            raise
+
         super().hook_before_train_loop()
 
     def get_guided_loss(

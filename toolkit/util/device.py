@@ -67,12 +67,22 @@ def safe_module_to_device(
             moved = param.to(device=device, dtype=dtype)
         else:
             moved = param.to(device=device)
-        if _is_quantized_param(param):
+        if _is_quantized_param(param) and (
+            quantized_payload_device(moved) is not None
+            or hasattr(moved, "qdata")
+            or hasattr(moved, "_data")
+        ):
+            # Real torchao/quanto: .to() relocates payload; replace Parameter.
             module._parameters[name] = nn.Parameter(
                 moved, requires_grad=param.requires_grad
             )
         else:
+            # Plain Parameter (incl. bolted-on qdata fixtures): keep identity.
             param.data = moved.data if hasattr(moved, "data") else moved
+            for attr in ("qdata", "_data", "scale", "_scale"):
+                val = getattr(param, attr, None)
+                if isinstance(val, torch.Tensor) and not devices_equal(val.device, device):
+                    setattr(param, attr, val.to(device))
 
     for name, buf in list(module.named_buffers(recurse=False)):
         if buf is None:

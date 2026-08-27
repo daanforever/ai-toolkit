@@ -282,6 +282,27 @@ class BaseSDTrainProcess(BaseTrainProcess):
             raw = getattr(self.network_config, "dtype", None)
         return get_torch_dtype(raw or self.train_config.dtype)
 
+    def _resolve_initial_network_device(self) -> torch.device:
+        """Device for main LoRA/PEFT ``force_to`` at creation.
+
+        While text-embedding caching is active, keep the network (and PEFT
+        wrapped base) on CPU so CUDA residency stays TE-only until the common
+        lifecycle exit remounts trainable owners. Non-caching keeps the train
+        device. Sampling network must not be unconditionally forced to CPU in
+        the non-caching path: after ``share_parameters_with`` its params already
+        live on the train device via the main network.
+        """
+        if self.is_caching_text_embeddings:
+            return torch.device("cpu")
+        return self.device_torch
+
+    def _force_initial_network_to_device(self) -> None:
+        """Apply initial main-network placement (CPU while TE cache is active)."""
+        self.network.force_to(
+            self._resolve_initial_network_device(),
+            dtype=self._resolve_network_dtype(),
+        )
+
     def post_process_generate_image_config_list(self, generate_image_config_list: List[GenerateImageConfig]):
         # override in subclass
         return generate_image_config_list
@@ -742,35 +763,57 @@ class BaseSDTrainProcess(BaseTrainProcess):
     
     def prepare_accelerator(self):
         # set some config
-        self.accelerator.even_batches=False
-        
+        self.accelerator.even_batches = False
+        if self.is_caching_text_embeddings:
+            # TE-only residency still open: do not prepare modules/optimizer/scheduler.
+            # Accelerate may DDP-wrap CPU trainables with CUDA device_ids if prepared early.
+            self._accelerator_prepare_deferred = True
+            return
+        self._accelerator_prepare_deferred = False
+        self._apply_accelerator_prepare()
+
+    def finalize_accelerator_prepare(self):
+        """Run deferred ``accelerator.prepare`` after TE unload+exit. Idempotent."""
+        if getattr(self, "_accelerator_prepare_done", False):
+            return
+        self._apply_accelerator_prepare()
+
+    def _apply_accelerator_prepare(self):
+        """Single-shot Accelerate prepare for train components. Idempotent."""
+        if getattr(self, "_accelerator_prepare_done", False):
+            return
+
         # # prepare all the models stuff for accelerator (hopefully we dont miss any)
         self.sd.vae = self.accelerator.prepare(self.sd.vae)
         if self.sd.unet is not None:
-            # Defer unet prepare while TE cache is active so prepare does not remount DiT to CUDA.
-            if not self.is_caching_text_embeddings:
-                self.sd.unet = self.accelerator.prepare(self.sd.unet)
-                # todo always tdo it?
+            self.sd.unet = self.accelerator.prepare(self.sd.unet)
+            # todo always tdo it?
+            if self.sd.unet not in self.modules_being_trained:
                 self.modules_being_trained.append(self.sd.unet)
         if self.sd.text_encoder is not None and self.train_config.train_text_encoder:
             if isinstance(self.sd.text_encoder, list):
-                self.sd.text_encoder = [self.accelerator.prepare(model) for model in self.sd.text_encoder]
+                self.sd.text_encoder = [
+                    self.accelerator.prepare(model) for model in self.sd.text_encoder
+                ]
                 self.modules_being_trained.extend(self.sd.text_encoder)
             else:
                 self.sd.text_encoder = self.accelerator.prepare(self.sd.text_encoder)
                 self.modules_being_trained.append(self.sd.text_encoder)
         if self.sd.refiner_unet is not None and self.train_config.train_refiner:
             self.sd.refiner_unet = self.accelerator.prepare(self.sd.refiner_unet)
-            self.modules_being_trained.append(self.sd.refiner_unet)
+            if self.sd.refiner_unet not in self.modules_being_trained:
+                self.modules_being_trained.append(self.sd.refiner_unet)
         # todo, do we need to do the network or will "unet" get it?
         if self.sd.network is not None:
             self.sd.network = self.accelerator.prepare(self.sd.network)
-            self.modules_being_trained.append(self.sd.network)
+            if self.sd.network not in self.modules_being_trained:
+                self.modules_being_trained.append(self.sd.network)
         if self.adapter is not None and self.adapter_config.train:
             # todo adapters may not be a module. need to check
             self.adapter = self.accelerator.prepare(self.adapter)
-            self.modules_being_trained.append(self.adapter)
-        
+            if self.adapter not in self.modules_being_trained:
+                self.modules_being_trained.append(self.adapter)
+
         # prepare other things
         self.optimizer = self.accelerator.prepare(self.optimizer)
         if self.lr_scheduler is not None:
@@ -778,7 +821,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
         # self.data_loader = self.accelerator.prepare(self.data_loader)
         # if self.data_loader_reg is not None:
         #     self.data_loader_reg = self.accelerator.prepare(self.data_loader_reg)
-            
+
+        self._accelerator_prepare_done = True
+        self._accelerator_prepare_deferred = False
+
 
     def ensure_params_requires_grad(self, force=False):
         if self.train_config.do_paramiter_swapping and not force:
@@ -1498,7 +1544,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 )
 
                 # todo switch everything to proper mixed precision like this
-                self.network.force_to(self.device_torch, dtype=self._resolve_network_dtype())
+                # Caching: CPU only — avoid PEFT wrapped-base CUDA remount before TE unload.
+                self._force_initial_network_to_device()
 
                 # give network to sd so it can use it
                 self.sd.network = self.network
@@ -1670,7 +1717,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 
                 # give it to the sd network
                 self.sd.decorator = self.decorator
-                self.decorator.to(self.device_torch, dtype=get_torch_dtype(self.train_config.dtype))
+                # CPU while text-embedding caching; common exit remounts when needed.
+                self.decorator.to(
+                    self._resolve_initial_network_device(),
+                    dtype=get_torch_dtype(self.train_config.dtype),
+                )
                 self.decorator.train()
 
                 flush()

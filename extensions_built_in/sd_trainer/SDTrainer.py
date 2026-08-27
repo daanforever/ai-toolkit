@@ -46,8 +46,9 @@ from extensions_built_in.sd_trainer.gaussian_timestep_weights import (
 )
 import torch.nn.functional as F
 from toolkit.unloader import (
-    park_main_transformer_for_text_cache,
-    restore_main_transformer_after_text_cache,
+    abort_text_cache_residency,
+    enter_text_cache_residency,
+    exit_text_cache_residency,
     unload_text_encoder,
 )
 from PIL import Image
@@ -284,6 +285,9 @@ class SDTrainer(BaseSDTrainProcess):
 
     def before_dataset_load(self):
         self.assistant_adapter = None
+        # CPU while text-embedding caching (TE-only residency); train device otherwise.
+        place = self._resolve_initial_network_device()
+        dtype = get_torch_dtype(self.train_config.dtype)
         # get adapter assistant if one is set
         if self.train_config.adapter_assist_name_or_path is not None:
             adapter_path = self.train_config.adapter_assist_name_or_path
@@ -291,12 +295,12 @@ class SDTrainer(BaseSDTrainProcess):
             if self.train_config.adapter_assist_type == "t2i":
                 # dont name this adapter since we are not training it
                 self.assistant_adapter = T2IAdapter.from_pretrained(
-                    adapter_path, torch_dtype=get_torch_dtype(self.train_config.dtype)
-                ).to(self.device_torch)
+                    adapter_path, torch_dtype=dtype
+                ).to(place)
             elif self.train_config.adapter_assist_type == "control_net":
                 self.assistant_adapter = ControlNetModel.from_pretrained(
-                    adapter_path, torch_dtype=get_torch_dtype(self.train_config.dtype)
-                ).to(self.device_torch, dtype=get_torch_dtype(self.train_config.dtype))
+                    adapter_path, torch_dtype=dtype
+                ).to(place, dtype=dtype)
             else:
                 raise ValueError(f"Unknown adapter assist type {self.train_config.adapter_assist_type}")
 
@@ -306,161 +310,207 @@ class SDTrainer(BaseSDTrainProcess):
         if self.train_config.train_turbo and self.train_config.show_turbo_outputs:
             if self.model_config.is_xl:
                 self.taesd = AutoencoderTiny.from_pretrained("madebyollin/taesdxl",
-                                                             torch_dtype=get_torch_dtype(self.train_config.dtype))
+                                                             torch_dtype=dtype)
             else:
                 self.taesd = AutoencoderTiny.from_pretrained("madebyollin/taesd",
-                                                             torch_dtype=get_torch_dtype(self.train_config.dtype))
-            self.taesd.to(dtype=get_torch_dtype(self.train_config.dtype), device=self.device_torch)
+                                                             torch_dtype=dtype)
+            self.taesd.to(dtype=dtype, device=place)
             self.taesd.eval()
             self.taesd.requires_grad_(False)
 
-    def hook_before_train_loop(self):
-        super().hook_before_train_loop()
-        if self.is_caching_text_embeddings:
-            # Keep DiT parked (TE→CPU then DiT→CPU) so TE encode does not OOM.
-            park_main_transformer_for_text_cache(self.sd)
-            self.sd.set_device_state_preset('cache_text_encoder')
-        
-        # cache unconditional embeds (blank prompt)
-        with torch.no_grad():
-            kwargs = {}
-            if self.sd.encode_control_in_text_embeddings:
-                # just do a blank image for unconditionals
-                control_image = torch.zeros((1, 3, 224, 224), device=self.sd.device_torch, dtype=self.sd.torch_dtype)
-                if self.sd.has_multiple_control_images:
-                    control_image = [control_image]
-                
-                kwargs['control_images'] = control_image
-            self.unconditional_embeds = self.sd.encode_prompt(
-                [self.train_config.unconditional_prompt],
-                long_prompts=self.do_long_prompts,
-                **kwargs
-            ).to(
-                self.device_torch,
-                dtype=self.sd.torch_dtype
-            ).detach()
-        
-        if self.train_config.do_prior_divergence:
-            self.do_prior_prediction = True
-        # move vae to device if we did not cache latents
+        # Mirror trainer-owned Modules onto sd so text-cache residency collect/exit see them.
+        if getattr(self, "sd", None) is not None:
+            self.sd.assistant_adapter = self.assistant_adapter
+            self.sd.taesd = getattr(self, "taesd", None)
+
+    def _remount_vae_after_text_cache(self):
+        """Place VAE after TE residency exit (latents-cached stays CPU)."""
         if not self.is_latents_cached:
             self.sd.vae.eval()
             self.sd.vae.to(self.device_torch)
         else:
-            # offload it. Already cached
-            self.sd.vae.to('cpu')
+            self.sd.vae.to("cpu")
             flush()
-        add_all_snr_to_noise_scheduler(self.sd.noise_scheduler, self.device_torch)
-        if self.adapter is not None:
-            self.adapter.to(self.device_torch)
 
-            # check if we have regs and using adapter and caching clip embeddings
-            has_reg = self.datasets_reg is not None and len(self.datasets_reg) > 0
-            is_caching_clip_embeddings = self.datasets is not None and any([self.datasets[i].cache_clip_vision_to_disk for i in range(len(self.datasets))])
+    def _remount_adapter_after_text_cache(self):
+        """Place adapter after TE residency exit when present."""
+        if self.adapter is None:
+            return
+        self.adapter.to(self.device_torch)
 
-            if has_reg and is_caching_clip_embeddings:
-                # we need a list of unconditional clip image embeds from other datasets to handle regs
-                unconditional_clip_image_embeds = []
-                datasets = get_dataloader_datasets(self.data_loader)
-                for i in range(len(datasets)):
-                    unconditional_clip_image_embeds += datasets[i].clip_vision_unconditional_cache
+        # check if we have regs and using adapter and caching clip embeddings
+        has_reg = self.datasets_reg is not None and len(self.datasets_reg) > 0
+        is_caching_clip_embeddings = self.datasets is not None and any(
+            [self.datasets[i].cache_clip_vision_to_disk for i in range(len(self.datasets))]
+        )
 
-                if len(unconditional_clip_image_embeds) == 0:
-                    raise ValueError("No unconditional clip image embeds found. This should not happen")
+        if has_reg and is_caching_clip_embeddings:
+            # we need a list of unconditional clip image embeds from other datasets to handle regs
+            unconditional_clip_image_embeds = []
+            datasets = get_dataloader_datasets(self.data_loader)
+            for i in range(len(datasets)):
+                unconditional_clip_image_embeds += datasets[i].clip_vision_unconditional_cache
 
-                self._clip_image_embeds_unconditional = unconditional_clip_image_embeds
+            if len(unconditional_clip_image_embeds) == 0:
+                raise ValueError("No unconditional clip image embeds found. This should not happen")
 
-        if self.train_config.negative_prompt is not None:
-            if os.path.exists(self.train_config.negative_prompt):
-                with open(self.train_config.negative_prompt, 'r') as f:
-                    self.negative_prompt_pool = f.readlines()
-                    # remove empty
-                    self.negative_prompt_pool = [x.strip() for x in self.negative_prompt_pool if x.strip() != ""]
-            else:
-                # single prompt
-                self.negative_prompt_pool = [self.train_config.negative_prompt]
+            self._clip_image_embeds_unconditional = unconditional_clip_image_embeds
 
-        # handle unload text encoder
-        if self.train_config.unload_text_encoder or self.is_caching_text_embeddings:
-            print_acc("Caching embeddings and unloading text encoder")
+    def hook_before_train_loop(self):
+        super().hook_before_train_loop()
+        caching = self.is_caching_text_embeddings
+        if caching:
+            # Idempotent if dataset cache already entered; keeps TE-only residency open.
+            enter_text_cache_residency(self.sd)
+
+        try:
+            # cache unconditional embeds (blank prompt)
             with torch.no_grad():
-                if self.train_config.train_text_encoder:
-                    raise ValueError("Cannot unload text encoder if training text encoder")
-                # cache embeddings
-                self.sd.text_encoder_to(self.device_torch)
-                encode_kwargs = {}
+                kwargs = {}
                 if self.sd.encode_control_in_text_embeddings:
                     # just do a blank image for unconditionals
-                    control_image = torch.zeros((1, 3, 224, 224), device=self.sd.device_torch, dtype=self.sd.torch_dtype)
+                    control_image = torch.zeros(
+                        (1, 3, 224, 224), device=self.sd.device_torch, dtype=self.sd.torch_dtype
+                    )
                     if self.sd.has_multiple_control_images:
                         control_image = [control_image]
-                    encode_kwargs['control_images'] = control_image
-                self.cached_blank_embeds = self.sd.encode_prompt("", **encode_kwargs)
-                if self.trigger_word is not None:
-                    self.cached_trigger_embeds = self.sd.encode_prompt(self.trigger_word, **encode_kwargs)
-                if self.train_config.diff_output_preservation:
-                    self.diff_output_preservation_embeds = self.sd.encode_prompt(self.train_config.diff_output_preservation_class)
-                
-                self.cache_sample_prompts()
-                
-                print_acc("\n***** UNLOADING TEXT ENCODER *****")
-                if self.is_caching_text_embeddings:
-                    print_acc("Embeddings cached to disk. We dont need the text encoder anymore")
-                else:
-                    print_acc("This will train only with a blank prompt or trigger word, if set")
-                    print_acc("If this is not what you want, remove the unload_text_encoder flag")
-                print_acc("***********************************")
-                print_acc("")
 
-                # unload the text encoder
-                if self.is_caching_text_embeddings:
-                    with memory_debug(print_acc, "UNLOAD TEXT ENCODER", kind="all"):
-                        unload_text_encoder(self.sd)
-                        flush()
-                    # TE is off GPU; restore main transformer for train loop.
-                    restore_main_transformer_after_text_cache(self.sd, self.device_torch)
-                    # Deferred from prepare_accelerator so DiT stayed on CPU through TE unload.
-                    if self.sd.unet is not None and self.sd.unet not in self.modules_being_trained:
-                        self.sd.unet = self.accelerator.prepare(self.sd.unet)
-                        self.modules_being_trained.append(self.sd.unet)
-                else:
-                    # todo once every model is tested to work, unload properly. Though, this will all be merged into one thing.
-                    # keep legacy usage for now. 
-                    with memory_debug(print_acc, "UNLOAD TEXT ENCODER", kind="all"):
-                        self.sd.text_encoder_to("cpu")
-                        flush()
-        
-        if self.train_config.blank_prompt_preservation and self.cached_blank_embeds is None:
-            # make sure we have this if not unloading
-            with torch.no_grad():
-                self.cached_blank_embeds = self.sd.encode_prompt("").to(
+                    kwargs["control_images"] = control_image
+                self.unconditional_embeds = self.sd.encode_prompt(
+                    [self.train_config.unconditional_prompt],
+                    long_prompts=self.do_long_prompts,
+                    **kwargs
+                ).to(
                     self.device_torch,
                     dtype=self.sd.torch_dtype
                 ).detach()
-        
-        if self.train_config.diffusion_feature_extractor_path is not None:
-            vae = self.sd.vae
-            # if not (self.model_config.arch in ["flux"]) or self.sd.vae.__class__.__name__ == "AutoencoderPixelMixer":
-            #     vae = self.sd.vae
-            self.dfe = load_dfe(self.train_config.diffusion_feature_extractor_path, vae=vae)
-            self.dfe.to(self.device_torch)
-            if hasattr(self.dfe, 'vision_encoder') and self.train_config.gradient_checkpointing:
-                # must be set to train for gradient checkpointing to work
-                self.dfe.vision_encoder.train()
-                self.dfe.vision_encoder.gradient_checkpointing = True
-            else:
-                self.dfe.eval()
-                
-            # enable gradient checkpointing on the vae
-            if vae is not None and self.train_config.gradient_checkpointing:
-                try:
-                    vae.enable_gradient_checkpointing()
-                    vae.train()
-                except:
-                    pass
 
-        with memory_debug(print_acc, "After hook_before_train_loop", kind="cuda"):
-            pass
+            if self.train_config.do_prior_divergence:
+                self.do_prior_prediction = True
+
+            # VAE/adapter remount only after TE unload+exit when caching (TE-only interval).
+            # SNR CUDA tensors are also deferred for caching — not needed for prompt encode.
+            if not caching:
+                self._remount_vae_after_text_cache()
+                add_all_snr_to_noise_scheduler(self.sd.noise_scheduler, self.device_torch)
+                self._remount_adapter_after_text_cache()
+
+            if self.train_config.negative_prompt is not None:
+                if os.path.exists(self.train_config.negative_prompt):
+                    with open(self.train_config.negative_prompt, "r") as f:
+                        self.negative_prompt_pool = f.readlines()
+                        # remove empty
+                        self.negative_prompt_pool = [
+                            x.strip() for x in self.negative_prompt_pool if x.strip() != ""
+                        ]
+                else:
+                    # single prompt
+                    self.negative_prompt_pool = [self.train_config.negative_prompt]
+
+            # handle unload text encoder
+            if self.train_config.unload_text_encoder or caching:
+                print_acc("Caching embeddings and unloading text encoder")
+                with torch.no_grad():
+                    if self.train_config.train_text_encoder:
+                        raise ValueError("Cannot unload text encoder if training text encoder")
+                    # cache embeddings
+                    self.sd.text_encoder_to(self.device_torch)
+                    encode_kwargs = {}
+                    if self.sd.encode_control_in_text_embeddings:
+                        # just do a blank image for unconditionals
+                        control_image = torch.zeros(
+                            (1, 3, 224, 224),
+                            device=self.sd.device_torch,
+                            dtype=self.sd.torch_dtype,
+                        )
+                        if self.sd.has_multiple_control_images:
+                            control_image = [control_image]
+                        encode_kwargs["control_images"] = control_image
+                    self.cached_blank_embeds = self.sd.encode_prompt("", **encode_kwargs)
+                    if self.trigger_word is not None:
+                        self.cached_trigger_embeds = self.sd.encode_prompt(
+                            self.trigger_word, **encode_kwargs
+                        )
+                    if self.train_config.diff_output_preservation:
+                        self.diff_output_preservation_embeds = self.sd.encode_prompt(
+                            self.train_config.diff_output_preservation_class
+                        )
+
+                    self.cache_sample_prompts()
+
+                    print_acc("\n***** UNLOADING TEXT ENCODER *****")
+                    if caching:
+                        print_acc(
+                            "Embeddings cached to disk. We dont need the text encoder anymore"
+                        )
+                    else:
+                        print_acc(
+                            "This will train only with a blank prompt or trigger word, if set"
+                        )
+                        print_acc(
+                            "If this is not what you want, remove the unload_text_encoder flag"
+                        )
+                    print_acc("***********************************")
+                    print_acc("")
+
+                    # unload the text encoder
+                    if caching:
+                        with memory_debug(print_acc, "UNLOAD TEXT ENCODER", kind="all"):
+                            unload_text_encoder(self.sd)
+                            flush()
+                        # TE is off GPU; restore train layout exactly once.
+                        exit_text_cache_residency(self.sd, self.device_torch)
+                        # Normal Accelerate prepare after TE-only phase (deferred earlier).
+                        self.finalize_accelerator_prepare()
+                        self._remount_vae_after_text_cache()
+                        self._remount_adapter_after_text_cache()
+                        add_all_snr_to_noise_scheduler(
+                            self.sd.noise_scheduler, self.device_torch
+                        )
+                    else:
+                        # unload-only: legacy TE→CPU offload (no Fake / no residency exit).
+                        with memory_debug(print_acc, "UNLOAD TEXT ENCODER", kind="all"):
+                            self.sd.text_encoder_to("cpu")
+                            flush()
+
+            if self.train_config.blank_prompt_preservation and self.cached_blank_embeds is None:
+                # make sure we have this if not unloading
+                with torch.no_grad():
+                    self.cached_blank_embeds = self.sd.encode_prompt("").to(
+                        self.device_torch,
+                        dtype=self.sd.torch_dtype
+                    ).detach()
+
+            if self.train_config.diffusion_feature_extractor_path is not None:
+                vae = self.sd.vae
+                # if not (self.model_config.arch in ["flux"]) or self.sd.vae.__class__.__name__ == "AutoencoderPixelMixer":
+                #     vae = self.sd.vae
+                self.dfe = load_dfe(self.train_config.diffusion_feature_extractor_path, vae=vae)
+                self.dfe.to(self.device_torch)
+                if hasattr(self.dfe, "vision_encoder") and self.train_config.gradient_checkpointing:
+                    # must be set to train for gradient checkpointing to work
+                    self.dfe.vision_encoder.train()
+                    self.dfe.vision_encoder.gradient_checkpointing = True
+                else:
+                    self.dfe.eval()
+
+                # enable gradient checkpointing on the vae
+                if vae is not None and self.train_config.gradient_checkpointing:
+                    try:
+                        vae.enable_gradient_checkpointing()
+                        vae.train()
+                    except Exception:
+                        pass
+
+            with memory_debug(print_acc, "After hook_before_train_loop", kind="cuda"):
+                pass
+        except Exception as err:
+            if caching:
+                try:
+                    abort_text_cache_residency(self.sd)
+                except Exception as cleanup_err:
+                    raise err from cleanup_err
+            raise
 
     def process_output_for_turbo(self, pred, noisy_latents, timesteps, noise, batch):
         # to process turbo learning, we make one big step from our current timestep to the end

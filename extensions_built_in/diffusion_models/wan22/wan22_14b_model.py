@@ -164,6 +164,14 @@ class DualWanTransformer3DModel(torch.nn.Module):
         # do not do to, this will be handled separately
         return self
 
+    def _move_stages_to_device(self, device: Union[str, torch.device]) -> None:
+        """Relocate both DualWan stages (``.to`` is intentionally a no-op)."""
+        target = torch.device(device)
+        for name in ("transformer_1", "transformer_2"):
+            stage = getattr(self, name, None)
+            if isinstance(stage, torch.nn.Module):
+                safe_module_to_device(stage, target)
+
 
 class Wan2214bModel(Wan21):
     arch = "wan22_14b"
@@ -225,6 +233,47 @@ class Wan2214bModel(Wan21):
         ):
             return 2
         return 1
+
+    def iter_text_cache_extra_non_te_owners(self):
+        """Yield DualWan stages explicitly — wrapper ``.to`` is a no-op."""
+        dual = getattr(self, "model", None)
+        if dual is None:
+            return
+        for attr in ("transformer_1", "transformer_2"):
+            stage = getattr(dual, attr, None)
+            if isinstance(stage, torch.nn.Module):
+                yield f"model.{attr}", stage
+
+    def _place_training_dit(self, device):
+        """Park/place both DualWan stages via safe moves (not wrapper ``.to``)."""
+        dual = getattr(self, "model", None)
+        if dual is None:
+            return False
+        target = torch.device(device) if not isinstance(device, torch.device) else device
+        if hasattr(dual, "_move_stages_to_device"):
+            dual._move_stages_to_device(target)
+            return True
+        for attr in ("transformer_1", "transformer_2"):
+            stage = getattr(dual, attr, None)
+            if isinstance(stage, torch.nn.Module):
+                safe_module_to_device(stage, target)
+        return True
+
+    def _move_main_network(self, device):
+        """Restore DualWan stages + LoRA after text-cache exit."""
+        target = torch.device(device) if not isinstance(device, torch.device) else device
+        self._place_training_dit(target)
+        net = getattr(self, "network", None)
+        if net is None:
+            return
+        if hasattr(net, "force_to"):
+            dtype = getattr(self, "torch_dtype", torch.float32)
+            p = next((p for p in net.parameters() if p.requires_grad), None)
+            if p is not None:
+                dtype = p.dtype
+            net.force_to(target, dtype)
+        else:
+            safe_module_to_device(net, target)
 
     def load_model(self):
         # load model from patent parent. Wan21 not immediate parent

@@ -1058,79 +1058,46 @@ class DiffusionTrainer(SDTrainer):
 
         return _read()
 
-    def _offload_transformers_for_te_recache(self) -> None:
-        """Move training (+ sampling) transformers to CPU so TE can fit on GPU."""
-        from toolkit.basic import flush
-
-        sd = self.sd
-        if hasattr(sd, "_place_training_dit"):
-            sd._place_training_dit("cpu")
-            net = getattr(sd, "network", None)
-            if net is not None and hasattr(net, "force_to"):
-                dtype = getattr(sd, "torch_dtype", None)
-                try:
-                    net.force_to("cpu", dtype)
-                except Exception:
-                    pass
-            if hasattr(sd, "_move_sampling_transformer"):
-                sd._move_sampling_transformer("cpu")
-        else:
-            if getattr(sd, "unet", None) is not None:
-                sd.unet.to("cpu")
-            st = getattr(sd, "_sampling_transformer", None)
-            if st is not None:
-                st.to("cpu")
-        flush()
-
-    def _restore_training_transformer_after_te_recache(self) -> None:
-        """Put training transformer (+ LoRA) back on train device; keep sampling TE off GPU."""
-        from toolkit.basic import flush
-
-        sd = self.sd
-        # Train-on-Turbo: exclusive pin (base CPU, Turbo CUDA). Never _move_main_network
-        # here — that remounts base onto CUDA and fights get_noise_prediction parking.
-        if getattr(sd, "_train_on_turbo", False) and hasattr(sd, "apply_turbo_teacher_mode"):
-            sd.apply_turbo_teacher_mode(True)
-            flush()
-            return
-        device = self.device_torch
-        if hasattr(sd, "_move_main_network"):
-            # _move_main_network no-ops CPU; use it to restore CUDA DiT + LoRA
-            sd._move_main_network(device)
-            if hasattr(sd, "_move_sampling_transformer"):
-                sd._move_sampling_transformer("cpu")
-        else:
-            if getattr(sd, "unet", None) is not None:
-                sd.unet.to(device)
-            st = getattr(sd, "_sampling_transformer", None)
-            if st is not None:
-                st.to("cpu")
-        flush()
-
     def _recache_sample_prompts_runtime(self) -> None:
-        """Recache sample prompt embeds with TE on GPU; transformers offloaded around it."""
+        """Recache sample prompt embeds via common text-cache residency lifecycle.
+
+        Caching path: reload stashed TE (CPU) → enter → cache → unload/Fake → exit.
+        Unload-only path: enter → cache → real TE→CPU (no Fake/stash) → exit.
+        On any failure, abort offloads live+stashed TE and non-TE owners so TE and
+        backbone never co-reside on CUDA; original error propagates (cleanup chained).
+        """
         from toolkit.basic import flush
-        from toolkit.unloader import reload_text_encoder, unload_text_encoder
+        from toolkit.unloader import (
+            abort_text_cache_residency,
+            enter_text_cache_residency,
+            exit_text_cache_residency,
+            reload_text_encoder,
+            unload_text_encoder,
+        )
 
         caching = bool(getattr(self, "is_caching_text_embeddings", False))
         unload_only = bool(getattr(self.train_config, "unload_text_encoder", False)) and not caching
         if not caching and not unload_only:
             return
 
-        self._offload_transformers_for_te_recache()
         try:
             if caching:
                 reload_text_encoder(self.sd)
-            self.sd.text_encoder_to(self.device_torch)
-            flush()
+            enter_text_cache_residency(self.sd, self.device_torch)
             self.cache_sample_prompts()
             if caching:
                 unload_text_encoder(self.sd)
             else:
                 self.sd.text_encoder_to("cpu")
                 flush()
-        finally:
-            self._restore_training_transformer_after_te_recache()
+            # Exit only after real TE is CPU/Fake (unload or TE→CPU above).
+            exit_text_cache_residency(self.sd, self.device_torch)
+        except Exception as err:
+            try:
+                abort_text_cache_residency(self.sd)
+            except Exception as cleanup_err:
+                raise err from cleanup_err
+            raise
 
     def apply_runtime_prompts(self):
         """If runtime_prompts are set in DB, update sample_config and recache embeds if needed."""

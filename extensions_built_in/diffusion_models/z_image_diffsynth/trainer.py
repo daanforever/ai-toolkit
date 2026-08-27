@@ -289,11 +289,12 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
         ``set_device_state`` at loop start.
         """
         sd = getattr(self, "sd", None)
-        # Prefer turbo exclusive-pin on TE-cache restore — do NOT set _train_on_turbo yet:
-        # that would make set_device_state_preset('cache_text_encoder') remount sampling
-        # DiT while the real TE is still on CUDA (~8GB + ~6GB peak).
+        # Canonical turbo intent for text-cache exit restore. Do NOT call
+        # apply_turbo_teacher_mode yet: that remounts sampling DiT while the real TE
+        # is still on CUDA (~8GB + ~6GB peak). Exit reads ``_train_on_turbo``.
+        # Always assign bool so a False path clears any stale True intent.
         if sd is not None:
-            sd._prefer_turbo_restore_after_te = bool(
+            sd._train_on_turbo = bool(
                 getattr(self.train_config, "turbo_teacher_weight", False)
             )
         super(DiffusionTrainer, self).hook_before_train_loop()

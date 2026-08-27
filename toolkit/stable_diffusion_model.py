@@ -3062,8 +3062,6 @@ class StableDiffusion:
             active_modules = ['vae']
         if device_state_preset in ['cache_clip']:
             active_modules = ['clip']
-        if device_state_preset in ['cache_text_encoder']:
-            active_modules = ['text_encoder']
         if device_state_preset in ['unload']:
             active_modules = []
         if device_state_preset in ['generate']:
@@ -3122,7 +3120,17 @@ class StableDiffusion:
                 encoder.to(*args, **kwargs)
         else:
             self.text_encoder.to(*args, **kwargs)
-            
+
+    def enter_text_cache_residency(self, device=None):
+        """Enter TE-only CUDA residency for text-embedding caching."""
+        from toolkit.unloader import enter_text_cache_residency
+        enter_text_cache_residency(self, device)
+
+    def exit_text_cache_residency(self, device=None):
+        """Restore normal/turbo train layout after TE unload (paired with enter)."""
+        from toolkit.unloader import exit_text_cache_residency
+        exit_text_cache_residency(self, device)
+
     def convert_lora_weights_before_save(self, state_dict):
         # can be overridden in child classes to convert weights before saving
         return state_dict

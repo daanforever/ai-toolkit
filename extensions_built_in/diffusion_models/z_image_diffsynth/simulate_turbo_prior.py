@@ -612,7 +612,7 @@ def _print_te_cache_vram_timeline() -> None:
 
 
 def _install_te_cache_vram_probe() -> None:
-    """Monkeypatch park/restore/unload/cache/load/turbo/sample for VRAM timeline."""
+    """Monkeypatch enter/exit/unload/cache/load/turbo/sample for VRAM timeline."""
     global _TE_CACHE_VRAM_PROBE_INSTALLED, _PEAK_AFTER_LOAD_GB
     _TE_CACHE_VRAM_EVENTS.clear()
     _PEAK_AFTER_LOAD_GB = None
@@ -626,8 +626,9 @@ def _install_te_cache_vram_probe() -> None:
         ZImageDiffSynthModel,
     )
 
-    _orig_park = unloader_mod.park_main_transformer_for_text_cache
-    _orig_restore = unloader_mod.restore_main_transformer_after_text_cache
+    _orig_enter = unloader_mod.enter_text_cache_residency
+    _orig_exit = unloader_mod.exit_text_cache_residency
+    _orig_abort = unloader_mod.abort_text_cache_residency
     _orig_unload = unloader_mod.unload_text_encoder
     _orig_cache = TextEmbeddingCachingMixin.cache_text_embeddings
     _orig_cache_latents = LatentCachingMixin.cache_latents_all_latents
@@ -639,16 +640,22 @@ def _install_te_cache_vram_probe() -> None:
     _orig_encode = ZImageDiffSynthModel.encode_prompt
     _encode_call_n = {"n": 0}
 
-    def _park(model):
-        _log_te_cache_vram("park:before", model)
-        out = _orig_park(model)
-        _log_te_cache_vram("park:after", model)
+    def _enter(model, device=None):
+        _log_te_cache_vram("enter:before", model)
+        out = _orig_enter(model, device)
+        _log_te_cache_vram("enter:after", model)
         return out
 
-    def _restore(model, device=None):
-        _log_te_cache_vram("restore:before", model)
-        out = _orig_restore(model, device)
-        _log_te_cache_vram("restore:after", model)
+    def _exit(model, device=None):
+        _log_te_cache_vram("exit:before", model)
+        out = _orig_exit(model, device)
+        _log_te_cache_vram("exit:after", model)
+        return out
+
+    def _abort(model):
+        _log_te_cache_vram("abort:before", model)
+        out = _orig_abort(model)
+        _log_te_cache_vram("abort:after", model)
         return out
 
     def _unload(model):
@@ -738,9 +745,10 @@ def _install_te_cache_vram_probe() -> None:
                 _log_te_cache_vram(f"encode_prompt:after_flush#{n}", self)
         return out
 
-    unloader_mod.park_main_transformer_for_text_cache = _park  # type: ignore[assignment]
-    unloader_mod.restore_main_transformer_after_text_cache = _restore  # type: ignore[assignment]
-    unloader_mod.unload_text_encoder = _unload  # type: ignore[assignment]
+    setattr(unloader_mod, "enter_text_cache_residency", _enter)
+    setattr(unloader_mod, "exit_text_cache_residency", _exit)
+    setattr(unloader_mod, "abort_text_cache_residency", _abort)
+    setattr(unloader_mod, "unload_text_encoder", _unload)
     TextEmbeddingCachingMixin.cache_text_embeddings = _cache  # type: ignore[method-assign]
     LatentCachingMixin.cache_latents_all_latents = _cache_latents  # type: ignore[method-assign]
     ToolkitNetworkMixin.force_to = _force_to  # type: ignore[method-assign]
@@ -754,10 +762,12 @@ def _install_te_cache_vram_probe() -> None:
     import toolkit.dataloader_mixins as dlm
     import extensions_built_in.sd_trainer.SDTrainer as sdt
 
-    dlm.park_main_transformer_for_text_cache = _park  # type: ignore[attr-defined]
-    sdt.park_main_transformer_for_text_cache = _park  # type: ignore[attr-defined]
-    sdt.restore_main_transformer_after_text_cache = _restore  # type: ignore[attr-defined]
-    sdt.unload_text_encoder = _unload  # type: ignore[attr-defined]
+    setattr(dlm, "enter_text_cache_residency", _enter)
+    setattr(dlm, "abort_text_cache_residency", _abort)
+    setattr(sdt, "enter_text_cache_residency", _enter)
+    setattr(sdt, "exit_text_cache_residency", _exit)
+    setattr(sdt, "abort_text_cache_residency", _abort)
+    setattr(sdt, "unload_text_encoder", _unload)
 
     _TE_CACHE_VRAM_PROBE_INSTALLED = True
     _log(
