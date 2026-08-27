@@ -45,38 +45,57 @@ if TYPE_CHECKING:
 
 accelerator = get_accelerator()
 
-_CAPTION_SEGMENT_RE = re.compile(r'[.,;]')
+_DEFAULT_CAPTION_SPLIT_RE = re.compile(r'\. ')
+_DEFAULT_CAPTION_JOIN = '. '
 
 
-def _split_caption_segments(caption: str) -> List[str]:
-    segments = _CAPTION_SEGMENT_RE.split(caption)
+def _split_caption_segments(caption: str, split_re: re.Pattern = None) -> List[str]:
+    if split_re is None:
+        split_re = _DEFAULT_CAPTION_SPLIT_RE
+    segments = split_re.split(caption)
     segments = [x.strip() for x in segments]
     return [x for x in segments if x]
 
 
-def _join_caption_segments(segments: List[str]) -> str:
-    return ', '.join(segments)
+def _join_caption_segments(segments: List[str], join_str: str = None) -> str:
+    if join_str is None:
+        join_str = _DEFAULT_CAPTION_JOIN
+    return join_str.join(segments)
 
 
-def _keep_caption_segments(caption: str, keep_n: int) -> str:
-    return _join_caption_segments(_split_caption_segments(caption)[:max(0, keep_n)])
+def _keep_caption_segments(caption: str, keep_n: int, split_re: re.Pattern = None, join_str: str = None) -> str:
+    return _join_caption_segments(
+        _split_caption_segments(caption, split_re=split_re)[:max(0, keep_n)],
+        join_str=join_str,
+    )
 
 
-def _shuffle_caption_by_commas(caption: str, keep_n: int = 1) -> str:
+def _shuffle_caption_by_commas(
+    caption: str,
+    keep_n: int = 1,
+    split_re: re.Pattern = None,
+    join_str: str = None,
+) -> str:
     """Shuffle caption segments: first keep_n segments fixed, rest randomly reordered. Used for K>1 cache variants."""
-    token_list = _split_caption_segments(caption)
+    token_list = _split_caption_segments(caption, split_re=split_re)
     keep_n = max(0, keep_n)
     if len(token_list) > keep_n + 1:
         fixed = token_list[:keep_n]
         rest = token_list[keep_n:]
         random.shuffle(rest)
         token_list = fixed + rest
-    return _join_caption_segments(token_list)
+    return _join_caption_segments(token_list, join_str=join_str)
 
 
-def _get_unique_caption_permutations(caption: str, max_permutations: int = 1, keep_n: int = 1) -> List[str]:
+def _get_unique_caption_permutations(
+    caption: str,
+    max_permutations: int = 1,
+    keep_n: int = 1,
+    split_re: re.Pattern = None,
+    join_str: str = None,
+) -> List[str]:
     """Up to max_permutations unique permutations of caption segments: first keep_n fixed, rest reordered. Original first."""
-    token_list = _split_caption_segments(caption)
+    token_list = _split_caption_segments(caption, split_re=split_re)
     if len(token_list) <= 1:
         return [caption]
     keep_n = max(0, keep_n)
@@ -84,11 +103,11 @@ def _get_unique_caption_permutations(caption: str, max_permutations: int = 1, ke
     rest = token_list[keep_n:]
     if len(rest) <= 1:
         return [caption]
-    original = _join_caption_segments(token_list)
+    original = _join_caption_segments(token_list, join_str=join_str)
     result = [original]
     seen = {original}
     for perm in itertools.islice(itertools.permutations(rest), max_permutations * 2):
-        s = _join_caption_segments(fixed + list(perm))
+        s = _join_caption_segments(fixed + list(perm), join_str=join_str)
         if s not in seen:
             seen.add(s)
             result.append(s)
@@ -613,8 +632,10 @@ class CaptionProcessingDTOMixin:
         if raw_caption is None:
             raw_caption = ''
 
-        # get segments (. , ;)
-        token_list = _split_caption_segments(raw_caption)
+        # get segments (shuffle_tokens_split)
+        split_re = self.dataset_config.shuffle_tokens_split_re
+        join_str = self.dataset_config.shuffle_tokens_join
+        token_list = _split_caption_segments(raw_caption, split_re=split_re)
 
         # handle token dropout
         if self.dataset_config.token_dropout_rate > 0 and not short_caption and not self.dataset_config.cache_text_embeddings:
@@ -639,7 +660,7 @@ class CaptionProcessingDTOMixin:
         #     random.shuffle(token_list)
 
         # join back together
-        caption = _join_caption_segments(token_list)
+        caption = _join_caption_segments(token_list, join_str=join_str)
         caption = inject_trigger_into_prompt(caption, trigger, to_replace_list, add_if_not_present)
 
         if self.dataset_config.random_triggers:
@@ -660,11 +681,11 @@ class CaptionProcessingDTOMixin:
             rand = random.random()
             if rand < self.dataset_config.caption_dropout_rate:
                 keep_n = max(0, getattr(self.dataset_config, 'caption_dropout_keep', 0))
-                return _keep_caption_segments(caption, keep_n)
+                return _keep_caption_segments(caption, keep_n, split_re=split_re, join_str=join_str)
 
         if self.dataset_config.shuffle_tokens and not self.dataset_config.cache_text_embeddings:
             keep_n = max(0, getattr(self.dataset_config, 'shuffle_tokens_keep', 1))
-            caption = _shuffle_caption_by_commas(caption, keep_n=keep_n)
+            caption = _shuffle_caption_by_commas(caption, keep_n=keep_n, split_re=split_re, join_str=join_str)
         if caption == '':
             pass
         return caption
@@ -2271,15 +2292,21 @@ class TextEmbeddingCachingMixin:
                         else:
                             ctrl_img = ctrl_img_list
                         keep_n = getattr(file_item.dataset_config, 'shuffle_tokens_keep', 1)
+                        split_re = file_item.dataset_config.shuffle_tokens_split_re
+                        join_str = file_item.dataset_config.shuffle_tokens_join
                         if K == 1:
                             embeds_list = [self.sd.encode_prompt(file_item.caption, control_images=ctrl_img)]
                         else:
                             embeds_list = [self.sd.encode_prompt(file_item.caption, control_images=ctrl_img)]
                             for _ in range(K - 1):
-                                caption_shuffled = _shuffle_caption_by_commas(file_item.caption, keep_n=keep_n)
+                                caption_shuffled = _shuffle_caption_by_commas(
+                                    file_item.caption, keep_n=keep_n, split_re=split_re, join_str=join_str,
+                                )
                                 embeds_list.append(self.sd.encode_prompt(caption_shuffled, control_images=ctrl_img))
                         if has_dropout:
-                            dropout_caption = _keep_caption_segments(file_item.caption or '', dropout_keep)
+                            dropout_caption = _keep_caption_segments(
+                                file_item.caption or '', dropout_keep, split_re=split_re, join_str=join_str,
+                            )
                             embeds_list.append(self.sd.encode_prompt(dropout_caption, control_images=ctrl_img))
                         PromptEmbeds.save_multi(text_embedding_path, embeds_list, requested_variants=total_variants)
                         for pe in embeds_list:
@@ -2287,6 +2314,8 @@ class TextEmbeddingCachingMixin:
                         embeds_list.clear()
                     else:
                         keep_n = getattr(file_item.dataset_config, 'shuffle_tokens_keep', 1)
+                        split_re = file_item.dataset_config.shuffle_tokens_split_re
+                        join_str = file_item.dataset_config.shuffle_tokens_join
                         if K == 1:
                             embeds_list = [self.sd.encode_prompt(file_item.caption)]
                         else:
@@ -2294,12 +2323,16 @@ class TextEmbeddingCachingMixin:
                                 file_item.caption,
                                 max_permutations=K,
                                 keep_n=keep_n,
+                                split_re=split_re,
+                                join_str=join_str,
                             )
                             embeds_list = []
                             for caption_text in unique_captions[:K]:
                                 embeds_list.append(self.sd.encode_prompt(caption_text))
                         if has_dropout:
-                            dropout_caption = _keep_caption_segments(file_item.caption or '', dropout_keep)
+                            dropout_caption = _keep_caption_segments(
+                                file_item.caption or '', dropout_keep, split_re=split_re, join_str=join_str,
+                            )
                             embeds_list.append(self.sd.encode_prompt(dropout_caption))
                         PromptEmbeds.save_multi(text_embedding_path, embeds_list, requested_variants=total_variants)
                         for pe in embeds_list:
