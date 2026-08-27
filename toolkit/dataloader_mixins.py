@@ -2255,6 +2255,7 @@ class TextEmbeddingCachingMixin:
                 with torch.no_grad():
                     with memory_debug(print_acc, "Caching text embeddings to disk"):
                         i = 0
+                        logged_first_encode = False
                         for file_item in tqdm(self.file_list, desc='Caching text embeddings to disk'):
                             file_item.latent_load_device = self.sd.device
 
@@ -2342,12 +2343,13 @@ class TextEmbeddingCachingMixin:
                                     for pe in embeds_list:
                                         del pe
                                     embeds_list.clear()
+                                if not logged_first_encode:
+                                    log_text_cache_cuda_residency(
+                                        print_acc, self.sd, "text-cache:after-first-encode"
+                                    )
+                                    logged_first_encode = True
                             file_item.is_text_embedding_cached = True
                             i += 1
-                            if i == 1:
-                                log_text_cache_cuda_residency(
-                                    print_acc, self.sd, "text-cache:after-first-encode"
-                                )
                 # Leave residency active until TE unload + exit in SDTrainer.hook_before_train_loop.
             except Exception as err:
                 try:
