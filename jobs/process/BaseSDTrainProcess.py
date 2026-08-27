@@ -747,9 +747,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
         # # prepare all the models stuff for accelerator (hopefully we dont miss any)
         self.sd.vae = self.accelerator.prepare(self.sd.vae)
         if self.sd.unet is not None:
-            self.sd.unet = self.accelerator.prepare(self.sd.unet)
-            # todo always tdo it?
-            self.modules_being_trained.append(self.sd.unet)
+            # Defer unet prepare while TE cache is active so prepare does not remount DiT to CUDA.
+            if not self.is_caching_text_embeddings:
+                self.sd.unet = self.accelerator.prepare(self.sd.unet)
+                # todo always tdo it?
+                self.modules_being_trained.append(self.sd.unet)
         if self.sd.text_encoder is not None and self.train_config.train_text_encoder:
             if isinstance(self.sd.text_encoder, list):
                 self.sd.text_encoder = [self.accelerator.prepare(model) for model in self.sd.text_encoder]
@@ -1398,7 +1400,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
         else:
             text_encoder.requires_grad_(False)
             text_encoder.eval()
-        unet.to(self.device_torch, dtype=dtype)
+        # Skip CUDA remount when caching text embeds — DiT stays on CPU until TE unload.
+        if not self.is_caching_text_embeddings:
+            unet.to(self.device_torch, dtype=dtype)
         unet.requires_grad_(False)
         unet.eval()
         vae = vae.to(torch.device('cpu'), dtype=dtype)

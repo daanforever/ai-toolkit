@@ -36,6 +36,7 @@ from toolkit.prompt_utils import PromptEmbeds
 from torchvision.transforms import functional as TF
 
 from toolkit.train_tools import get_torch_dtype
+from toolkit.unloader import park_main_transformer_for_text_cache
 from toolkit.util.debug import is_debug_enabled
 
 if TYPE_CHECKING:
@@ -2238,7 +2239,10 @@ class TextEmbeddingCachingMixin:
             self.dataset_config._caption_dropout_cache_variant_index = K if has_dropout else None
             dropout_keep = getattr(self.dataset_config, 'caption_dropout_keep', 0)
 
-            did_move = False
+            # Park main DiT before TE encode (TE→CPU first, then DiT→CPU) so they
+            # never co-reside during quantized offload; then TE-only preset.
+            park_main_transformer_for_text_cache(self.sd)
+            self.sd.set_device_state_preset('cache_text_encoder')
 
             # use tqdm to show progress
             i = 0
@@ -2254,15 +2258,6 @@ class TextEmbeddingCachingMixin:
                         except OSError:
                             pass
                 if not os.path.exists(text_embedding_path):
-                    if not did_move:
-                        # Park main transformer on CPU before TE encode so DiT and TE
-                        # are not co-resident (avoids VRAM peak during quantized .to).
-                        if getattr(self.sd, "unet", None) is not None:
-                            self.sd.unet.to("cpu")
-                            flush()
-                        self.sd.set_device_state_preset('cache_text_encoder')
-                        did_move = True
-                        
                     if file_item.encode_control_in_text_embeddings:
                         if file_item.control_path is None:
                             raise Exception(f"Could not find a control image for {file_item.path} which is needed for this model")
@@ -2340,9 +2335,7 @@ class TextEmbeddingCachingMixin:
                         embeds_list.clear()
                 file_item.is_text_embedding_cached = True
                 i += 1
-            # restore device state
-            # if did_move:
-            #     self.sd.restore_device_state()
+            # Leave DiT on CPU until TE unload in SDTrainer.hook_before_train_loop.
 
 
 class CLIPCachingMixin:

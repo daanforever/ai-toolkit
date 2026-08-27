@@ -45,7 +45,11 @@ from extensions_built_in.sd_trainer.gaussian_timestep_weights import (
     timestep_values_to_slot_indices,
 )
 import torch.nn.functional as F
-from toolkit.unloader import unload_text_encoder
+from toolkit.unloader import (
+    park_main_transformer_for_text_cache,
+    restore_main_transformer_after_text_cache,
+    unload_text_encoder,
+)
 from PIL import Image
 from torchvision.transforms import functional as TF
 
@@ -313,8 +317,9 @@ class SDTrainer(BaseSDTrainProcess):
     def hook_before_train_loop(self):
         super().hook_before_train_loop()
         if self.is_caching_text_embeddings:
-            # make sure model is on cpu for this part so we don't oom.
-            self.sd.unet.to('cpu')
+            # Keep DiT parked (TE→CPU then DiT→CPU) so TE encode does not OOM.
+            park_main_transformer_for_text_cache(self.sd)
+            self.sd.set_device_state_preset('cache_text_encoder')
         
         # cache unconditional embeds (blank prompt)
         with torch.no_grad():
@@ -413,9 +418,11 @@ class SDTrainer(BaseSDTrainProcess):
                         unload_text_encoder(self.sd)
                         flush()
                     # TE is off GPU; restore main transformer for train loop.
-                    if getattr(self.sd, "unet", None) is not None:
-                        self.sd.unet.to(self.device_torch)
-                        flush()
+                    restore_main_transformer_after_text_cache(self.sd, self.device_torch)
+                    # Deferred from prepare_accelerator so DiT stayed on CPU through TE unload.
+                    if self.sd.unet is not None and self.sd.unet not in self.modules_being_trained:
+                        self.sd.unet = self.accelerator.prepare(self.sd.unet)
+                        self.modules_being_trained.append(self.sd.unet)
                 else:
                     # todo once every model is tested to work, unload properly. Though, this will all be merged into one thing.
                     # keep legacy usage for now. 

@@ -178,3 +178,45 @@ def reload_text_encoder(model: "BaseModel") -> None:
             pipe.text_encoder = pipe_stash["text_encoder"]
         elif pipe is not None and hasattr(pipe, "text_encoder"):
             pipe.text_encoder = real
+
+
+def park_main_transformer_for_text_cache(model: "BaseModel") -> None:
+    """Move TE then main transformer to CPU so they never co-reside during DiT offload.
+
+    Order matters: quantized DiT CUDA→CPU while TE is still on GPU doubles CUDA
+    peak (``max_memory_allocated``). Caller should then apply
+    ``set_device_state_preset('cache_text_encoder')`` so TE returns to GPU with
+    DiT already parked.
+    """
+    if hasattr(model, "text_encoder_to") and model.text_encoder is not None:
+        try:
+            model.text_encoder_to("cpu")
+        except Exception:
+            _move_te_to_cpu(model.text_encoder)
+    else:
+        _move_te_to_cpu(getattr(model, "text_encoder", None))
+    flush()
+
+    if hasattr(model, "_place_training_dit"):
+        model._place_training_dit("cpu")
+    elif getattr(model, "unet", None) is not None:
+        model.unet.to("cpu")
+    flush()
+
+
+def restore_main_transformer_after_text_cache(
+    model: "BaseModel",
+    device: Optional[Union[torch.device, str]] = None,
+) -> None:
+    """Put main transformer (+ LoRA via _move_main_network) back on train device."""
+    target = device
+    if target is None:
+        target = getattr(model, "device_torch", None)
+    if target is None:
+        return
+
+    if hasattr(model, "_move_main_network"):
+        model._move_main_network(target)
+    elif getattr(model, "unet", None) is not None:
+        model.unet.to(target)
+    flush()

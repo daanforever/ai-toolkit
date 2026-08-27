@@ -5,15 +5,21 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
-import pytest
 import torch
 import torch.nn as nn
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT))
 
-from toolkit.unloader import FakeTextEncoder, reload_text_encoder, unload_text_encoder
+from toolkit.unloader import (
+    FakeTextEncoder,
+    park_main_transformer_for_text_cache,
+    reload_text_encoder,
+    restore_main_transformer_after_text_cache,
+    unload_text_encoder,
+)
 
 
 def _param_device(module: nn.Module) -> torch.device:
@@ -98,3 +104,83 @@ def test_reload_then_unload_back_to_cpu_fake():
     assert isinstance(model.text_encoder, FakeTextEncoder)
     assert model._real_text_encoder is te
     assert _param_device(te).type == "cpu"
+
+
+def test_park_calls_te_to_cpu_before_unet_to_cpu():
+    order = []
+    unet = MagicMock()
+    unet.to = MagicMock(side_effect=lambda *a, **k: order.append(("unet.to", a, k)) or unet)
+
+    def text_encoder_to(*a, **k):
+        order.append(("text_encoder_to", a, k))
+
+    model = SimpleNamespace(
+        text_encoder=nn.Linear(2, 2),
+        text_encoder_to=text_encoder_to,
+        unet=unet,
+        device_torch=torch.device("cpu"),
+    )
+    park_main_transformer_for_text_cache(model)
+    assert [x[0] for x in order] == ["text_encoder_to", "unet.to"]
+    assert order[0][1] == ("cpu",)
+    assert order[1][1] == ("cpu",)
+
+
+def test_park_uses_place_training_dit_when_present():
+    order = []
+
+    def text_encoder_to(*a, **k):
+        order.append("te")
+
+    def place(device):
+        order.append(("place", str(device)))
+        return True
+
+    model = SimpleNamespace(
+        text_encoder=nn.Linear(2, 2),
+        text_encoder_to=text_encoder_to,
+        _place_training_dit=place,
+        unet=MagicMock(),
+        device_torch=torch.device("cpu"),
+    )
+    park_main_transformer_for_text_cache(model)
+    assert order == ["te", ("place", "cpu")]
+    model.unet.to.assert_not_called()
+
+
+def test_restore_uses_move_main_network_when_present():
+    move = MagicMock()
+    unet = MagicMock()
+    model = SimpleNamespace(
+        _move_main_network=move,
+        unet=unet,
+        device_torch=torch.device("cuda:0"),
+    )
+    restore_main_transformer_after_text_cache(model, torch.device("cuda:0"))
+    move.assert_called_once_with(torch.device("cuda:0"))
+    unet.to.assert_not_called()
+
+
+def test_restore_falls_back_to_unet_to():
+    unet = MagicMock()
+    model = SimpleNamespace(unet=unet, device_torch=torch.device("cpu"))
+    restore_main_transformer_after_text_cache(model, "cuda")
+    unet.to.assert_called_once_with("cuda")
+
+
+def test_restore_only_when_caching_text_embeddings_gate():
+    """Mirror SDTrainer: restore runs only if is_caching_text_embeddings."""
+    move = MagicMock()
+    model = SimpleNamespace(_move_main_network=move, device_torch=torch.device("cpu"))
+
+    is_caching_text_embeddings = False
+    unload_text_encoder_flag = True
+    if is_caching_text_embeddings:
+        restore_main_transformer_after_text_cache(model, model.device_torch)
+    move.assert_not_called()
+
+    is_caching_text_embeddings = True
+    if unload_text_encoder_flag or is_caching_text_embeddings:
+        if is_caching_text_embeddings:
+            restore_main_transformer_after_text_cache(model, model.device_torch)
+    move.assert_called_once_with(model.device_torch)
