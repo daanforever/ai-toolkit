@@ -288,6 +288,14 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
         transformers before DiffusionTrainer clears runtime DB and before baseline sampling /
         ``set_device_state`` at loop start.
         """
+        sd = getattr(self, "sd", None)
+        # Prefer turbo exclusive-pin on TE-cache restore — do NOT set _train_on_turbo yet:
+        # that would make set_device_state_preset('cache_text_encoder') remount sampling
+        # DiT while the real TE is still on CUDA (~8GB + ~6GB peak).
+        if sd is not None:
+            sd._prefer_turbo_restore_after_te = bool(
+                getattr(self.train_config, "turbo_teacher_weight", False)
+            )
         super(DiffusionTrainer, self).hook_before_train_loop()
         sd = getattr(self, "sd", None)
         if sd is not None:
@@ -325,8 +333,13 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
 
         # Make sure the model is treated as flow-matching by SDTrainer logic.
         sd = getattr(self, "sd", None)
-        if sd is not None and hasattr(sd, "is_flow_matching"):
-            sd.is_flow_matching = True
+        if sd is not None:
+            if hasattr(sd, "is_flow_matching"):
+                sd.is_flow_matching = True
+            # So load_model can keep DiT/VAE off CUDA while unquantized TE is resident.
+            sd._cache_text_embeddings = bool(
+                getattr(self, "is_caching_text_embeddings", False)
+            )
 
     def _aggregate_flow_matching_mse_loss(
         self,

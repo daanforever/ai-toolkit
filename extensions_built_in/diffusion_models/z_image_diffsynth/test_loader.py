@@ -623,3 +623,121 @@ def test_load_model_empty_te_name_or_path_is_falsy():
     assert "te_name_or_path" not in kwargs or not kwargs.get("te_name_or_path")
 
 
+
+
+def test_load_model_defers_vae_to_gpu_when_caching_text_embeddings():
+    from types import SimpleNamespace
+    from contextlib import nullcontext
+
+    from extensions_built_in.diffusion_models.z_image_diffsynth import model as model_mod
+    from extensions_built_in.diffusion_models.z_image_diffsynth.model import (
+        ZImageDiffSynthModel,
+    )
+
+    vae = MagicMock(name="vae_wrapper")
+    fake_components = {
+        "dit": MagicMock(name="dit"),
+        "dit_is_diffusers": True,
+        "vae_wrapper": vae,
+        "text_encoder": MagicMock(name="te"),
+        "tokenizer": MagicMock(name="tok"),
+        "sampling_dit": None,
+        "sampling_is_diffusers": False,
+    }
+
+    model = object.__new__(ZImageDiffSynthModel)
+    model.model_config = SimpleNamespace(
+        name_or_path="/dit",
+        extras_name_or_path="/extras",
+        model_kwargs={},
+        quantize=False,
+        qtype=None,
+        quantize_te=False,
+        qtype_te="float8",
+    )
+    model.torch_dtype = torch.float32
+    model.device_torch = torch.device("cpu")
+    model.vae_device_torch = torch.device("cuda:0")
+    model._cache_text_embeddings = True
+    model.print_and_status_update = lambda *a, **k: None
+
+    with (
+        patch.object(
+            model_mod.loader_mod,
+            "load_components",
+            return_value=fake_components,
+        ),
+        patch.object(model_mod, "normalize_path", side_effect=lambda p: p),
+        patch.object(ZImageDiffSynthModel, "_move_main_network"),
+        patch.object(ZImageDiffSynthModel, "_move_sampling_transformer"),
+        patch.object(model_mod, "memory_debug", lambda *a, **k: nullcontext()),
+    ):
+        ZImageDiffSynthModel.load_model(model)
+
+    vae.to.assert_not_called()
+
+
+def test_load_model_moves_vae_to_gpu_when_not_caching_text_embeddings():
+    from types import SimpleNamespace
+    from contextlib import nullcontext
+
+    from extensions_built_in.diffusion_models.z_image_diffsynth import model as model_mod
+    from extensions_built_in.diffusion_models.z_image_diffsynth.model import (
+        ZImageDiffSynthModel,
+    )
+
+    vae = MagicMock(name="vae_wrapper")
+    fake_components = {
+        "dit": MagicMock(name="dit"),
+        "dit_is_diffusers": True,
+        "vae_wrapper": vae,
+        "text_encoder": MagicMock(name="te"),
+        "tokenizer": MagicMock(name="tok"),
+        "sampling_dit": None,
+        "sampling_is_diffusers": False,
+    }
+
+    model = object.__new__(ZImageDiffSynthModel)
+    model.model_config = SimpleNamespace(
+        name_or_path="/dit",
+        extras_name_or_path="/extras",
+        model_kwargs={},
+        quantize=False,
+        qtype=None,
+        quantize_te=False,
+        qtype_te="float8",
+    )
+    model.torch_dtype = torch.float32
+    model.device_torch = torch.device("cpu")
+    model.vae_device_torch = torch.device("cuda:0")
+    model._cache_text_embeddings = False
+    model.print_and_status_update = lambda *a, **k: None
+
+    with (
+        patch.object(
+            model_mod.loader_mod,
+            "load_components",
+            return_value=fake_components,
+        ),
+        patch.object(model_mod, "normalize_path", side_effect=lambda p: p),
+        patch.object(ZImageDiffSynthModel, "_move_main_network"),
+        patch.object(ZImageDiffSynthModel, "_move_sampling_transformer"),
+        patch.object(model_mod, "memory_debug", lambda *a, **k: nullcontext()),
+    ):
+        ZImageDiffSynthModel.load_model(model)
+
+    vae.to.assert_called_with(torch.device("cuda:0"))
+
+
+def test_load_components_source_parks_dit_before_te_cuda():
+    """DiT→CPU + hard flush must precede TE.to(device) for exclusive residency."""
+    import inspect
+
+    src = inspect.getsource(loader_mod.load_components)
+    dit_cpu = src.find('safe_module_to_device(dit, torch.device("cpu"))')
+    hard_flush = src.find("torch.cuda.synchronize()")
+    te_to_device = src.find("text_encoder.to(device)")
+    assert dit_cpu != -1
+    assert hard_flush != -1
+    assert te_to_device != -1
+    assert dit_cpu < hard_flush < te_to_device

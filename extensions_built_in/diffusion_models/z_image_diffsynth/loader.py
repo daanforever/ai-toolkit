@@ -4,6 +4,7 @@
 import os
 import sys
 import glob
+import gc
 from typing import Optional, Tuple, List, Any
 
 import torch
@@ -244,6 +245,12 @@ def load_components(
     # it back to the appropriate device when actually used.
     safe_module_to_device(dit, torch.device("cpu"))
     flush()
+    # Hard free before TE mounts so DiT+TE do not co-reside in max_memory_allocated
+    # (critical when quantize_te=false ~8GB TE on 16GB cards).
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 
     # 3) Tokenizer & text encoder (Lumina2-style override vs Z-Image snapshot)
     log("Loading tokenizer and text encoder")
@@ -258,6 +265,15 @@ def load_components(
         text_encoder = Qwen3ForCausalLM.from_pretrained(
             te_root, subfolder="text_encoder", dtype=dtype
         )
+    # Load on CPU first; move to CUDA only after DiTs are fully parked.
+    try:
+        text_encoder.to("cpu")
+    except Exception:
+        pass
+    flush()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
     text_encoder.to(device)
     if quantize_te:
         qtype = get_qtype(qtype_te or "float8")

@@ -122,6 +122,11 @@ _TRAIN_RESIDENCY: List[tuple[str, str]] = []
 # True returns from _move_sampling_transformer during train forward (not sample batch).
 _SAMPLING_MOVES_TRAIN: List[bool] = []
 _PROBES_INSTALLED = False
+_TE_CACHE_VRAM_PROBE_INSTALLED = False
+# (label, alloc_gb, reserved_gb, peak_gb, total_gb, main_dev, te_dev, samp_dev)
+_TE_CACHE_VRAM_EVENTS: List[tuple] = []
+# Peak right after load_model (before optional reset); isolates load vs later spikes.
+_PEAK_AFTER_LOAD_GB: Optional[float] = None
 _LORA_INIT_PATH: Path | None = None
 _LORA_INIT_PROBE_INSTALLED = False
 
@@ -524,6 +529,243 @@ def _snap_train_residency(model) -> None:
     )
 
 
+def _te_weight_device(model) -> str:
+    te = getattr(model, "text_encoder", None)
+    if te is None:
+        return "None"
+    if isinstance(te, list):
+        te = te[0] if te else None
+    if te is None:
+        return "None"
+    # FakeTextEncoder has .device property but no real weights on CUDA.
+    try:
+        from toolkit.unloader import FakeTextEncoder
+
+        if isinstance(te, FakeTextEncoder):
+            return f"fake:{te.device}"
+    except Exception:
+        pass
+    d = _weight_device(te)
+    return str(d) if d is not None else "None"
+
+
+def _cuda_total_gb() -> float:
+    if not torch.cuda.is_available():
+        return 0.0
+    return torch.cuda.get_device_properties(0).total_memory / (1024**3)
+
+
+def _log_te_cache_vram(label: str, model=None) -> None:
+    """Append + print CUDA alloc/peak/reserved and DiT/TE/Turbo devices."""
+    if not torch.cuda.is_available():
+        return
+    alloc = torch.cuda.memory_allocated() / (1024**3)
+    reserved = torch.cuda.memory_reserved() / (1024**3)
+    peak = torch.cuda.max_memory_allocated() / (1024**3)
+    total = _cuda_total_gb()
+    frac = (peak / total) if total > 0 else 0.0
+    gate = "FAIL" if total > 0 and frac >= PEAK_VRAM_FRAC_MAX else "ok"
+    main_s = te_s = samp_s = "?"
+    if model is not None:
+        main_mod = getattr(model, "_raw_dit", None) or getattr(model, "model", None)
+        st = getattr(model, "_sampling_transformer", None)
+        samp_mod = getattr(st, "_inner_dit", None) if st is not None else None
+        if samp_mod is None:
+            samp_mod = st
+        md = _weight_device(main_mod)
+        sd = _weight_device(samp_mod)
+        main_s = str(md) if md is not None else "None"
+        samp_s = str(sd) if sd is not None else "None"
+        te_s = _te_weight_device(model)
+    evt = (label, alloc, reserved, peak, total, main_s, te_s, samp_s)
+    _TE_CACHE_VRAM_EVENTS.append(evt)
+    _log(
+        f"[te-cache-vram] {label}: alloc={alloc:.2f}GiB reserved={reserved:.2f}GiB "
+        f"peak={peak:.2f}/{total:.2f}GiB ({frac:.1%} {gate}) "
+        f"main={main_s} te={te_s} samp={samp_s}"
+    )
+
+
+def _print_te_cache_vram_timeline() -> None:
+    if not _TE_CACHE_VRAM_EVENTS:
+        _log("[te-cache-vram] no events recorded")
+        return
+    _log("[te-cache-vram] === timeline ===")
+    if _PEAK_AFTER_LOAD_GB is not None:
+        _log(
+            f"  (load sticky peak={_PEAK_AFTER_LOAD_GB:.2f}GiB; "
+            "later Δpeak above this is post-load)"
+        )
+    prev_peak = 0.0
+    for label, alloc, reserved, peak, total, main_s, te_s, samp_s in _TE_CACHE_VRAM_EVENTS:
+        dpeak = peak - prev_peak
+        mark = " <<" if dpeak > 0.05 else ""
+        frac = (peak / total) if total > 0 else 0.0
+        gate = "FAIL" if total > 0 and frac >= PEAK_VRAM_FRAC_MAX else "ok"
+        _log(
+            f"  {label}: alloc={alloc:.2f} reserved={reserved:.2f} peak={peak:.2f} "
+            f"(Δpeak={dpeak:+.2f}, {frac:.1%} {gate}) "
+            f"main={main_s} te={te_s} samp={samp_s}{mark}"
+        )
+        prev_peak = peak
+    _log("[te-cache-vram] === end ===")
+
+
+def _install_te_cache_vram_probe() -> None:
+    """Monkeypatch park/restore/unload/cache/load/turbo/sample for VRAM timeline."""
+    global _TE_CACHE_VRAM_PROBE_INSTALLED, _PEAK_AFTER_LOAD_GB
+    _TE_CACHE_VRAM_EVENTS.clear()
+    _PEAK_AFTER_LOAD_GB = None
+    if _TE_CACHE_VRAM_PROBE_INSTALLED:
+        return
+
+    import toolkit.unloader as unloader_mod
+    from toolkit.dataloader_mixins import LatentCachingMixin, TextEmbeddingCachingMixin
+    from toolkit.network_mixins import ToolkitNetworkMixin
+    from extensions_built_in.diffusion_models.z_image_diffsynth.model import (
+        ZImageDiffSynthModel,
+    )
+
+    _orig_park = unloader_mod.park_main_transformer_for_text_cache
+    _orig_restore = unloader_mod.restore_main_transformer_after_text_cache
+    _orig_unload = unloader_mod.unload_text_encoder
+    _orig_cache = TextEmbeddingCachingMixin.cache_text_embeddings
+    _orig_cache_latents = LatentCachingMixin.cache_latents_all_latents
+    _orig_force_to = ToolkitNetworkMixin.force_to
+    _orig_load = ZImageDiffSynthModel.load_model
+    _orig_turbo = ZImageDiffSynthModel.apply_turbo_teacher_mode
+    _orig_gen = ZImageDiffSynthModel.generate_images
+    _orig_set_state = ZImageDiffSynthModel.set_device_state
+    _orig_encode = ZImageDiffSynthModel.encode_prompt
+    _encode_call_n = {"n": 0}
+
+    def _park(model):
+        _log_te_cache_vram("park:before", model)
+        out = _orig_park(model)
+        _log_te_cache_vram("park:after", model)
+        return out
+
+    def _restore(model, device=None):
+        _log_te_cache_vram("restore:before", model)
+        out = _orig_restore(model, device)
+        _log_te_cache_vram("restore:after", model)
+        return out
+
+    def _unload(model):
+        _log_te_cache_vram("unload_te:before", model)
+        out = _orig_unload(model)
+        _log_te_cache_vram("unload_te:after", model)
+        return out
+
+    def _cache(self):
+        sd = getattr(self, "sd", None)
+        _encode_call_n["n"] = 0
+        _log_te_cache_vram("cache_text_embeddings:enter", sd)
+        try:
+            return _orig_cache(self)
+        finally:
+            _log_te_cache_vram("cache_text_embeddings:exit", sd)
+
+    def _cache_latents(self):
+        sd = getattr(self, "sd", None)
+        _log_te_cache_vram("cache_latents:enter", sd)
+        try:
+            return _orig_cache_latents(self)
+        finally:
+            _log_te_cache_vram("cache_latents:exit", sd)
+
+    def _force_to(self, device, dtype):
+        sd = None
+        ref = getattr(self, "base_model_ref", None)
+        if ref is not None:
+            try:
+                sd = ref()
+            except Exception:
+                sd = None
+        _log_te_cache_vram(f"lora.force_to:before({device})", sd)
+        out = _orig_force_to(self, device, dtype)
+        _log_te_cache_vram(f"lora.force_to:after({device})", sd)
+        return out
+
+    def _load(self):
+        _log_te_cache_vram("load_model:enter", self)
+        out = _orig_load(self)
+        _log_te_cache_vram("load_model:exit", self)
+        global _PEAK_AFTER_LOAD_GB
+        if torch.cuda.is_available():
+            _PEAK_AFTER_LOAD_GB = torch.cuda.max_memory_allocated() / (1024**3)
+            # Isolate post-load spikes (TE cache / train / sample) from sticky load peak.
+            if _env_flag("ZIMAGE_SIM_RESET_PEAK_AFTER_LOAD"):
+                torch.cuda.reset_peak_memory_stats()
+                torch.cuda.empty_cache()
+                _log(
+                    f"[te-cache-vram] reset_peak after load "
+                    f"(saved sticky={_PEAK_AFTER_LOAD_GB:.2f}GiB)"
+                )
+                _log_te_cache_vram("load_model:after_peak_reset", self)
+        return out
+
+    def _turbo(self, enabled: bool):
+        _log_te_cache_vram(f"apply_turbo:before(enabled={bool(enabled)})", self)
+        out = _orig_turbo(self, enabled)
+        _log_te_cache_vram(f"apply_turbo:after(enabled={bool(enabled)})", self)
+        return out
+
+    def _gen(self, *args, **kwargs):
+        _log_te_cache_vram("generate_images:enter", self)
+        try:
+            return _orig_gen(self, *args, **kwargs)
+        finally:
+            _log_te_cache_vram("generate_images:exit", self)
+
+    def _set_state(self, state):
+        _log_te_cache_vram("set_device_state:enter", self)
+        out = _orig_set_state(self, state)
+        _log_te_cache_vram("set_device_state:exit", self)
+        return out
+
+    def _encode(self, *args, **kwargs):
+        # Log first two encodes during text-embed cache (activation spike source).
+        n = _encode_call_n["n"]
+        _encode_call_n["n"] = n + 1
+        if n < 2:
+            _log_te_cache_vram(f"encode_prompt:before#{n}", self)
+        out = _orig_encode(self, *args, **kwargs)
+        if n < 2:
+            _log_te_cache_vram(f"encode_prompt:after#{n}", self)
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                _log_te_cache_vram(f"encode_prompt:after_flush#{n}", self)
+        return out
+
+    unloader_mod.park_main_transformer_for_text_cache = _park  # type: ignore[assignment]
+    unloader_mod.restore_main_transformer_after_text_cache = _restore  # type: ignore[assignment]
+    unloader_mod.unload_text_encoder = _unload  # type: ignore[assignment]
+    TextEmbeddingCachingMixin.cache_text_embeddings = _cache  # type: ignore[method-assign]
+    LatentCachingMixin.cache_latents_all_latents = _cache_latents  # type: ignore[method-assign]
+    ToolkitNetworkMixin.force_to = _force_to  # type: ignore[method-assign]
+    ZImageDiffSynthModel.load_model = _load  # type: ignore[method-assign]
+    ZImageDiffSynthModel.apply_turbo_teacher_mode = _turbo  # type: ignore[method-assign]
+    ZImageDiffSynthModel.generate_images = _gen  # type: ignore[method-assign]
+    ZImageDiffSynthModel.set_device_state = _set_state  # type: ignore[method-assign]
+    ZImageDiffSynthModel.encode_prompt = _encode  # type: ignore[method-assign]
+
+    # Re-bind imports used by call sites that already imported symbols.
+    import toolkit.dataloader_mixins as dlm
+    import extensions_built_in.sd_trainer.SDTrainer as sdt
+
+    dlm.park_main_transformer_for_text_cache = _park  # type: ignore[attr-defined]
+    sdt.park_main_transformer_for_text_cache = _park  # type: ignore[attr-defined]
+    sdt.restore_main_transformer_after_text_cache = _restore  # type: ignore[attr-defined]
+    sdt.unload_text_encoder = _unload  # type: ignore[attr-defined]
+
+    _TE_CACHE_VRAM_PROBE_INSTALLED = True
+    _log(
+        "[te-cache-vram] probe installed "
+        f"(reset_peak_after_load={_env_flag('ZIMAGE_SIM_RESET_PEAK_AFTER_LOAD')})"
+    )
+
+
 def _install_vram_probe() -> None:
     """Snap main vs sampling devices during train get_noise_prediction.
 
@@ -711,10 +953,20 @@ def _assert_vram_acceptance(
         f"[vram] peak_alloc={peak_gb:.2f} GiB / total={total_gb:.2f} GiB "
         f"(frac={frac:.3f}, max={PEAK_VRAM_FRAC_MAX})"
     )
+    if _PEAK_AFTER_LOAD_GB is not None:
+        _log(
+            f"[vram] sticky_peak_after_load={_PEAK_AFTER_LOAD_GB:.2f} GiB "
+            f"(post-load contribution≈{max(0.0, peak_gb - _PEAK_AFTER_LOAD_GB):.2f} GiB)"
+        )
     if frac >= PEAK_VRAM_FRAC_MAX:
         raise RuntimeError(
             f"Acceptance fail: CUDA peak {peak_gb:.2f} GiB ≥ "
             f"{PEAK_VRAM_FRAC_MAX:.0%} of {total_gb:.2f} GiB"
+            + (
+                f" (sticky load peak was {_PEAK_AFTER_LOAD_GB:.2f} GiB)"
+                if _PEAK_AFTER_LOAD_GB is not None
+                else ""
+            )
         )
     n_moves = len(_SAMPLING_MOVES_TRAIN)
     first_allowed = 1
@@ -932,7 +1184,7 @@ def _train_lora(
                         "dtype": "bf16",
                         "quantize": True,
                         "qtype": "qfloat8",
-                        "quantize_te": True,
+                        "quantize_te": False,
                         "qtype_te": "qfloat8",
                         "arch": "zimage_diffsynth",
                         "low_vram": False,
@@ -1001,6 +1253,7 @@ def _train_lora(
     _PROFILE_ENABLED = bool(profile)
     _install_t_collector()
     _install_vram_probe()
+    _install_te_cache_vram_probe()
     if profile:
         _install_profile_probes()
     init_lora_path = work_root / "_lora_init.safetensors"
@@ -1019,6 +1272,7 @@ def _train_lora(
         run_job(config)
     finally:
         FORCE_COVERAGE_STEPS = _saved_force
+        _print_te_cache_vram_timeline()
     _log("[PHASE TRAIN] run_job: done")
     if profile:
         _print_profile_table()

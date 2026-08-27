@@ -184,3 +184,33 @@ def test_restore_only_when_caching_text_embeddings_gate():
         if is_caching_text_embeddings:
             restore_main_transformer_after_text_cache(model, model.device_torch)
     move.assert_called_once_with(model.device_torch)
+
+
+def test_restore_uses_turbo_teacher_mode_when_train_on_turbo():
+    apply = MagicMock()
+    move = MagicMock()
+    model = SimpleNamespace(
+        _train_on_turbo=True,
+        apply_turbo_teacher_mode=apply,
+        _move_main_network=move,
+        device_torch=torch.device("cuda:0"),
+    )
+    restore_main_transformer_after_text_cache(model, torch.device("cuda:0"))
+    apply.assert_called_once_with(True)
+    move.assert_not_called()
+
+
+def test_restore_uses_prefer_turbo_flag_without_train_on_turbo():
+    apply = MagicMock()
+    move = MagicMock()
+    model = SimpleNamespace(
+        _train_on_turbo=False,
+        _prefer_turbo_restore_after_te=True,
+        apply_turbo_teacher_mode=apply,
+        _move_main_network=move,
+        device_torch=torch.device("cuda:0"),
+    )
+    restore_main_transformer_after_text_cache(model, torch.device("cuda:0"))
+    apply.assert_called_once_with(True)
+    move.assert_not_called()
+    assert model._prefer_turbo_restore_after_te is False

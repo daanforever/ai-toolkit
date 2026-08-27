@@ -208,7 +208,22 @@ def restore_main_transformer_after_text_cache(
     model: "BaseModel",
     device: Optional[Union[torch.device, str]] = None,
 ) -> None:
-    """Put main transformer (+ LoRA via _move_main_network) back on train device."""
+    """Put training transformer back on train device after TE unload.
+
+    When turbo teacher is preferred (``_prefer_turbo_restore_after_te`` or
+    ``_train_on_turbo``), exclusive-pin sampling DiT instead of remounting the
+    base DiT onto CUDA.
+    """
+    prefer_turbo = bool(getattr(model, "_prefer_turbo_restore_after_te", False)) or bool(
+        getattr(model, "_train_on_turbo", False)
+    )
+    if prefer_turbo and hasattr(model, "apply_turbo_teacher_mode"):
+        model.apply_turbo_teacher_mode(True)
+        if hasattr(model, "_prefer_turbo_restore_after_te"):
+            model._prefer_turbo_restore_after_te = False
+        flush()
+        return
+
     target = device
     if target is None:
         target = getattr(model, "device_torch", None)
