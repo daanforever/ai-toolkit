@@ -112,7 +112,8 @@ class Adafactor(torch.optim.Optimizer):
         scale_lr_by_index (`bool`, *optional*, defaults to `False`):
             If True, scales `base_lr` by a truncated-Gaussian weight over group
             ``index`` in ``0 .. _max_index`` (requires at least one indexed group
-            and ``max_index > 0``). Weight decay is not index-scaled.
+            and ``max_index > 0``). Weights are max-normalized (``/ max``) so
+            the peak is 1. Weight decay is not index-scaled.
             Independent of `relative_step`. When True, `scale_lr_mean` and
             `scale_lr_std` are required (finite; std ``> 0``).
         scale_lr_mean (`float`, *optional*, defaults to `None`):
@@ -369,9 +370,9 @@ class Adafactor(torch.optim.Optimizer):
     def _compute_gaussian_lr_weights(
         ntt: int, mean: float, std: float
     ) -> torch.Tensor:
-        """Truncated-normal weights on ``0..ntt-1``, min-max normalized to ``[0, 1]``.
+        """Truncated-normal weights on ``0..ntt-1``, max-normalized so the peak is 1.
 
-        Mirrors the timestep Gaussian helper (CPU, no extension import).
+        Truncated-normal PDF on ``[0, 1]`` (CPU, no extension import); ``w = raw / max``.
         ``mean`` is in index/slot space; ``std`` is on the normalized ``[0, 1]`` axis.
         """
         if ntt < 2:
@@ -390,9 +391,7 @@ class Adafactor(torch.optim.Optimizer):
         raw = phi / (sigma * normalization + 1e-8)
         safe_raw = torch.nan_to_num(raw, nan=0.0, posinf=0.0, neginf=0.0)
         max_value = safe_raw.max().clamp(min=1e-8)
-        min_value = safe_raw.min()
-        span = (max_value - min_value).clamp(min=1e-8)
-        return ((safe_raw - min_value) / span).clamp_(0.0, 1.0)
+        return (safe_raw / max_value).clamp_(0.0, 1.0)
 
     def _rebuild_scale_lr_lookup(self) -> None:
         self._scale_lr_lookup = None

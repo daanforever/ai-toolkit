@@ -5,11 +5,18 @@ import math
 import pytest
 import torch
 
-from extensions_built_in.sd_trainer.gaussian_timestep_weights import (
-    evaluate_gaussian_timestep,
-)
 from toolkit.optimizer import get_optimizer
 from toolkit.optimizers.adafactor import Adafactor
+
+
+def _max_norm_truncated_pdf_weights(ntt: int, mean: float, std: float) -> torch.Tensor:
+    """Max-normalized truncated-normal PDF on [0, 1] (phi ratio; CDF/sigma cancel)."""
+    denom = float(ntt - 1)
+    t = torch.arange(ntt, dtype=torch.float32) / denom
+    mu_n = float(mean) / denom
+    z = (t - mu_n) / float(std)
+    phi = torch.exp(-0.5 * z ** 2) / math.sqrt(2.0 * math.pi)
+    return phi / phi.max()
 
 
 def _state_with_rms(opt, group_idx=0, param_idx=0, rms=1.0):
@@ -50,7 +57,7 @@ def _make_gaussian_opt(
     )
 
 
-def test_gaussian_lr_lookup_matches_timestep_helper():
+def test_gaussian_lr_lookup_matches_max_norm_pdf():
     max_index = 10
     mean = 4.0
     std = 0.25
@@ -64,16 +71,7 @@ def test_gaussian_lr_lookup_matches_timestep_helper():
     assert opt._scale_lr_lookup is not None
     assert opt._scale_lr_lookup.shape == (ntt,)
 
-    slots = torch.arange(ntt, dtype=torch.float32)
-    ref = evaluate_gaussian_timestep(
-        slots,
-        mean,
-        std,
-        device="cpu",
-        dtype=torch.float32,
-        num_train_timesteps=ntt,
-        gaussian_shift=0.0,
-    )
+    ref = _max_norm_truncated_pdf_weights(ntt, mean, std)
     assert torch.allclose(opt._scale_lr_lookup, ref, rtol=0.0, atol=1e-6)
 
     lr = 1e-3
@@ -85,21 +83,43 @@ def test_gaussian_lr_lookup_matches_timestep_helper():
         assert got == pytest.approx(expected)
 
 
-def test_gaussian_zero_weight_at_min_after_minmax():
-    """Min-max normalization drives the lowest PDF sample to weight 0."""
+def test_gaussian_narrow_tail_much_smaller_than_peak():
+    """Narrow-σ tail is << peak; it is not required to be 0."""
     groups = [
         {"params": [torch.nn.Parameter(torch.ones(2))], "index": i}
         for i in range(5)
     ]
     opt = _make_gaussian_opt(groups, mean=0.0, std=0.2)
     weights = opt._scale_lr_lookup
-    assert float(weights.min().item()) == pytest.approx(0.0)
-    assert float(weights.max().item()) == pytest.approx(1.0)
-    # Peak near mean=0 => index 0 is 1; far end is 0.
-    assert float(weights[0].item()) == pytest.approx(1.0)
-    assert float(weights[-1].item()) == pytest.approx(0.0)
-    state = _state_with_rms(opt, group_idx=4)
-    assert opt._get_lr(opt.param_groups[4], state) == pytest.approx(1e-30)
+    peak = float(weights[0].item())
+    far = float(weights[-1].item())
+    assert peak == pytest.approx(1.0)
+    assert far < peak * 1e-3
+
+    # Z-Image: 30 layers, mask layers, wide std. Layer 0 must stay nonzero
+    # at both mean=15 (mid) and mean=10 (left of mid).
+    lr = 1e-3
+    for mean in (15.0, 10.0):
+        z_groups = [
+            {
+                "params": [torch.nn.Parameter(torch.ones(2))],
+                "index": i,
+                "name": f"layers_{i}",
+            }
+            for i in range(30)
+        ]
+        z_opt = _make_gaussian_opt(
+            z_groups, lr=lr, mean=mean, std=1.0, mask=["layers"]
+        )
+        lookup = z_opt._scale_lr_lookup
+        w0 = float(lookup[0].item())
+        state0 = _state_with_rms(z_opt, group_idx=0)
+        lr0 = z_opt._get_lr(z_opt.param_groups[0], state0)
+        assert w0 > 0.0, f"mean={mean}: lookup[0]={w0}"
+        assert lr0 > 1e-30, f"mean={mean}: lr[0]={lr0} weight={w0}"
+        if mean == 15.0:
+            assert float(lookup[15].item()) == pytest.approx(1.0)
+            assert w0 == pytest.approx(math.exp(-0.5 * (15.0 / 29.0) ** 2))
 
 
 def test_scale_lr_by_index_skips_unindexed_with_valid_max():
@@ -392,14 +412,7 @@ def test_set_scale_lr_config_recomputes_lookup():
     assert opt.scale_lr_std == pytest.approx(0.2)
     assert not torch.allclose(opt._scale_lr_lookup, before)
 
-    ref = evaluate_gaussian_timestep(
-        torch.arange(3, dtype=torch.float32),
-        2.0,
-        0.2,
-        device="cpu",
-        dtype=torch.float32,
-        num_train_timesteps=3,
-    )
+    ref = _max_norm_truncated_pdf_weights(3, 2.0, 0.2)
     assert torch.allclose(opt._scale_lr_lookup, ref, rtol=0.0, atol=1e-6)
 
 
@@ -535,7 +548,7 @@ def test_weight_decay_unchanged_across_indexes_constant():
 
 
 def test_weight_decay_absolute_equal_across_gaussian_weights():
-    """Absolute WD uses pre-Gaussian LR; equal effective WD even with a zero weight."""
+    """Absolute WD uses pre-Gaussian LR; equal effective WD across Gaussian weights."""
     groups = [
         {"params": [torch.nn.Parameter(torch.ones(4))], "index": i}
         for i in range(5)
@@ -552,7 +565,6 @@ def test_weight_decay_absolute_equal_across_gaussian_weights():
     )
     weights = [float(w.item()) for w in opt._scale_lr_lookup]
     assert weights[0] == pytest.approx(1.0)
-    assert weights[-1] == pytest.approx(0.0)
     assert weights[0] != pytest.approx(weights[2])
 
     _zero_grad_step(opt)
@@ -561,13 +573,11 @@ def test_weight_decay_absolute_equal_across_gaussian_weights():
     assert all(v == pytest.approx(expected) for v in effective)
     assert all(g["weight_decay"] == pytest.approx(wd) for g in opt.param_groups)
 
-    # Update LRs still differ (including near-zero at the far index).
     lrs = []
     for idx in range(5):
         state = _state_with_rms(opt, group_idx=idx)
         lrs.append(opt._get_lr(opt.param_groups[idx], state))
     assert lrs[0] > lrs[2] > lrs[-1]
-    assert lrs[-1] == pytest.approx(1e-30)
 
 
 def test_weight_decay_unchanged_across_indexes_param_rms():

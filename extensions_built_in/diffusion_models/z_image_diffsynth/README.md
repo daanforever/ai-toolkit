@@ -136,7 +136,7 @@ Z-Image groups LoRA by DiT block (`name` = `layers_N`, `noise_refiner_N`, `conte
 | `scale_lr_std` | Width on the **normalized** `[0, 1]` axis. Finite and `> 0`. Required when enabled. No numeric default. |
 | `scale_lr_mask` | Optional case-sensitive substring **OR** on `group["name"]`. Omit / `[]` / `null` = all indexed groups. No match is not an error (those groups keep original LR). `max_index` is still taken from **all** indexed groups before the mask. |
 
-Weights are the same truncated-normal + min-max `[0, 1]` curve as timestep Gaussian. Runtime UI can change mean/std/mask (`set_scale_lr_config`) then toggle the flag.
+Weights are a truncated-normal PDF on `[0, 1]`, divided by the max so the peak is 1. Runtime UI can change mean/std/mask (`set_scale_lr_config`) then toggle the flag.
 
 ```yaml
 train:
