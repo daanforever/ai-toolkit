@@ -1,5 +1,6 @@
 import math
-from typing import Iterable, List, Optional, Tuple
+from collections.abc import Sequence as AbcSequence
+from typing import Iterable, List, Optional, Sequence, Tuple
 import torch
 from toolkit.optimizers.optimizer_utils import copy_stochastic, stochastic_grad_accummulation, update_parameter
 from toolkit.print import print_acc
@@ -109,18 +110,21 @@ class Adafactor(torch.optim.Optimizer):
             If True, use factored second-moment (row/col) for all parameters. If False, use full second-moment.
             If None, auto-detect: use factored for parameters with 2+ dimensions (current default behavior).
         scale_lr_by_index (`bool`, *optional*, defaults to `False`):
-            If True, scales `base_lr` and effective weight decay by group `index` vs
-            resolved `_max_index` (requires at least one group with `index`, and
-            `max_index > 0`). With ``u = index / max_index``:
-            ``lr' = lr * exp(-scale_lr_factor * u)``,
-            ``wd' = wd * exp(scale_lr_factor * u)`` (capped by `weight_decay_max`
-            when `scale_lr_factor > 0`). Positive factor: later layers get lower LR
-            and higher WD; negative factor inverts that. Independent of `relative_step`.
-        scale_lr_factor (`float`, *optional*, defaults to `1.0`):
-            Strength and direction of index-based LR/WD scaling when `scale_lr_by_index=True`.
-        weight_decay_max (`float`, *optional*, defaults to `0.1`):
-            Cap for index-scaled weight decay when `scale_lr_by_index=True` and
-            `scale_lr_factor > 0`. Must be ``> 0``.
+            If True, scales `base_lr` by a truncated-Gaussian weight over group
+            ``index`` in ``0 .. _max_index`` (requires at least one indexed group
+            and ``max_index > 0``). Weight decay is not index-scaled.
+            Independent of `relative_step`. When True, `scale_lr_mean` and
+            `scale_lr_std` are required (finite; std ``> 0``).
+        scale_lr_mean (`float`, *optional*, defaults to `None`):
+            Gaussian mean in layer-index space. Required when `scale_lr_by_index=True`.
+        scale_lr_std (`float`, *optional*, defaults to `None`):
+            Gaussian std on the normalized ``[0, 1]`` index axis. Required when
+            `scale_lr_by_index=True`; must be finite and ``> 0``.
+        scale_lr_mask (`Sequence[str]`, *optional*, defaults to `None`):
+            Case-sensitive substring OR filter on ``group["name"]``. ``None`` or
+            ``[]`` applies to all indexed groups; non-empty mask requires a name
+            and at least one substring match. Unmatched / unindexed groups keep
+            the original LR.
 
     This implementation handles low-precision (FP16, bfloat) values, but we have not thoroughly tested.
 
@@ -191,8 +195,9 @@ class Adafactor(torch.optim.Optimizer):
         stochastic_rounding=True,
         factored=None,
         scale_lr_by_index: bool = False,
-        scale_lr_factor: float = 1.0,
-        weight_decay_max: float = 0.1,
+        scale_lr_mean: Optional[float] = None,
+        scale_lr_std: Optional[float] = None,
+        scale_lr_mask: Optional[Sequence[str]] = None,
     ):
         weight_decay_mode = self._validate_weight_decay_mode(weight_decay_mode)
         eps = self._normalize_eps(eps)
@@ -233,7 +238,10 @@ class Adafactor(torch.optim.Optimizer):
             group.setdefault("warmup_active", False)
 
         self._init_scale_lr_by_index(
-            scale_lr_by_index, scale_lr_factor, weight_decay_max
+            scale_lr_by_index,
+            scale_lr_mean,
+            scale_lr_std,
+            scale_lr_mask,
         )
 
         # Store config reapplied after load_state_dict (checkpoint param_groups may omit keys).
@@ -307,24 +315,155 @@ class Adafactor(torch.optim.Optimizer):
         if is_debug_enabled():
             print_acc(f"Adafactor: applied runtime lr={value}")
 
+    @staticmethod
+    def _validate_scale_lr_mask(
+        mask: Optional[Sequence[str]],
+    ) -> Optional[Tuple[str, ...]]:
+        if mask is None:
+            return None
+        if isinstance(mask, (str, bytes)) or not isinstance(mask, AbcSequence):
+            raise ValueError(
+                "scale_lr_mask must be a sequence of non-empty strings"
+            )
+        out: List[str] = []
+        for item in mask:
+            if not isinstance(item, str) or item == "":
+                raise ValueError(
+                    "scale_lr_mask must be a sequence of non-empty strings"
+                )
+            out.append(item)
+        return tuple(out)
+
+    @staticmethod
+    def _validate_scale_lr_mean_std(
+        mean: Optional[float],
+        std: Optional[float],
+        *,
+        required: bool,
+    ) -> Tuple[Optional[float], Optional[float]]:
+        if mean is None and std is None:
+            if required:
+                raise ValueError(
+                    "scale_lr_by_index=True requires finite scale_lr_mean and "
+                    "scale_lr_std > 0"
+                )
+            return None, None
+        if mean is None or std is None:
+            raise ValueError(
+                "scale_lr_mean and scale_lr_std must both be provided "
+                "(finite mean; std finite and > 0)"
+            )
+        mean_f = float(mean)
+        std_f = float(std)
+        if not math.isfinite(mean_f):
+            raise ValueError(
+                f"scale_lr_mean must be finite, got scale_lr_mean={mean}"
+            )
+        if not math.isfinite(std_f) or std_f <= 0.0:
+            raise ValueError(
+                f"scale_lr_std must be finite and > 0, got scale_lr_std={std}"
+            )
+        return mean_f, std_f
+
+    @staticmethod
+    def _compute_gaussian_lr_weights(
+        ntt: int, mean: float, std: float
+    ) -> torch.Tensor:
+        """Truncated-normal weights on ``0..ntt-1``, min-max normalized to ``[0, 1]``.
+
+        Mirrors the timestep Gaussian helper (CPU, no extension import).
+        ``mean`` is in index/slot space; ``std`` is on the normalized ``[0, 1]`` axis.
+        """
+        if ntt < 2:
+            raise ValueError(f"gaussian LR lookup requires ntt >= 2, got ntt={ntt}")
+        denom = float(ntt - 1)
+        t = torch.arange(ntt, dtype=torch.float32, device="cpu") / denom
+        mu_normalized = float(mean) / denom
+        sigma = float(std)
+        z_lower = (0.0 - mu_normalized) / sigma
+        z_upper = (1.0 - mu_normalized) / sigma
+        cdf_upper = 0.5 * (1.0 + math.erf(z_upper / math.sqrt(2.0)))
+        cdf_lower = 0.5 * (1.0 + math.erf(z_lower / math.sqrt(2.0)))
+        normalization = cdf_upper - cdf_lower
+        z = (t - mu_normalized) / sigma
+        phi = torch.exp(-0.5 * z ** 2) / math.sqrt(2.0 * math.pi)
+        raw = phi / (sigma * normalization + 1e-8)
+        safe_raw = torch.nan_to_num(raw, nan=0.0, posinf=0.0, neginf=0.0)
+        max_value = safe_raw.max().clamp(min=1e-8)
+        min_value = safe_raw.min()
+        span = (max_value - min_value).clamp(min=1e-8)
+        return ((safe_raw - min_value) / span).clamp_(0.0, 1.0)
+
+    def _rebuild_scale_lr_lookup(self) -> None:
+        self._scale_lr_lookup = None
+        if (
+            not self.scale_lr_by_index
+            or self._max_index is None
+            or self.scale_lr_mean is None
+            or self.scale_lr_std is None
+        ):
+            return
+        ntt = int(self._max_index) + 1
+        self._scale_lr_lookup = self._compute_gaussian_lr_weights(
+            ntt, float(self.scale_lr_mean), float(self.scale_lr_std)
+        )
+
+    def _clear_stale_effective_warmup_state(self) -> None:
+        """Clear warmup fields whose LR space may be stale after scale_lr config change."""
+        keys = (
+            "warmup_progress",
+            "warmup_delta",
+            "warmup_start",
+            "warmup_start_unscaled",
+            "warmup_lr",
+            "warmup_lr_unscaled",
+            "warmup_interp",
+            "warmup_lr_effective",
+            "warmup_complete_pending_cleanup",
+            "warmup_target",
+            "warmup_steps_old",
+            "warmup_boost_old",
+        )
+        for group in self.param_groups:
+            has_warmup_state = (
+                group.get("warmup_active")
+                or group.get("warmup_lr_effective")
+                or group.get("warmup_complete_pending_cleanup")
+                or "warmup_lr" in group
+                or "warmup_target" in group
+                or "warmup_lr_previous" in group
+            )
+            if not has_warmup_state:
+                continue
+            group["warmup_active"] = False
+            group.pop("warmup_lr_previous", None)
+            for k in keys:
+                group.pop(k, None)
+
     def _init_scale_lr_by_index(
         self,
         scale_lr_by_index: bool,
-        scale_lr_factor: float = 1.0,
-        weight_decay_max: float = 0.5,
+        scale_lr_mean: Optional[float] = None,
+        scale_lr_std: Optional[float] = None,
+        scale_lr_mask: Optional[Sequence[str]] = None,
+        *,
+        clear_warmup: bool = False,
     ) -> None:
-        """Enable index-based LR scaling and resolve max_index from param groups."""
-        scale_lr_factor = float(scale_lr_factor)
-        weight_decay_max = float(weight_decay_max)
-        if weight_decay_max <= 0:
-            raise ValueError(
-                f"weight_decay_max must be > 0, got weight_decay_max={weight_decay_max}"
-            )
-        self.scale_lr_factor = scale_lr_factor
-        self.weight_decay_max = weight_decay_max
-        self.scale_lr_by_index = bool(scale_lr_by_index)
+        """Enable index-based Gaussian LR scaling and resolve max_index."""
+        enabled = bool(scale_lr_by_index)
+        mean, std = self._validate_scale_lr_mean_std(
+            scale_lr_mean, scale_lr_std, required=enabled
+        )
+        mask = self._validate_scale_lr_mask(scale_lr_mask)
+        self.scale_lr_mean = mean
+        self.scale_lr_std = std
+        self.scale_lr_mask = mask
+        self.scale_lr_by_index = enabled
         self._max_index = None
-        if not self.scale_lr_by_index:
+        self._scale_lr_lookup = None
+        if not enabled:
+            if clear_warmup:
+                self._clear_stale_effective_warmup_state()
             return
         indices = [
             int(group["index"])
@@ -342,38 +481,74 @@ class Adafactor(torch.optim.Optimizer):
                 f"scale_lr_by_index=True requires max_index > 0, got max_index={max_index}"
             )
         self._max_index = max_index
+        self._rebuild_scale_lr_lookup()
+        if clear_warmup:
+            self._clear_stale_effective_warmup_state()
+
+    def _scale_lr_applies(self, group) -> bool:
+        """True when Gaussian LR scaling should modify this group's LR."""
+        if not self.scale_lr_by_index or "index" not in group:
+            return False
+        mask = self.scale_lr_mask
+        if not mask:
+            return True
+        name = group.get("name")
+        if not isinstance(name, str):
+            return False
+        return any(substr in name for substr in mask)
 
     def _index_lr_multiplier(self, group) -> float:
-        """Index-based LR multiplier, or ``1.0`` when scaling does not apply to this group."""
-        if not self.scale_lr_by_index or "index" not in group:
+        """Gaussian LR weight for ``group``, or ``1.0`` when scaling does not apply."""
+        if not self._scale_lr_applies(group):
             return 1.0
-        u = int(group["index"]) / self._max_index
-        return math.exp(-self.scale_lr_factor * u)
+        if self._scale_lr_lookup is None or self._max_index is None:
+            return 1.0
+        idx = int(group["index"])
+        if idx < 0:
+            idx = 0
+        elif idx > self._max_index:
+            idx = self._max_index
+        return float(self._scale_lr_lookup[idx].item())
 
     def _to_effective_lr(self, base_lr: float, group) -> float:
-        """Apply index LR scaling to ``base_lr``, or return it unchanged when scaling is off."""
-        if not self.scale_lr_by_index or "index" not in group:
+        """Apply Gaussian LR scaling to ``base_lr``, or return it unchanged."""
+        if not self._scale_lr_applies(group):
             return base_lr
         return base_lr * self._index_lr_multiplier(group) + float(group["eps"][0])
 
     def set_scale_lr_by_index(self, value: bool) -> None:
         """Enable/disable index-based LR scaling at runtime (e.g. from UI)."""
         self._init_scale_lr_by_index(
-            bool(value), self.scale_lr_factor, self.weight_decay_max
+            bool(value),
+            self.scale_lr_mean,
+            self.scale_lr_std,
+            self.scale_lr_mask,
+            clear_warmup=True,
         )
         if is_debug_enabled():
             print_acc(
                 f"Adafactor: applied runtime scale_lr_by_index={self.scale_lr_by_index}"
             )
 
-    def set_scale_lr_factor(self, value: float) -> None:
-        """Update scale_lr_factor at runtime (e.g. from UI)."""
+    def set_scale_lr_config(
+        self,
+        mean: Optional[float],
+        std: Optional[float],
+        mask: Optional[Sequence[str]],
+    ) -> None:
+        """Atomically update Gaussian LR mean/std/mask and rebuild the lookup."""
         self._init_scale_lr_by_index(
-            self.scale_lr_by_index, float(value), self.weight_decay_max
+            self.scale_lr_by_index,
+            mean,
+            std,
+            mask,
+            clear_warmup=True,
         )
         if is_debug_enabled():
             print_acc(
-                f"Adafactor: applied runtime scale_lr_factor={self.scale_lr_factor}"
+                f"Adafactor: applied runtime scale_lr_config "
+                f"mean={self.scale_lr_mean} std={self.scale_lr_std} "
+                f"mask={self.scale_lr_mask}"
             )
 
     def set_weight_decay(self, value: float) -> None:
@@ -639,7 +814,9 @@ class Adafactor(torch.optim.Optimizer):
             "warmup_progress",
             "warmup_delta",
             "warmup_start",
+            "warmup_start_unscaled",
             "warmup_lr",
+            "warmup_lr_unscaled",
             "warmup_interp",
             "warmup_lr_effective",
             "warmup_complete_pending_cleanup",
@@ -662,6 +839,7 @@ class Adafactor(torch.optim.Optimizer):
         scheduled ``lr``. When ``scale_lr_by_index`` applies to the group, the ramp runs in
         effective-LR space with the absolute unscaled delta so lower-index-scale groups can
         finish earlier; ``_get_lr`` must not scale ``warmup_lr`` again (``warmup_lr_effective``).
+        ``warmup_lr_unscaled`` tracks the same progress in unscaled space for absolute WD.
         Completion is per-group when ``warmup_lr`` reaches ``warmup_interp`` (or ``warmup_steps``
         as a cap); cleanup runs on the next step via ``stop_warmup``.
         """
@@ -673,11 +851,12 @@ class Adafactor(torch.optim.Optimizer):
             # No explicit LR target in this mode.
             group["warmup_active"] = False
             group.pop("warmup_lr", None)
+            group.pop("warmup_lr_unscaled", None)
             group.pop("warmup_lr_effective", None)
             group["warmup_lr_previous"] = group.get("warmup_lr_previous", 1.0)
             return
 
-        use_effective = bool(self.scale_lr_by_index and "index" in group)
+        use_effective = self._scale_lr_applies(group)
 
         lr_target_old = group.get("warmup_target", 0.0)
         warmup_steps = int(group["warmup_steps"])
@@ -686,11 +865,13 @@ class Adafactor(torch.optim.Optimizer):
             if use_effective:
                 eff = self._to_effective_lr(lr_target, group)
                 group["warmup_lr"] = eff
+                group["warmup_lr_unscaled"] = lr_target
                 group["warmup_lr_previous"] = eff
                 group["warmup_lr_effective"] = True
             else:
                 group["warmup_lr"] = lr_target
                 group["warmup_lr_previous"] = lr_target
+                group.pop("warmup_lr_unscaled", None)
                 group.pop("warmup_lr_effective", None)
             return
 
@@ -741,6 +922,7 @@ class Adafactor(torch.optim.Optimizer):
 
             group["warmup_active"] = True
             group["warmup_start"] = lr_start
+            group["warmup_start_unscaled"] = lr_start_u
             group["warmup_target"] = lr_target
             group["warmup_interp"] = lr_interp
             group["warmup_progress"] = 0
@@ -748,6 +930,8 @@ class Adafactor(torch.optim.Optimizer):
             group["warmup_steps_old"] = warmup_steps
             group["warmup_boost_old"] = boost
             group["warmup_lr_effective"] = use_effective
+            if not use_effective:
+                group.pop("warmup_lr_unscaled", None)
 
             if is_debug_enabled():
                 direction = "up" if lr_target > lr_start_u else "down"
@@ -764,6 +948,12 @@ class Adafactor(torch.optim.Optimizer):
             lr_interp = group["warmup_interp"]
 
             group["warmup_lr"] = warmup_start + warmup_progress * warmup_delta
+            if group.get("warmup_lr_effective"):
+                start_u = group.get("warmup_start_unscaled")
+                if start_u is not None:
+                    group["warmup_lr_unscaled"] = (
+                        start_u + warmup_progress * warmup_delta
+                    )
             group["warmup_progress"] += 1
 
             warmup_lr = group["warmup_lr"]
@@ -779,7 +969,7 @@ class Adafactor(torch.optim.Optimizer):
         if "warmup_lr" in group:
             group["warmup_lr_previous"] = group["warmup_lr"]
 
-    def _get_lr(self, param_group, param_state):
+    def _get_lr(self, param_group, param_state, *, apply_index_scale: bool = True):
         """
         Compute per-parameter learning rate.
 
@@ -791,22 +981,37 @@ class Adafactor(torch.optim.Optimizer):
           Same group-lr handling; computes parameter RMS ratio vs group ``rms_max``
           (relative factor is currently 1.0; not a HF time-based schedule).
 
+        When ``apply_index_scale`` is False, returns the corresponding LR before Gaussian
+        index weighting (used by absolute weight decay). Zero Gaussian weights are handled
+        without division or inversion.
+
         Returns:
             float: learning rate for this parameter
         """
         # Extract LR config parameters
         if "warmup_lr" in param_group:
-            base_lr = param_group["warmup_lr"]
+            if param_group.get("warmup_lr_effective"):
+                if apply_index_scale:
+                    base_lr = param_group["warmup_lr"]
+                else:
+                    base_lr = param_group.get(
+                        "warmup_lr_unscaled", param_group["warmup_lr"]
+                    )
+            else:
+                base_lr = param_group["warmup_lr"]
+                if apply_index_scale:
+                    if base_lr is None:
+                        base_lr = 1.0
+                    base_lr = self._to_effective_lr(base_lr, param_group)
             if base_lr is None:
                 base_lr = 1.0
-            if not param_group.get("warmup_lr_effective"):
-                base_lr = self._to_effective_lr(base_lr, param_group)
         else:
             base_lr = param_group["lr"]
             if base_lr is None:
                 # Allow relative-step mode with lr=None.
                 base_lr = 1.0
-            base_lr = self._to_effective_lr(base_lr, param_group)
+            if apply_index_scale:
+                base_lr = self._to_effective_lr(base_lr, param_group)
 
         eps0       = param_group["eps"][0]          # Small constant for numerical stability (division guard)
         eps1       = param_group["eps"][1]          # Parameter scale regularization constant
@@ -1372,11 +1577,6 @@ class Adafactor(torch.optim.Optimizer):
 
                 if group["weight_decay"] != 0 and not group.get("is_magnitude", False):
                     wd = group["weight_decay"]
-                    if self.scale_lr_by_index and "index" in group:
-                        # Inverse of LR: wd' = wd * exp(+factor * u), u = index / max_index.
-                        wd = wd / self._index_lr_multiplier(group)
-                        if self.scale_lr_factor > 0.0:
-                            wd = min(wd, self.weight_decay_max)
                     weight_decay_mode = self._validate_weight_decay_mode(
                         group.get("weight_decay_mode", "absolute")
                     )
@@ -1395,7 +1595,12 @@ class Adafactor(torch.optim.Optimizer):
                         effective_wd = self._clamp_effective_wd(wd)
                         p_data_fp32.mul_(1.0 - effective_wd)
                     else:
-                        effective_wd = self._clamp_effective_wd(wd * lr)
+                        # Absolute WD uses pre-Gaussian LR so index weighting affects
+                        # updates only, not weight decay (equal WD across indexes).
+                        wd_lr = self._get_lr(
+                            group, state, apply_index_scale=False
+                        )
+                        effective_wd = self._clamp_effective_wd(wd * wd_lr)
                         p_data_fp32.mul_(1.0 - effective_wd)
                     if isinstance(effective_wd, torch.Tensor):
                         state["effective_wd"] = effective_wd.detach().item()

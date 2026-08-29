@@ -145,7 +145,9 @@ export interface TrainConfig {
     warmup_steps?: number;
     warmup_boost?: number;
     scale_lr_by_index?: boolean;
-    scale_lr_factor?: number;
+    scale_lr_mean?: number;
+    scale_lr_std?: number;
+    scale_lr_mask?: string[];
     beta1?: number | null;
     beta2?: number;
   };

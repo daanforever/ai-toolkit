@@ -1,7 +1,5 @@
 """Unit tests for Adafactor group-level warmup (_global_lr / _warmup_update_group)."""
 
-import math
-
 import pytest
 import torch
 
@@ -305,17 +303,20 @@ def test_warmup_scale_lr_lower_index_scale_finishes_earlier():
         weight_decay=0.0,
         factored=False,
         scale_lr_by_index=True,
-        scale_lr_factor=1.0,
+        scale_lr_mean=0.0,
+        scale_lr_std=0.5,
     )
     g_hi, g_lo, g_max = opt.param_groups
     eps0 = float(g_hi["eps"][0])
     eps1 = float(g_hi["eps"][1])
-    assert opt._index_lr_multiplier(g_hi) == pytest.approx(1.0)
-    assert opt._index_lr_multiplier(g_lo) == pytest.approx(math.exp(-0.5))
-    assert opt._index_lr_multiplier(g_max) == pytest.approx(math.exp(-1.0))
+    w_hi = opt._index_lr_multiplier(g_hi)
+    w_lo = opt._index_lr_multiplier(g_lo)
+    w_max = opt._index_lr_multiplier(g_max)
+    assert w_hi > w_lo > w_max
+    assert w_hi == pytest.approx(1.0)
 
     target_lo = opt._to_effective_lr(lr, g_lo)
-    assert target_lo == pytest.approx(lr * math.exp(-0.5) + eps0)
+    assert target_lo == pytest.approx(lr * w_lo + eps0)
 
     lr_start_u = lr * eps1
     delta_ref = (lr - lr_start_u) / steps
@@ -346,3 +347,110 @@ def test_warmup_scale_lr_lower_index_scale_finishes_earlier():
     assert "warmup_lr" not in g_lo
     assert g_lo["lr_mean"].item() == pytest.approx(target_lo)
     assert g_hi.get("warmup_active") is True or "warmup_lr" in g_hi
+
+
+def test_warmup_after_runtime_scale_lr_config_change():
+    """Runtime Gaussian config clears effective warmup and rebuilds on next step."""
+    p0 = torch.nn.Parameter(torch.ones(2))
+    p1 = torch.nn.Parameter(torch.ones(2))
+    lr = 1.0
+    steps = 10
+    opt = Adafactor(
+        [
+            {"params": [p0], "index": 0, "name": "layers_0"},
+            {"params": [p1], "index": 1, "name": "layers_1"},
+        ],
+        lr=lr,
+        relative_step=False,
+        scale_parameter=False,
+        warmup_init=True,
+        warmup_steps=steps,
+        beta1=None,
+        weight_decay=0.0,
+        factored=False,
+        scale_lr_by_index=True,
+        scale_lr_mean=0.0,
+        scale_lr_std=0.5,
+    )
+    g0, g1 = opt.param_groups
+
+    p0.grad = torch.zeros_like(p0)
+    p1.grad = torch.zeros_like(p1)
+    opt.step()
+    assert g0.get("warmup_lr_effective") is True
+    assert "warmup_lr" in g0
+    old_warmup = g0["warmup_lr"]
+
+    opt.set_scale_lr_config(mean=1.0, std=0.25, mask=["layers"])
+    assert g0.get("warmup_lr_effective") is None
+    assert "warmup_lr" not in g0
+    assert opt.scale_lr_mean == pytest.approx(1.0)
+    assert opt.scale_lr_std == pytest.approx(0.25)
+
+    p0.grad = torch.zeros_like(p0)
+    p1.grad = torch.zeros_like(p1)
+    opt.step()
+    assert g0.get("warmup_lr_effective") is True
+    assert "warmup_lr" in g0
+    # New segment starts from lr * eps1 in effective space under the new curve.
+    eps1 = float(g0["eps"][1])
+    expected_start = opt._to_effective_lr(lr * eps1, g0)
+    assert g0["warmup_lr"] == pytest.approx(expected_start)
+    assert g0["warmup_lr"] != pytest.approx(old_warmup)
+    assert g1.get("warmup_lr_effective") is True
+
+
+def test_warmup_mask_unmatched_to_matched_clears_stale_state():
+    """Mask change unmatched->matched must clear unscaled warmup and rebuild effective."""
+    p0 = torch.nn.Parameter(torch.ones(2))
+    p1 = torch.nn.Parameter(torch.ones(2))
+    lr = 1.0
+    steps = 10
+    opt = Adafactor(
+        [
+            {"params": [p0], "index": 0, "name": "layers_0"},
+            {"params": [p1], "index": 1, "name": "other_1"},
+        ],
+        lr=lr,
+        relative_step=False,
+        scale_parameter=False,
+        warmup_init=True,
+        warmup_steps=steps,
+        beta1=None,
+        weight_decay=0.0,
+        factored=False,
+        scale_lr_by_index=True,
+        scale_lr_mean=0.0,
+        scale_lr_std=0.5,
+        scale_lr_mask=["layers"],
+    )
+    g0, g1 = opt.param_groups
+    assert opt._scale_lr_applies(g0) is True
+    assert opt._scale_lr_applies(g1) is False
+
+    p0.grad = torch.zeros_like(p0)
+    p1.grad = torch.zeros_like(p1)
+    opt.step()
+    assert g0.get("warmup_lr_effective") is True
+    assert not g1.get("warmup_lr_effective")
+    assert "warmup_lr" in g1
+    stale_unscaled = g1["warmup_lr"]
+    assert stale_unscaled == pytest.approx(lr * float(g1["eps"][1]))
+
+    # Broaden mask so previously unmatched group becomes matched.
+    opt.set_scale_lr_config(mean=0.0, std=0.5, mask=["layers", "other"])
+    assert opt._scale_lr_applies(g1) is True
+    assert "warmup_lr" not in g1
+    assert "warmup_lr_effective" not in g1
+    assert "warmup_lr_previous" not in g1
+
+    p0.grad = torch.zeros_like(p0)
+    p1.grad = torch.zeros_like(p1)
+    opt.step()
+    assert g1.get("warmup_lr_effective") is True
+    eps1 = float(g1["eps"][1])
+    expected_start = opt._to_effective_lr(lr * eps1, g1)
+    assert g1["warmup_lr"] == pytest.approx(expected_start)
+    assert g1["warmup_lr"] != pytest.approx(stale_unscaled)
+    assert "warmup_lr_unscaled" in g1
+    assert g1["warmup_lr_unscaled"] == pytest.approx(lr * eps1)

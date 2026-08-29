@@ -1,5 +1,6 @@
 from collections import OrderedDict
 import json
+import math
 import os
 import sqlite3
 import asyncio
@@ -9,13 +10,26 @@ from toolkit.accelerator import unwrap_model
 from toolkit.data_loader import get_dataloader_datasets
 from toolkit.print import print_acc
 from toolkit.util.debug import is_debug_enabled
-from typing import Callable, List, Literal, Optional, Tuple, TypeVar
+from typing import Callable, List, Literal, NamedTuple, Optional, Tuple, TypeVar
 import threading
 import time
 import signal
 
 AITK_Status = Literal["running", "stopped", "error", "completed"]
 T = TypeVar("T")
+RuntimeScaleLrMaskStatus = Literal["absent", "invalid", "ok"]
+
+
+class RuntimeScaleLrMaskRead(NamedTuple):
+    """Typed outcome of reading runtime_scale_lr_mask from SQLite.
+
+    - status "ok": value is a list of strings (possibly empty [])
+    - status "absent": column missing, NULL, or blank; value is None
+    - status "invalid": malformed or partially invalid JSON; value is None
+    """
+
+    status: RuntimeScaleLrMaskStatus
+    value: Optional[List[str]] = None
 
 
 class DiffusionTrainer(SDTrainer):
@@ -62,7 +76,9 @@ class DiffusionTrainer(SDTrainer):
             self._last_applied_runtime_warmup_steps = None
             self._last_applied_runtime_warmup_boost = None
             self._last_applied_runtime_scale_lr_by_index = None
-            self._last_applied_runtime_scale_lr_factor = None
+            self._last_applied_runtime_scale_lr_config: Optional[
+                Tuple[float, float, Tuple[str, ...]]
+            ] = None
             self._last_applied_runtime_min_snr_gamma = None
             self._last_applied_runtime_debug = None
             self._last_applied_runtime_fc_key: Optional[
@@ -453,74 +469,181 @@ class DiffusionTrainer(SDTrainer):
 
         return _read()
 
-    def get_runtime_scale_lr_factor(self):
-        """Read runtime_scale_lr_factor from DB. Returns float or None."""
+    def get_runtime_scale_lr_mean(self) -> Optional[float]:
+        """Read runtime_scale_lr_mean from DB. Returns finite float or None."""
         if not self.is_ui_trainer:
             return None
 
         def _read():
             try:
-                return self._get_runtime_scalar("runtime_scale_lr_factor", float)
+                raw = self._get_runtime_scalar("runtime_scale_lr_mean", float)
             except sqlite3.OperationalError:
                 return None
+            except (ValueError, TypeError):
+                return None
+            if raw is None:
+                return None
+            try:
+                mean = float(raw)
+            except (ValueError, TypeError):
+                return None
+            if not math.isfinite(mean):
+                return None
+            return mean
 
         return _read()
 
-    def apply_runtime_scale_lr_factor(self):
-        """If runtime_scale_lr_factor is set in DB, apply it to optimizer (e.g. Adafactor)."""
+    def get_runtime_scale_lr_std(self) -> Optional[float]:
+        """Read runtime_scale_lr_std from DB. Returns positive finite float or None."""
         if not self.is_ui_trainer:
-            return
-        value = self.get_runtime_scale_lr_factor()
-        if value is None:
-            return
-        if value == self._last_applied_runtime_scale_lr_factor:
-            return
-        optimizer = unwrap_model(self.optimizer)
-        while getattr(optimizer, "optimizer", None) is not None:
-            optimizer = optimizer.optimizer
-        if hasattr(optimizer, "set_scale_lr_factor"):
-            if getattr(optimizer, "scale_lr_factor", None) == value:
-                self._last_applied_runtime_scale_lr_factor = value
-                return
-            if is_debug_enabled():
-                print_acc(f"\nruntime_scale_lr_factor from UI/DB: {value}")
-            try:
-                optimizer.set_scale_lr_factor(value)
-            except ValueError as e:
-                print_acc(f"\nruntime_scale_lr_factor from DB not applied: {e}")
-                self._last_applied_runtime_scale_lr_factor = value
-                return
-        else:
-            if is_debug_enabled():
-                print_acc(
-                    f"\nruntime_scale_lr_factor from DB not applied: optimizer has no "
-                    f"set_scale_lr_factor (type: {type(optimizer).__name__})"
-                )
-        self._last_applied_runtime_scale_lr_factor = value
+            return None
 
-    def apply_runtime_scale_lr_by_index(self):
-        """If runtime_scale_lr_by_index is set in DB, apply it to optimizer (e.g. Adafactor)."""
+        def _read():
+            try:
+                raw = self._get_runtime_scalar("runtime_scale_lr_std", float)
+            except sqlite3.OperationalError:
+                return None
+            except (ValueError, TypeError):
+                return None
+            if raw is None:
+                return None
+            try:
+                std = float(raw)
+            except (ValueError, TypeError):
+                return None
+            if not math.isfinite(std) or std <= 0.0:
+                return None
+            return std
+
+        return _read()
+
+    def _read_runtime_scale_lr_mask(self) -> RuntimeScaleLrMaskRead:
+        """Read runtime_scale_lr_mask JSON from DB as a typed status/value outcome."""
+        if not self.is_ui_trainer:
+            return RuntimeScaleLrMaskRead("absent")
+
+        def _read() -> RuntimeScaleLrMaskRead:
+            try:
+                with self._db_connect() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "SELECT runtime_scale_lr_mask FROM RuntimeParams WHERE jobId = ?",
+                        (self.job_id,),
+                    )
+                    row = cursor.fetchone()
+                    if row is None or row[0] is None:
+                        return RuntimeScaleLrMaskRead("absent")
+                    if isinstance(row[0], str) and row[0].strip() == "":
+                        return RuntimeScaleLrMaskRead("absent")
+                    try:
+                        raw = row[0] if isinstance(row[0], str) else str(row[0])
+                        parsed = json.loads(raw)
+                    except (ValueError, TypeError, json.JSONDecodeError):
+                        return RuntimeScaleLrMaskRead("invalid")
+                    if not isinstance(parsed, list):
+                        return RuntimeScaleLrMaskRead("invalid")
+                    out: List[str] = []
+                    for item in parsed:
+                        if not isinstance(item, str) or item == "":
+                            return RuntimeScaleLrMaskRead("invalid")
+                        out.append(item)
+                    return RuntimeScaleLrMaskRead("ok", out)
+            except sqlite3.OperationalError:
+                return RuntimeScaleLrMaskRead("absent")
+
+        return _read()
+
+    def get_runtime_scale_lr_mask(self) -> Optional[List[str]]:
+        """Read runtime_scale_lr_mask from DB. Returns list[str] or None.
+
+        Returns the list when status is ok (including []). Returns None for absent
+        and invalid; apply_runtime_scale_lr uses _read_runtime_scale_lr_mask to
+        distinguish invalid (abort) from absent (default mask []).
+        """
+        result = self._read_runtime_scale_lr_mask()
+        if result.status != "ok":
+            return None
+        values = result.value
+        if values is None:
+            return []
+        return values
+
+    def apply_runtime_scale_lr(self):
+        """Atomically apply runtime mean/std/mask then scale_lr_by_index to optimizer."""
         if not self.is_ui_trainer:
             return
-        value = self.get_runtime_scale_lr_by_index()
-        if value is None:
+
+        mean = self.get_runtime_scale_lr_mean()
+        std = self.get_runtime_scale_lr_std()
+        mask_result = self._read_runtime_scale_lr_mask()
+        by_index = self.get_runtime_scale_lr_by_index()
+
+        # Malformed / partially invalid mask: do not change optimizer at all.
+        if mask_result.status == "invalid":
             return
-        if value == self._last_applied_runtime_scale_lr_by_index:
+
+        if mask_result.status == "ok":
+            mask_list = mask_result.value if mask_result.value is not None else []
+        else:
+            # absent / NULL / missing column → treat as explicit empty clear for apply
+            mask_list = []
+
+        has_mean_std = mean is not None and std is not None
+
+        # Incomplete mean/std (only one present / non-finite / non-numeric): no apply.
+        if (mean is None) ^ (std is None):
             return
+
+        # Leftover by_index=true without valid mean/std: do not enable, do not change.
+        if by_index is True and not has_mean_std:
+            return
+
+        if not has_mean_std and by_index is None:
+            return
+
         optimizer = unwrap_model(self.optimizer)
         while getattr(optimizer, "optimizer", None) is not None:
             optimizer = optimizer.optimizer
+
+        if mean is not None and std is not None:
+            # Cache key is exactly (mean, std, tuple(mask)); [] is a valid explicit clear.
+            config_key = (mean, std, tuple(mask_list))
+            if config_key != self._last_applied_runtime_scale_lr_config:
+                if hasattr(optimizer, "set_scale_lr_config"):
+                    if is_debug_enabled():
+                        print_acc(
+                            f"\nruntime_scale_lr_config from UI/DB: "
+                            f"mean={mean} std={std} mask={mask_list}"
+                        )
+                    try:
+                        optimizer.set_scale_lr_config(mean, std, mask_list)
+                    except ValueError as e:
+                        print_acc(
+                            f"\nruntime_scale_lr_config from DB not applied: {e}"
+                        )
+                        return
+                else:
+                    if is_debug_enabled():
+                        print_acc(
+                            "\nruntime_scale_lr_config from DB not applied: optimizer "
+                            f"has no set_scale_lr_config (type: {type(optimizer).__name__})"
+                        )
+                self._last_applied_runtime_scale_lr_config = config_key
+
+        if by_index is None:
+            return
+        if by_index == self._last_applied_runtime_scale_lr_by_index:
+            return
         if hasattr(optimizer, "set_scale_lr_by_index"):
-            if getattr(optimizer, "scale_lr_by_index", None) == value:
-                self._last_applied_runtime_scale_lr_by_index = value
+            if getattr(optimizer, "scale_lr_by_index", None) == by_index:
+                self._last_applied_runtime_scale_lr_by_index = by_index
                 return
             if is_debug_enabled():
-                print_acc(f"\nruntime_scale_lr_by_index from UI/DB: {value}")
+                print_acc(f"\nruntime_scale_lr_by_index from UI/DB: {by_index}")
             try:
-                optimizer.set_scale_lr_by_index(value)
+                optimizer.set_scale_lr_by_index(by_index)
             except ValueError as e:
                 print_acc(f"\nruntime_scale_lr_by_index from DB not applied: {e}")
-                self._last_applied_runtime_scale_lr_by_index = value
                 return
         else:
             if is_debug_enabled():
@@ -528,7 +651,7 @@ class DiffusionTrainer(SDTrainer):
                     f"\nruntime_scale_lr_by_index from DB not applied: optimizer has no "
                     f"set_scale_lr_by_index (type: {type(optimizer).__name__})"
                 )
-        self._last_applied_runtime_scale_lr_by_index = value
+        self._last_applied_runtime_scale_lr_by_index = by_index
 
     def get_runtime_min_snr_gamma(self):
         """Read runtime_min_snr_gamma from DB (only when is_ui_trainer). Returns float or None."""
@@ -1333,7 +1456,7 @@ class DiffusionTrainer(SDTrainer):
         self._last_applied_runtime_warmup_steps = None
         self._last_applied_runtime_warmup_boost = None
         self._last_applied_runtime_scale_lr_by_index = None
-        self._last_applied_runtime_scale_lr_factor = None
+        self._last_applied_runtime_scale_lr_config = None
         self._last_applied_runtime_min_snr_gamma = None
         self._last_applied_runtime_debug = None
         self._last_applied_runtime_fc_key = None
@@ -1474,8 +1597,7 @@ class DiffusionTrainer(SDTrainer):
             self.apply_runtime_prompts()
             self.apply_runtime_warmup_steps()
             self.apply_runtime_warmup_boost()
-            self.apply_runtime_scale_lr_factor()
-            self.apply_runtime_scale_lr_by_index()
+            self.apply_runtime_scale_lr()
             self.apply_runtime_min_snr_gamma()
             self.apply_runtime_debug()
 

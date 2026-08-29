@@ -108,6 +108,8 @@ def get_optimizer(
             'saddle_point_threshold',
             'saddle_point_step',
             'min_lr',
+            'scale_lr_factor',
+            'weight_decay_max',
         )
         dropped = [k for k in _ADAFACTOR_DROPPED_KEYS if k in op]
         if dropped:

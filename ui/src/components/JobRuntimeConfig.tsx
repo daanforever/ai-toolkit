@@ -96,11 +96,45 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
   const scaleLrByIndex =
     optimizerParams?.scale_lr_by_index === true ||
     (optimizerParams as Record<string, unknown> | undefined)?.scale_lr_by_index === 1;
-  const scaleLrFactor =
-    optimizerParams?.scale_lr_factor != null &&
-      Number.isFinite(Number(optimizerParams.scale_lr_factor))
-      ? Number(optimizerParams.scale_lr_factor)
-      : 1.0;
+  const scaleLrMean =
+    optimizerParams?.scale_lr_mean != null &&
+      Number.isFinite(Number(optimizerParams.scale_lr_mean))
+      ? Number(optimizerParams.scale_lr_mean)
+      : null;
+  const scaleLrStd =
+    optimizerParams?.scale_lr_std != null &&
+      Number.isFinite(Number(optimizerParams.scale_lr_std))
+      ? Number(optimizerParams.scale_lr_std)
+      : null;
+  const [scaleLrMaskInput, setScaleLrMaskInput] = useState(() => {
+    const p = parseJobConfig(job.job_config);
+    const op = p?.config?.process?.[0]?.train?.optimizer_params;
+    const raw = op?.scale_lr_mask;
+    if (Array.isArray(raw)) {
+      return raw
+        .filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
+        .map((s) => s.trim())
+        .join(', ');
+    }
+    return '';
+  });
+
+  useEffect(() => {
+    const p = parseJobConfig(job.job_config);
+    const op = p?.config?.process?.[0]?.train?.optimizer_params;
+    const raw = op?.scale_lr_mask;
+    if (Array.isArray(raw)) {
+      setScaleLrMaskInput(
+        raw
+          .filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
+          .map((s) => s.trim())
+          .join(', ')
+      );
+    } else {
+      setScaleLrMaskInput('');
+    }
+  }, [job.job_config]);
+
   const beta1 = optimizerParams?.beta1 != null
     ? Number(optimizerParams.beta1)
     : null;
@@ -219,14 +253,36 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     process.train.content_or_style = contentOrStyle;
     const optimizerName = (process.train.optimizer || '').toLowerCase();
     const isHfAdafactor = optimizerName === 'hfadafactor' || optimizerName === 'hf_adafactor';
-    const op = process.train.optimizer_params as Record<string, number | string | boolean | null>;
+    const op = process.train.optimizer_params as Record<string, number | string | boolean | string[] | null>;
     op.weight_decay = weightDecay;
+
+    const scaleLrMask = scaleLrMaskInput
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+
+    if (!isHfAdafactor && scaleLrByIndex) {
+      if (scaleLrMean == null || !Number.isFinite(scaleLrMean)) {
+        setApplyStatus('error');
+        setErrorMessage('Scale LR mean must be a finite number when Scale LR by index is enabled');
+        return;
+      }
+      if (scaleLrStd == null || !Number.isFinite(scaleLrStd) || !(scaleLrStd > 0)) {
+        setApplyStatus('error');
+        setErrorMessage('Scale LR std must be a finite number > 0 when Scale LR by index is enabled');
+        return;
+      }
+    }
+
     if (isHfAdafactor) {
       delete op.weight_decay_increment;
       delete op.weight_decay_mode;
       delete op.warmup_steps;
       delete op.warmup_boost;
       delete op.scale_lr_by_index;
+      delete op.scale_lr_mean;
+      delete op.scale_lr_std;
+      delete op.scale_lr_mask;
       delete op.scale_lr_factor;
       delete op.beta2;
       delete op.min_lr;
@@ -241,7 +297,18 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
       op.warmup_steps = warmupSteps;
       op.warmup_boost = warmupBoost;
       op.scale_lr_by_index = scaleLrByIndex;
-      op.scale_lr_factor = scaleLrFactor;
+      if (scaleLrMean != null && Number.isFinite(scaleLrMean)) {
+        op.scale_lr_mean = scaleLrMean;
+      } else {
+        delete op.scale_lr_mean;
+      }
+      if (scaleLrStd != null && Number.isFinite(scaleLrStd) && scaleLrStd > 0) {
+        op.scale_lr_std = scaleLrStd;
+      } else {
+        delete op.scale_lr_std;
+      }
+      op.scale_lr_mask = scaleLrMask;
+      delete op.scale_lr_factor;
       op.beta1 = beta1;
       op.beta2 = beta2;
       delete op.min_lr;
@@ -381,7 +448,9 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         warmup_steps?: number;
         warmup_boost?: number;
         scale_lr_by_index?: boolean;
-        scale_lr_factor?: number;
+        scale_lr_mean?: number;
+        scale_lr_std?: number;
+        scale_lr_mask?: string[];
         min_snr_gamma?: number;
         debug?: boolean;
         fixed_cycle_timesteps?: number[];
@@ -410,11 +479,21 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         sample_every: sampleEvery,
         warmup_steps: warmupSteps,
         warmup_boost: warmupBoost,
-        scale_lr_by_index: scaleLrByIndex,
-        scale_lr_factor: scaleLrFactor,
         min_snr_gamma: minSnrGamma,
         debug,
       };
+      if (isHfAdafactor) {
+        patchBody.scale_lr_by_index = false;
+      } else {
+        patchBody.scale_lr_by_index = scaleLrByIndex;
+        patchBody.scale_lr_mask = scaleLrMask;
+        if (scaleLrMean != null && Number.isFinite(scaleLrMean)) {
+          patchBody.scale_lr_mean = scaleLrMean;
+        }
+        if (scaleLrStd != null && Number.isFinite(scaleLrStd) && scaleLrStd > 0) {
+          patchBody.scale_lr_std = scaleLrStd;
+        }
+      }
       if (lr != null && Number.isFinite(lr)) patchBody.lr = lr;
       if (process.datasets?.length) {
         patchBody.network_weights = process.datasets.map((d: { network_weight?: number }) => d.network_weight ?? 1);
@@ -483,7 +562,9 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     warmupSteps,
     warmupBoost,
     scaleLrByIndex,
-    scaleLrFactor,
+    scaleLrMean,
+    scaleLrStd,
+    scaleLrMaskInput,
     minSnrGamma,
     debug,
     datasets,
@@ -505,6 +586,18 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
       </div>
     );
   }
+
+  const optimizerNameForUi = (train?.optimizer || '').toLowerCase();
+  const isHfAdafactorUi =
+    optimizerNameForUi === 'hfadafactor' || optimizerNameForUi === 'hf_adafactor';
+  const scaleLrApplyBlocked =
+    !isHfAdafactorUi &&
+    scaleLrByIndex &&
+    (scaleLrMean == null ||
+      !Number.isFinite(scaleLrMean) ||
+      scaleLrStd == null ||
+      !Number.isFinite(scaleLrStd) ||
+      !(scaleLrStd > 0));
 
   return (
     <div className="max-w-2xl space-y-6 p-6">
@@ -648,18 +741,58 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
             </button>
           </div>
           <div className="space-y-2 flex-1 min-w-[140px]">
-            <p className="text-xs text-gray-400">Scale LR factor</p>
+            <p className="text-xs text-gray-400">Scale LR mean</p>
             <input
               type="number"
               step="any"
-              placeholder="e.g. 1.2"
-              value={scaleLrFactor}
+              placeholder="e.g. 15"
+              value={scaleLrMean ?? ''}
               onChange={(e) => {
-                const v = parseFloat(e.target.value);
-                if (Number.isFinite(v)) {
-                  setValue(v, `${OPTIMIZER_PARAMS_PATH}.scale_lr_factor`);
-                  setApplyStatus('idle');
+                const v = e.target.value.trim();
+                if (v === '') {
+                  setValue(undefined, `${OPTIMIZER_PARAMS_PATH}.scale_lr_mean`);
+                } else {
+                  const num = parseFloat(v);
+                  if (Number.isFinite(num)) {
+                    setValue(num, `${OPTIMIZER_PARAMS_PATH}.scale_lr_mean`);
+                  }
                 }
+                setApplyStatus('idle');
+              }}
+              className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+            />
+          </div>
+          <div className="space-y-2 flex-1 min-w-[140px]">
+            <p className="text-xs text-gray-400">Scale LR std</p>
+            <input
+              type="number"
+              step="any"
+              placeholder="e.g. 0.25"
+              value={scaleLrStd ?? ''}
+              onChange={(e) => {
+                const v = e.target.value.trim();
+                if (v === '') {
+                  setValue(undefined, `${OPTIMIZER_PARAMS_PATH}.scale_lr_std`);
+                } else {
+                  const num = parseFloat(v);
+                  if (Number.isFinite(num)) {
+                    setValue(num, `${OPTIMIZER_PARAMS_PATH}.scale_lr_std`);
+                  }
+                }
+                setApplyStatus('idle');
+              }}
+              className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+            />
+          </div>
+          <div className="space-y-2 flex-1 min-w-[180px]">
+            <p className="text-xs text-gray-400">Scale LR mask</p>
+            <input
+              type="text"
+              placeholder="e.g. layers_, attn"
+              value={scaleLrMaskInput}
+              onChange={(e) => {
+                setScaleLrMaskInput(e.target.value);
+                setApplyStatus('idle');
               }}
               className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
             />
@@ -1107,7 +1240,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
           <button
             type="button"
             onClick={handleApply}
-            disabled={applyStatus === 'loading'}
+            disabled={applyStatus === 'loading' || scaleLrApplyBlocked}
             className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {applyStatus === 'loading' ? '…' : 'Apply'}

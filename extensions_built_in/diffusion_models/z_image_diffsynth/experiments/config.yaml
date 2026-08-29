@@ -34,6 +34,7 @@ config:
       train:
         turbo_prior_steps: 8
         turbo_t_jitter: 0.5
+        turbo_teacher_weight: true
         lr: 0.0001
         min_snr_gamma: 0
         timestep_weighting: "none"
@@ -42,7 +43,7 @@ config:
         noise_scheduler: "flowmatch"
         prediction_type: "flowmatch"
         timestep_type: "turbo_prior"
-        content_or_style: "content"
+        content_or_style: "balanced"
         gaussian_mean: 1000
         gaussian_std: 0.55
         gaussian_mean_2: 120
@@ -97,9 +98,7 @@ config:
         debug_zimage_load: false
         name_or_path: "e:/Backup/huggingface/hub/models--Tongyi-MAI--Z-Image/snapshots/04cc4abb7c5069926f75c9bfde9ef43d49423021/"
         sampling_name_or_path: "e:/Backup/huggingface/hub/models--Tongyi-MAI--Z-Image-Turbo/snapshots/0e36c2b379e66fa531d01cc531c44919e5f1c6fd/"
-        # te_name_or_path: standalone HF CausalLM root (no tokenizer/text_encoder subfolders).
-        # te_name_or_path: "huihui-ai/Huihui-Qwen3.5-4B-abliterated"
-        # te_name_or_path: "huihui-ai/Huihui-Qwen3-4B-abliterated-v2"
+        te_name_or_path: "huihui-ai/Huihui-Qwen3-4B-abliterated-v2"
         quantize: true
         qtype: "qfloat8"
         quantize_te: true
@@ -151,3 +150,29 @@ config:
         sample_steps: 8
         num_frames: 1
         fps: 1
+      experiments:
+        step_timeout_s: 30.0
+        load_budget_s: 180.0
+        sample_budget_s: 0.0
+        training_seed: 4
+        cases:
+          - id: lr_vs_beta2
+            enabled: true
+            linear: 4
+            resolution: 512
+            dataset: one_ref
+            disable_sampling: true
+            warmup_init: false
+            weight_decay: 0.0
+            stochastic_rounding: false
+            stochastic_accumulation: false
+            lr_base: 1.0e-4
+            lr_hi: 4.0e-4
+            beta2_hi: 0.99          # prefix + continue + lr_x4
+            beta2_lo: 0.9           # hypothesized counterpart
+            prefix_steps: 100       # T0; window [T0, T0+measure)
+            measure_steps: 10
+            calibrate:
+              rel_tol: 0.25
+              cosine_min: 0.9
+              grid: [0.7, 0.8, 0.85, 0.88, 0.92, 0.95, 0.99]

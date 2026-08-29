@@ -74,7 +74,10 @@ model RuntimeParams {
   runtime_warmup_steps     Int?
   runtime_warmup_boost     Float?
   runtime_scale_lr_by_index Boolean?
-  runtime_scale_lr_factor  Float?
+  legacy_runtime_scale_lr_factor Float? @map("runtime_scale_lr_factor")
+  runtime_scale_lr_mean    Float?
+  runtime_scale_lr_std     Float?
+  runtime_scale_lr_mask    String?
   runtime_min_snr_gamma    Float?
   runtime_debug            Boolean?
   updated_at               DateTime @updatedAt

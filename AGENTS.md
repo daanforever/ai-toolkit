@@ -72,5 +72,3 @@ Follow these rules for codebase exploration and any interactions with testing:
 - Do not explain basic concepts unless explicitly asked.
 - If a one-sentence answer or a single code block suffices, provide only that. 
 - Minimize fluff. Be extremely concise and direct. 
-- Implementation/fix success: Respond ONLY with the word "Done: [short summary of the success]".
-- Implementation/fix problem/error: Respond ONLY with "A problem occurred: [summary of the problem]".

@@ -120,8 +120,34 @@ When aligning a job with [DiffSynth-Studio/examples](DiffSynth-Studio/examples/z
 - `use_diffsynth_training_loop: true` and the forced `linear_timesteps` behaviour above.
 - Latent caching: same VAE / latent layout as Z-Image training expects; invalidate cache when switching to pad-to-square.
 - Optimizer and batch size (toolkit `train` section vs script).
-  - Local toolkit Adafactor: `optimizer: "adafactor"`.
-  - Stock HF Adafactor: `optimizer: "hfadafactor"` — use nonzero `lr` with `relative_step: false` (manual), or `lr: 0` / `null` for paper relative schedule (`relative_step: true`).
+  - Local toolkit Adafactor: `optimizer: "adafactor"`. Optional Gaussian per-layer LR: see below. Stock configs leave it **off**.
+  - Stock HF Adafactor: `optimizer: "hfadafactor"` — use nonzero `lr` with `relative_step: false` (manual), or `lr: 0` / `null` for paper relative schedule (`relative_step: true`). HF path does not support `scale_lr_*`.
+
+## Adafactor Gaussian LR by layer index
+
+Local toolkit Adafactor (`optimizer: "adafactor"`) can scale **LR only** by a truncated Gaussian over LoRA param-group `index`. Weight decay stays the same for every group.
+
+Z-Image groups LoRA by DiT block (`name` = `layers_N`, `noise_refiner_N`, `context_refiner_N`, plus `*_magnitude` / `other`). **`index` is set only on `layers_*`** (typically `0..29`). Refiners, magnitude groups, and `other` keep the unscaled LR.
+
+| Key | Role |
+| --- | --- |
+| `scale_lr_by_index` | Enable. Default `false`. `true` without valid `mean`/`std` raises `ValueError` (job will not start). |
+| `scale_lr_mean` | Peak in **layer-index** space (e.g. `15` ≈ middle of 30 layers). Required when enabled. No numeric default. |
+| `scale_lr_std` | Width on the **normalized** `[0, 1]` axis. Finite and `> 0`. Required when enabled. No numeric default. |
+| `scale_lr_mask` | Optional case-sensitive substring **OR** on `group["name"]`. Omit / `[]` / `null` = all indexed groups. No match is not an error (those groups keep original LR). `max_index` is still taken from **all** indexed groups before the mask. |
+
+Weights are the same truncated-normal + min-max `[0, 1]` curve as timestep Gaussian. Runtime UI can change mean/std/mask (`set_scale_lr_config`) then toggle the flag.
+
+```yaml
+train:
+  optimizer: "adafactor"
+  optimizer_params:
+    scale_lr_by_index: true
+    scale_lr_mean: 15
+    scale_lr_std: 0.25
+    scale_lr_mask:
+      - layers
+```
 
 ## Tests
 
@@ -134,3 +160,4 @@ When aligning a job with [DiffSynth-Studio/examples](DiffSynth-Studio/examples/z
 - `test_spatial_attention.py` — pad validity → patch masks, adapter attn_mask, batch plumbing.
 - `testing/test_pad_to_square.py` — letterbox geometry, validity/loss masks, latent cache keys.
 - `testing/test_gaussian_full.py` — regression with `use_diffsynth_training_loop: false` (toolkit gaussian path).
+- `test_lora_param_groups.py` — LoRA block groups (`layers_N` + `index`; refiners unindexed).
