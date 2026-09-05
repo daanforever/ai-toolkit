@@ -6,7 +6,7 @@ import { Eye, Trash2, Pen, Play, Pause, Cog, X, RotateCcw, Eraser, ChevronsUp, C
 import { Button } from '@headlessui/react';
 import { openConfirm } from '@/components/ConfirmModal';
 import { Job } from '@prisma/client';
-import { startJob, stopJob, deleteJob, getAvaliableJobActions, markJobAsStopped, resetJob, clearSamplesAndLossLog, scaleJobLr } from '@/utils/jobs';
+import { startJob, stopJob, deleteJob, getAvaliableJobActions, markJobAsStopped, resetJob, clearSamplesAndLossLog, adjustJobLr } from '@/utils/jobs';
 import { startQueue } from '@/utils/queue';
 import { Menu, MenuButton, MenuItem, MenuItems } from '@headlessui/react';
 
@@ -31,17 +31,20 @@ export default function JobActionBar({
 }: JobActionBarProps) {
   const { canStart, canStop, canDelete, canEdit, canRemoveFromQueue, canReset, canClear } = getAvaliableJobActions(job);
   const [lrScaleBusy, setLrScaleBusy] = useState(false);
+  const [lrDeltaInput, setLrDeltaInput] = useState('0.0001');
 
   if (!afterDelete) afterDelete = onRefresh;
 
-  const handleScaleLr = async (factor: number) => {
+  const handleAdjustLr = async (sign: 1 | -1) => {
     if (lrScaleBusy || !canStop) return;
+    const value = Number(lrDeltaInput);
+    if (!Number.isFinite(value) || value <= 0) return;
     setLrScaleBusy(true);
     try {
-      await scaleJobLr(job, factor);
+      await adjustJobLr(job, sign * value);
       if (onRefresh) onRefresh();
     } catch (e) {
-      console.error('Error scaling job LR:', e);
+      console.error('Error adjusting job LR:', e);
     } finally {
       setLrScaleBusy(false);
     }
@@ -99,18 +102,26 @@ export default function JobActionBar({
       )}
       {showLrScale && canStop && (
         <>
-          <Button
-            onClick={() => handleScaleLr(2)}
+          <input
+            type="text"
+            value={lrDeltaInput}
+            onChange={e => setLrDeltaInput(e.target.value)}
             disabled={lrScaleBusy}
-            title="LR ×2"
+            title="LR step"
+            className="ml-2 w-20 inline-block align-middle rounded bg-gray-800 border border-gray-700 px-2 py-1 text-sm text-gray-200 focus:border-blue-500 focus:outline-none"
+          />
+          <Button
+            onClick={() => handleAdjustLr(1)}
+            disabled={lrScaleBusy}
+            title="LR +"
             className={`ml-2 opacity-100`}
           >
             <ChevronsUp />
           </Button>
           <Button
-            onClick={() => handleScaleLr(0.5)}
+            onClick={() => handleAdjustLr(-1)}
             disabled={lrScaleBusy}
-            title="LR ÷2"
+            title="LR -"
             className={`ml-2 opacity-100`}
           >
             <ChevronsDown />
