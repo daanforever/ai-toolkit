@@ -12,9 +12,6 @@ from toolkit.samplers.custom_flowmatch_sampler import (
 
 from .scheduler_config import STATIC_SHIFT, DYNAMIC_SHIFT_DEFAULTS
 
-# Mid-trajectory target for content_or_style=balanced under turbo_prior.
-TURBO_BALANCED_TARGET_T = 900.0
-
 
 def get_turbo_sigmas_and_timesteps(
     num_inference_steps: int,
@@ -63,29 +60,16 @@ def turbo_slot_dsigma_weights(n: int) -> torch.Tensor:
     return dsigma / dsigma.sum()
 
 
-def turbo_balanced_target_slot(centers: torch.Tensor) -> int:
-    """Index of the Turbo center nearest to ``TURBO_BALANCED_TARGET_T``."""
-    return int((centers - TURBO_BALANCED_TARGET_T).abs().argmin().item())
-
-
 def turbo_slot_sampling_weights(n: int, content_or_style: str) -> torch.Tensor:
-    """Slot sampling weights from dsigma, remapped by content_or_style.
+    """Slot sampling weights remapped by content_or_style.
 
     style = dsigma (last slot heaviest, ~30% on 8-step Turbo).
     content = reversed dsigma (first slot heaviest).
-    balanced = dsigma reflected onto the slot nearest to t=900.
+    balanced = uniform over slots (equal weight ``1/n``).
     """
+    if content_or_style == "balanced":
+        return torch.full((n,), 1.0 / n)
     dsigma = turbo_slot_dsigma_weights(n)
     if content_or_style == "content":
         return dsigma.flip(0)
-    if content_or_style == "balanced":
-        _, centers = get_turbo_sigmas_and_timesteps(
-            num_inference_steps=n,
-            use_dynamic_shifting=False,
-        )
-        target_idx = turbo_balanced_target_slot(centers)
-        dist = (torch.arange(n, dtype=torch.long) - target_idx).abs()
-        src = (n - 1 - dist).clamp(min=0)
-        w = dsigma[src]
-        return w / w.sum()
     return dsigma

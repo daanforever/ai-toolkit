@@ -169,12 +169,11 @@ class TimestepSampler:
     ) -> torch.Tensor:
         """Sample float t from the official Turbo NFE grid with Voronoi jitter.
 
-        Slots are multinomial-sampled from dsigma; ``content`` reverses dsigma
-        (first-heavy); ``style`` keeps dsigma (last-heavy); ``balanced``
-        reflects dsigma onto the slot nearest to t=750. No MSE slot-weight
-        multiply. ``turbo_slot_weighting`` is not an A/B option: if present and
-        not ``dsigma``, raise; if omitted, still dsigma family (content may
-        then flip; balanced remaps onto mid-trajectory).
+        Slots are multinomial-sampled; ``content`` reverses dsigma (first-heavy);
+        ``style`` keeps dsigma (last-heavy); ``balanced`` is uniform over slots.
+        No MSE slot-weight multiply. ``turbo_slot_weighting`` is not an A/B
+        option: if present and not ``dsigma``, raise; if omitted, still dsigma
+        family for content/style (balanced is equal weights).
 
         Jitter anneals from ``turbo_t_jitter`` (start) to ``turbo_t_jitter_end``
         over training steps: j = lerp(start, end, step_num / max(steps-1, 1)).
