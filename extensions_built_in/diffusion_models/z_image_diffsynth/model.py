@@ -224,6 +224,8 @@ class ZImageDiffSynthModel(BaseModel):
             else nullcontext()
         )
         with ctx:
+            if need_move:
+                self.print_and_status_update("\nMoving main transformer to GPU")
             self._place_training_dit(target)
             net = getattr(self, "network", None)
             if net is None or not hasattr(net, "force_to"):
@@ -298,6 +300,33 @@ class ZImageDiffSynthModel(BaseModel):
             gc.collect()
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
+
+    def _release_generate_workspace(self):
+        """Park VAE off CUDA and flush so sampling DiT D2H has headroom. Do not move either DiT."""
+        if not (
+            isinstance(self.device_torch, torch.device)
+            and self.device_torch.type == "cuda"
+        ):
+            return
+        self._flush_cuda()
+        vae = getattr(self, "vae", None)
+        if vae is not None and any(
+            getattr(p, "device", None) is not None
+            and torch.device(p.device).type == "cuda"
+            for p in vae.parameters()
+        ):
+            vae.to("cpu")
+        self._flush_cuda()
+
+    def _unload_sampling_transformer_after_generate(self):
+        if self._sampling_transformer is None:
+            return
+        if getattr(self, "_train_on_turbo", False):
+            return
+        self._release_generate_workspace()
+        self._move_sampling_transformer("cpu")
+        self._flush_cuda()
+        self.print_and_status_update("\nUnloaded sampling transformer to CPU")
 
     def _force_network_to(self, net, device) -> None:
         """Move a LoRA network via force_to, preserving trainable dtype."""
@@ -932,7 +961,16 @@ class ZImageDiffSynthModel(BaseModel):
                 self.print_and_status_update(
                     "\n[zimage_diffsynth] standalone sampling: restoring train DiT residency"
                 )
-            self.apply_turbo_teacher_mode(getattr(self, "_train_on_turbo", False))
+            train_on_turbo = getattr(self, "_train_on_turbo", False)
+            if train_on_turbo:
+                self.apply_turbo_teacher_mode(True)
+            else:
+                vae = getattr(self, "vae", None)
+                prev = vae.device if vae is not None else None
+                self._release_generate_workspace()
+                self.apply_turbo_teacher_mode(False)
+                if vae is not None and prev is not None:
+                    self.vae.to(prev)
 
     def generate_images(
         self,
@@ -983,7 +1021,11 @@ class ZImageDiffSynthModel(BaseModel):
                     ):
                         if saved_network is not None and not train_on_turbo:
                             self.network = saved_network
-                        self.apply_turbo_teacher_mode(train_on_turbo)
+                        if not train_on_turbo:
+                            self._flush_cuda()
+                            self.apply_turbo_teacher_mode(False)
+                        else:
+                            self.apply_turbo_teacher_mode(True)
 
                     self._log_device_state("after batch restore")
         finally:
