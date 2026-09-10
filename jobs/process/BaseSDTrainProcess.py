@@ -1788,15 +1788,6 @@ class BaseSDTrainProcess(BaseTrainProcess):
         # esure params require grad
         self.ensure_params_requires_grad(force=True)
         self.audit_trainable_base_params()
-        # Minimal verification mode for bf16 network weights:
-        # keep trainable optimization parameters in fp32 so grads accumulate in fp32.
-        _promo_dtype = self._resolve_network_dtype() if self.network_config is not None else get_torch_dtype(self.train_config.dtype)
-        if _promo_dtype in (torch.bfloat16,):
-            for param_group in self.params:
-                params_to_check = param_group.get("params", []) if isinstance(param_group, dict) else param_group
-                for param in params_to_check:
-                    if isinstance(param, torch.nn.Parameter) and param.requires_grad and param.dtype != torch.float32:
-                        param.data = param.data.to(dtype=torch.float32)
         optimizer = get_optimizer(self.params, optimizer_type, learning_rate=self.train_config.lr,
                                   optimizer_params=self.train_config.optimizer_params)
         self.optimizer = optimizer

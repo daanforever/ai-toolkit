@@ -275,4 +275,70 @@ def test_cpu_bf16_stochastic_rounding_falls_back_without_assert():
     p.grad = torch.ones_like(p, dtype=torch.bfloat16)
     opt.step()
     assert not torch.allclose(p.detach().float(), before)
+    assert p.dtype == torch.bfloat16
+
+
+def _adafactor_kwargs(**extra):
+    return dict(
+        lr=1e-2,
+        relative_step=False,
+        scale_parameter=False,
+        beta1=None,
+        weight_decay=0.0,
+        factored=False,
+        **extra,
+    )
+
+
+def test_bf16_param_registers_stoch_hook_and_stays_bf16():
+    p = torch.nn.Parameter(torch.ones(4, dtype=torch.bfloat16))
+    opt = Adafactor(
+        [p],
+        stochastic_accumulation=True,
+        stochastic_rounding=True,
+        **_adafactor_kwargs(),
+    )
+    assert getattr(p, "_adafactor_stoch_hook", None) is not None
+    p.grad = torch.ones_like(p)
+    opt.step()
+    assert p.dtype == torch.bfloat16
+    assert opt.param_groups[0].get("rms_ema") is None or (
+        opt.param_groups[0]["rms_ema"].dtype == torch.bfloat16
+    )
+
+
+def test_fp32_param_skips_stochastic_accum_hook():
+    p = torch.nn.Parameter(torch.ones(4, dtype=torch.float32))
+    Adafactor(
+        [p],
+        stochastic_accumulation=True,
+        stochastic_rounding=True,
+        **_adafactor_kwargs(),
+    )
+    assert getattr(p, "_adafactor_stoch_hook", None) is None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_bf16_cuda_stochastic_rounding_uses_copy_stochastic(monkeypatch):
+    from toolkit.optimizers.optimizer_utils import copy_stochastic as orig_copy
+
+    device = torch.device("cuda")
+    p = torch.nn.Parameter(torch.ones(4, device=device, dtype=torch.bfloat16))
+    calls = {"n": 0}
+
+    def _spy(target, source, eps=None):
+        calls["n"] += 1
+        orig_copy(target, source, eps)
+
+    monkeypatch.setattr("toolkit.optimizers.adafactor.copy_stochastic", _spy)
+    opt = Adafactor(
+        [p],
+        stochastic_accumulation=False,
+        stochastic_rounding=True,
+        **_adafactor_kwargs(),
+    )
+    p.grad = torch.ones_like(p)
+    opt.step()
+    assert calls["n"] == 1
+    assert p.dtype == torch.bfloat16
 

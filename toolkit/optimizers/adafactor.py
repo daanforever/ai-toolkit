@@ -368,7 +368,7 @@ class Adafactor(torch.optim.Optimizer):
 
     @staticmethod
     def _compute_gaussian_lr_weights(
-        ntt: int, mean: float, std: float
+        ntt: int, mean: float, std: float, dtype: Optional[torch.dtype] = None
     ) -> torch.Tensor:
         """Truncated-normal weights on ``0..ntt-1``, max-normalized so the peak is 1.
 
@@ -378,7 +378,8 @@ class Adafactor(torch.optim.Optimizer):
         if ntt < 2:
             raise ValueError(f"gaussian LR lookup requires ntt >= 2, got ntt={ntt}")
         denom = float(ntt - 1)
-        t = torch.arange(ntt, dtype=torch.float32, device="cpu") / denom
+        # Index identity needs a counting dtype (int/float32); ntt≈1000 is not exact in bf16.
+        t = torch.arange(ntt, device="cpu").to(torch.float32) / denom
         mu_normalized = float(mean) / denom
         sigma = float(std)
         z_lower = (0.0 - mu_normalized) / sigma
@@ -391,7 +392,10 @@ class Adafactor(torch.optim.Optimizer):
         raw = phi / (sigma * normalization + 1e-8)
         safe_raw = torch.nan_to_num(raw, nan=0.0, posinf=0.0, neginf=0.0)
         max_value = safe_raw.max().clamp(min=1e-8)
-        return (safe_raw / max_value).clamp_(0.0, 1.0)
+        pdf = (safe_raw / max_value).clamp_(0.0, 1.0)
+        if dtype is not None:
+            pdf = pdf.to(dtype)
+        return pdf
 
     def _rebuild_scale_lr_lookup(self) -> None:
         self._scale_lr_lookup = None
@@ -403,8 +407,15 @@ class Adafactor(torch.optim.Optimizer):
         ):
             return
         ntt = int(self._max_index) + 1
+        pdf_dtype = None
+        for group in self.param_groups:
+            for p in group["params"]:
+                pdf_dtype = p.dtype
+                break
+            if pdf_dtype is not None:
+                break
         self._scale_lr_lookup = self._compute_gaussian_lr_weights(
-            ntt, float(self.scale_lr_mean), float(self.scale_lr_std)
+            ntt, float(self.scale_lr_mean), float(self.scale_lr_std), dtype=pdf_dtype
         )
 
     def _clear_stale_effective_warmup_state(self) -> None:
@@ -1183,7 +1194,7 @@ class Adafactor(torch.optim.Optimizer):
             if p not in self.state or state_key not in self.state[p]:
                 continue
             val = self.state[p][state_key]
-            v_t = torch.as_tensor(val, device=p.device, dtype=torch.float32)
+            v_t = torch.as_tensor(val, device=p.device, dtype=p.dtype)
             if device is None:
                 device = v_t.device
             values.append(v_t.to(device))
@@ -1191,7 +1202,7 @@ class Adafactor(torch.optim.Optimizer):
         if not values:
             return default
         v_stacked = torch.stack(values)
-        w_stacked = torch.tensor(weights, device=device, dtype=torch.float32)
+        w_stacked = torch.tensor(weights, device=device, dtype=values[0].dtype)
         if reduction == 'max':
             return v_stacked.max().item()
         weighted_sum = torch.sum(v_stacked * w_stacked)
@@ -1211,7 +1222,7 @@ class Adafactor(torch.optim.Optimizer):
                 if p not in self.state or state_key not in self.state[p]:
                     continue
                 val = self.state[p][state_key]
-                v_t = torch.as_tensor(val, device=p.device, dtype=torch.float32)
+                v_t = torch.as_tensor(val, device=p.device, dtype=p.dtype)
                 if device is None:
                     device = v_t.device
                 values.append(v_t.to(device))
@@ -1219,7 +1230,7 @@ class Adafactor(torch.optim.Optimizer):
         if not values:
             return None
         v_stacked = torch.stack(values)
-        w_stacked = torch.tensor(weights, device=device, dtype=torch.float32)
+        w_stacked = torch.tensor(weights, device=device, dtype=values[0].dtype)
         weighted_sum = torch.sum(v_stacked * w_stacked)
         total_weight = torch.sum(w_stacked)
         return (weighted_sum / (total_weight + 1e-12)).item()
@@ -1301,6 +1312,7 @@ class Adafactor(torch.optim.Optimizer):
             return
 
         ref_device = params_list[0].device
+        ref_dtype = params_list[0].dtype
         total_numel = sum(p.numel() for p in params_list)
 
         avg_rms = self._get_group_scalars(
@@ -1317,7 +1329,7 @@ class Adafactor(torch.optim.Optimizer):
         for p, _, _, gns_t in metrics:
             if gns_t is None or self.state.get(p) is None:
                 continue
-            v_t = torch.as_tensor(gns_t, device=p.device, dtype=torch.float32).reshape(())
+            v_t = torch.as_tensor(gns_t, device=p.device, dtype=p.dtype).reshape(())
             if device_g is None:
                 device_g = v_t.device
             gns_values.append(v_t.to(device_g))
@@ -1325,29 +1337,29 @@ class Adafactor(torch.optim.Optimizer):
 
         dr = float(group["rms_max_decay_rate"])
         if "rms_ema" not in group:
-            group["rms_ema"] = torch.tensor(avg_rms, dtype=torch.float32, device=ref_device)
+            group["rms_ema"] = torch.tensor(avg_rms, dtype=ref_dtype, device=ref_device)
         else:
             prev = self._group_scalar_item(group, "rms_ema", 0.0)
             group["rms_ema"] = torch.tensor(
-                prev * dr + avg_rms * (1.0 - dr), dtype=torch.float32, device=ref_device
+                prev * dr + avg_rms * (1.0 - dr), dtype=ref_dtype, device=ref_device
             )
         group["lr_mean"] = torch.tensor(
-            sum_lr_weighted / total_numel, dtype=torch.float32, device=ref_device
+            sum_lr_weighted / total_numel, dtype=ref_dtype, device=ref_device
         )
         if gns_values:
             gv = torch.stack(gns_values)
-            gw = torch.tensor(gns_weights, device=device_g, dtype=torch.float32)
+            gw = torch.tensor(gns_weights, device=device_g, dtype=ref_dtype)
             avg_gns = (torch.sum(gv * gw) / (torch.sum(gw) + 1e-12)).item()
-            group["gns"] = torch.tensor(avg_gns, dtype=torch.float32, device=ref_device)
+            group["gns"] = torch.tensor(avg_gns, dtype=ref_dtype, device=ref_device)
         else:
-            group["gns"] = torch.tensor(0.0, dtype=torch.float32, device=ref_device)
+            group["gns"] = torch.tensor(0.0, dtype=ref_dtype, device=ref_device)
 
         for key in ("effective_lr", "effective_wd", "precond_gain", "momentum_gain", "beta2_effective"):
             val = self._get_group_scalars(
                 group, key, default=0.0, reduction='mean', params=params_list
             )
             group[key] = torch.tensor(
-                val, dtype=torch.float32, device=ref_device
+                val, dtype=ref_dtype, device=ref_device
             )
 
     @staticmethod
@@ -1539,7 +1551,9 @@ class Adafactor(torch.optim.Optimizer):
                 else:
                     signal_sq = current_update_sq.detach()
                 gns_tensor = (current_update_sq - signal_sq) / (signal_sq + 1e-12)
-                state["beta2_update_sq_ema"] = signal_sq * beta2 + current_update_sq.detach() * (1.0 - beta2)
+                state["beta2_update_sq_ema"] = (
+                    signal_sq * beta2 + current_update_sq.detach() * (1.0 - beta2)
+                ).to(dtype=p.dtype)
                 state["beta2_effective"] = float(beta2)
 
                 if use_first_moment:

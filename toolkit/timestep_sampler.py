@@ -9,6 +9,7 @@ from typing import List, Optional, Any
 import torch
 
 from toolkit.basic import value_map
+from toolkit.train_tools import get_torch_dtype
 from extensions_built_in.sd_trainer.gaussian_timestep_weights import (
     evaluate_gaussian_timestep,
     evaluate_gaussian_timestep_bimodal,
@@ -86,6 +87,10 @@ class TimestepSampler:
 
     def _descending_noise_slots(self) -> bool:
         return schedule_uses_descending_noise_slots(self.noise_scheduler, self.train_config)
+
+    def _train_torch_dtype(self) -> torch.dtype:
+        dt = get_torch_dtype(getattr(self.train_config, "dtype", None))
+        return dt if isinstance(dt, torch.dtype) else torch.float32
 
     def sample(
         self,
@@ -205,7 +210,8 @@ class TimestepSampler:
             num_inference_steps=n_steps,
             use_dynamic_shifting=False,
         )
-        centers = centers.to(device=latents.device, dtype=torch.float32)
+        train_dtype = self._train_torch_dtype()
+        centers = centers.to(device=latents.device, dtype=train_dtype)
         n = centers.numel()
         if n == 0:
             raise ValueError("turbo_prior: empty Turbo timestep grid")
@@ -223,7 +229,7 @@ class TimestepSampler:
                 deltas[i] = torch.minimum(d_prev, d_next)
 
         weights = turbo_slot_sampling_weights(n, content_or_style).to(
-            device=latents.device, dtype=torch.float32
+            device=latents.device, dtype=train_dtype
         )
         slot = torch.multinomial(weights, batch_size, replacement=True)
         t_i = centers[slot]
@@ -305,12 +311,13 @@ class TimestepSampler:
         all_indices = torch.arange(
             allowed_start, allowed_end + 1, device=latents.device, dtype=torch.long
         )
+        train_dtype = self._train_torch_dtype()
         weights = evaluate_gaussian_timestep(
             all_indices.to(dtype=torch.float32),
             self.train_config.gaussian_mean,
             self.train_config.gaussian_std,
             latents.device,
-            torch.float32,
+            train_dtype,
             ntt,
             noise_scheduler_timesteps=self.noise_scheduler.timesteps,
             gaussian_shift=getattr(self.train_config, "gaussian_shift", 0.0),
@@ -336,6 +343,7 @@ class TimestepSampler:
         all_indices = torch.arange(
             allowed_start, allowed_end + 1, device=latents.device, dtype=torch.long
         )
+        train_dtype = self._train_torch_dtype()
         weights = evaluate_gaussian_timestep_bimodal(
             all_indices.to(dtype=torch.float32),
             self.train_config.gaussian_mean,
@@ -343,7 +351,7 @@ class TimestepSampler:
             self.train_config.gaussian_mean_2,
             self.train_config.gaussian_std_2,
             latents.device,
-            torch.float32,
+            train_dtype,
             ntt,
             noise_scheduler_timesteps=self.noise_scheduler.timesteps,
             gaussian_shift=getattr(self.train_config, "gaussian_shift", 0.0),

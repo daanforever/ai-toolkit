@@ -69,6 +69,7 @@ except Exception:
 
 from toolkit.job import run_job
 from toolkit.timestep_sampler import TimestepSampler
+from toolkit.train_tools import get_torch_dtype
 from extensions_built_in.diffusion_models.z_image_diffsynth.test_train import (
     NUM_SOURCE_IMAGES,
     TEST_TRAIN_IMAGE_CACHE,
@@ -482,10 +483,18 @@ def _install_t_collector() -> None:
                 num_inference_steps=TURBO_PRIOR_STEPS,
                 use_dynamic_shifting=False,
             )
-            centers = centers.to(device=latents.device, dtype=torch.float32)
+            train_dtype = get_torch_dtype(getattr(self.train_config, "dtype", None))
+            if not isinstance(train_dtype, torch.dtype):
+                train_dtype = latents.dtype
+            centers = centers.to(device=latents.device, dtype=train_dtype)
             t = centers[force_slot].expand(int(batch_size)).clone()
         else:
             t = _orig(self, batch_size, latents, step_num, content_or_style)
+        expected_t = get_torch_dtype(getattr(self.train_config, "dtype", None))
+        if isinstance(expected_t, torch.dtype) and t.dtype != expected_t:
+            raise RuntimeError(
+                f"Acceptance fail: sampled t dtype {t.dtype} != train.dtype {expected_t}"
+            )
         _COLLECTED_T.extend(t.detach().float().cpu().tolist())
         return t
 
@@ -727,6 +736,15 @@ def _install_te_cache_vram_probe() -> None:
         return out
 
     def _gen(self, *args, **kwargs):
+        quantize = bool(getattr(getattr(self, "model_config", None), "quantize", True))
+        if not quantize:
+            for name in ("network", "_sampling_network"):
+                net = getattr(self, name, None)
+                if net is not None and getattr(net, "can_merge_in", False):
+                    raise RuntimeError(
+                        "Acceptance fail: unquantized generate_images still has "
+                        f"{name}.can_merge_in=True"
+                    )
         _log_te_cache_vram("generate_images:enter", self)
         try:
             return _orig_gen(self, *args, **kwargs)
@@ -891,6 +909,19 @@ def _install_lora_init_snapshot(init_path: Path) -> None:
         path = _LORA_INIT_PATH
         if path is None:
             raise RuntimeError("Acceptance fail: LoRA init snapshot path unset")
+        nc = getattr(self, "network_config", None)
+        train = getattr(self, "train_config", None)
+        raw = getattr(nc, "dtype", None) if nc is not None else None
+        if raw is None and train is not None:
+            raw = getattr(train, "dtype", None)
+        expected = get_torch_dtype(raw)
+        if isinstance(expected, torch.dtype):
+            for p in network.parameters():
+                if p.requires_grad and p.dtype != expected:
+                    raise RuntimeError(
+                        f"Acceptance fail: LoRA param dtype {p.dtype} != "
+                        f"network.dtype {expected}"
+                    )
         path.parent.mkdir(parents=True, exist_ok=True)
         network.save_weights(str(path), dtype=torch.bfloat16, metadata=None)
         _log(f"[lora-delta] init snapshot saved: {path}")

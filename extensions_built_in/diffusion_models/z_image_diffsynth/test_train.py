@@ -501,6 +501,7 @@ def _attach_lora_for_inference(sd, lora_path: str) -> None:
         conv_alpha=0,
         rank_dropout=0.01,
         pretrained_lora_path=lora_path,
+        dtype="fp32",
         network_kwargs={
             "ignore_if_contains": [],
             "lora_down_init_scale": 1,
@@ -556,7 +557,9 @@ def _attach_lora_for_inference(sd, lora_path: str) -> None:
                 unet=sd.get_model_to_train(),
                 **common,
             )
-        main_network.force_to(sd.device_torch, dtype=torch.float32)
+        main_network.force_to(
+            sd.device_torch, dtype=get_torch_dtype(network_config.dtype)
+        )
         main_network.apply_to(
             sd.text_encoder,
             sd.unet,
@@ -566,6 +569,7 @@ def _attach_lora_for_inference(sd, lora_path: str) -> None:
         main_network.load_weights(lora_path)
         main_network.multiplier = 1.0
         main_network._update_torch_multiplier()
+        main_network.can_merge_in = False
         sd.network = main_network
 
     if getattr(sd, "_sampling_transformer", None) is not None:
@@ -589,6 +593,7 @@ def _attach_lora_for_inference(sd, lora_path: str) -> None:
             )
             sampling_network.multiplier = 1.0
             sampling_network._update_torch_multiplier()
+            sampling_network.can_merge_in = False
             sd._sampling_network = sampling_network
 
 

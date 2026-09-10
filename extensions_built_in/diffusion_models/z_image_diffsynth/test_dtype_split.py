@@ -4,6 +4,7 @@ import os
 import sys
 import types
 import unittest
+from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
@@ -514,6 +515,67 @@ class TestDiffusersGetNoisePredictionDtypeGate(unittest.TestCase):
         )
         self.assertEqual(out.dtype, torch.float32)
         self.assertEqual(out.shape, latents.shape)
+
+
+class TestTimestepSamplerTrainDtype(unittest.TestCase):
+    def test_turbo_prior_sampled_t_follows_train_dtype(self):
+        from toolkit.timestep_sampler import TimestepSampler
+
+        cfg = SimpleNamespace(
+            noise_scheduler="flowmatch",
+            timestep_type="turbo_prior",
+            turbo_prior_steps=8,
+            turbo_t_jitter=0.0,
+            num_train_timesteps=1000,
+            min_denoising_steps=0,
+            max_denoising_steps=999,
+            content_or_style="balanced",
+            steps=1000,
+            dtype="bf16",
+        )
+        sched = SimpleNamespace(timesteps=torch.arange(1000, 0, -1).float())
+        sampler = TimestepSampler(cfg, sched)
+        latents = torch.zeros(1, 16, 8, 8)
+        result = sampler.sample(
+            batch_size=1,
+            latents=latents,
+            content_or_style="balanced",
+            min_noise_steps=0,
+            max_noise_steps=999,
+            num_train_timesteps=1000,
+            device=torch.device("cpu"),
+            step_num=0,
+        )
+        self.assertEqual(result.timesteps.dtype, torch.bfloat16)
+
+    def test_gaussian_sampling_weights_use_train_dtype(self):
+        from unittest.mock import patch
+
+        from toolkit.timestep_sampler import TimestepSampler
+
+        cfg = SimpleNamespace(
+            noise_scheduler="flowmatch",
+            timestep_type="linear",
+            gaussian_mean=450,
+            gaussian_std=0.45,
+            gaussian_shift=0.0,
+            dtype="bf16",
+        )
+        sched = SimpleNamespace(timesteps=torch.linspace(1000, 1, 1000))
+        sampler = TimestepSampler(cfg, sched)
+        latents = torch.zeros(1, 16, 8, 8)
+        captured = {}
+
+        def _capture(timesteps, mu, sigma, device, dtype, ntt, **kwargs):
+            captured["dtype"] = dtype
+            return torch.ones(int(timesteps.shape[0]), device=device, dtype=dtype)
+
+        with patch(
+            "toolkit.timestep_sampler.evaluate_gaussian_timestep",
+            _capture,
+        ):
+            sampler._sample_gaussian(2, latents, 0, 999, 1000)
+        self.assertEqual(captured["dtype"], torch.bfloat16)
 
 
 if __name__ == "__main__":

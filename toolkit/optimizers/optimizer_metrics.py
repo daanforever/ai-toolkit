@@ -35,13 +35,6 @@ class OptimizerStepMetrics:
         return tensor.norm(2) / (tensor.numel() ** 0.5)
 
     @staticmethod
-    def _param_fp32(p: torch.nn.Parameter) -> torch.Tensor:
-        data = p.data
-        if data.dtype != torch.float32:
-            return data.float()
-        return data
-
-    @staticmethod
     def _scalar_item(store: dict, key: str, default: float = 0.0) -> float:
         t = store.get(key)
         if t is None:
@@ -123,14 +116,11 @@ class OptimizerStepMetrics:
             for p in group["params"]:
                 if p.grad is None or not p.requires_grad:
                     continue
-                p_fp32 = self._param_fp32(p)
-                snapshot = p_fp32.detach().clone()
+                snapshot = p.data.detach().clone()
                 self._snapshots[id(p)] = snapshot
 
                 param_rms = self._rms(snapshot)
                 grad = p.grad
-                if grad.dtype != torch.float32:
-                    grad = grad.to(torch.float32)
                 grad_rms = self._rms(grad)
 
                 self._maybe_running_max(gs, "rms_max", param_rms)
@@ -149,28 +139,29 @@ class OptimizerStepMetrics:
         if not rows:
             return
         ref_device = rows[0][0].device
+        ref_dtype = rows[0][0].dtype
         pr_values = []
         gr_values = []
         weights = []
         for _p, param_rms, grad_rms, numel in rows:
-            pr_values.append(torch.as_tensor(param_rms, device=ref_device, dtype=torch.float32))
-            gr_values.append(torch.as_tensor(grad_rms, device=ref_device, dtype=torch.float32))
+            pr_values.append(torch.as_tensor(param_rms, device=ref_device, dtype=ref_dtype))
+            gr_values.append(torch.as_tensor(grad_rms, device=ref_device, dtype=ref_dtype))
             weights.append(numel)
-        w = torch.tensor(weights, device=ref_device, dtype=torch.float32)
+        w = torch.tensor(weights, device=ref_device, dtype=ref_dtype)
         pr = torch.stack(pr_values)
         gr = torch.stack(gr_values)
         avg_rms = (torch.sum(pr * w) / (torch.sum(w) + 1e-12)).item()
         avg_gr = (torch.sum(gr * w) / (torch.sum(w) + 1e-12)).item()
-        gs["param_rms"] = torch.tensor(avg_rms, dtype=torch.float32, device=ref_device)
-        gs["grad_rms"] = torch.tensor(avg_gr, dtype=torch.float32, device=ref_device)
+        gs["param_rms"] = torch.tensor(avg_rms, dtype=ref_dtype, device=ref_device)
+        gs["grad_rms"] = torch.tensor(avg_gr, dtype=ref_dtype, device=ref_device)
 
         if "rms_ema" not in gs:
-            gs["rms_ema"] = torch.tensor(avg_rms, dtype=torch.float32, device=ref_device)
+            gs["rms_ema"] = torch.tensor(avg_rms, dtype=ref_dtype, device=ref_device)
         else:
             prev = self._scalar_item(gs, "rms_ema", 0.0)
             gs["rms_ema"] = torch.tensor(
                 prev * self.rms_max_decay_rate + avg_rms * (1.0 - self.rms_max_decay_rate),
-                dtype=torch.float32,
+                dtype=ref_dtype,
                 device=ref_device,
             )
 
@@ -189,13 +180,14 @@ class OptimizerStepMetrics:
                 continue
 
             ref_device = rows[0][0].device
+            ref_dtype = rows[0][0].dtype
             ur_values = []
             ur_weights = []
             for p, _param_rms, _grad_rms, numel in rows:
                 snap = self._snapshots.pop(id(p), None)
                 if snap is None:
                     continue
-                p_after = self._param_fp32(p).detach()
+                p_after = p.data.detach()
                 if snap.device != p_after.device:
                     snap = snap.to(p_after.device)
                 if snap.dtype != p_after.dtype:
@@ -203,7 +195,7 @@ class OptimizerStepMetrics:
                 update_rms = self._rms(snap - p_after)
                 self._maybe_running_max(gs, "update_rms_max", update_rms)
                 ur_values.append(
-                    torch.as_tensor(update_rms, device=ref_device, dtype=torch.float32).reshape(())
+                    torch.as_tensor(update_rms, device=ref_device, dtype=ref_dtype).reshape(())
                 )
                 ur_weights.append(numel)
 
@@ -211,11 +203,11 @@ class OptimizerStepMetrics:
                 continue
 
             ur = torch.stack(ur_values)
-            w = torch.tensor(ur_weights, device=ref_device, dtype=torch.float32)
+            w = torch.tensor(ur_weights, device=ref_device, dtype=ref_dtype)
             avg_ur = (torch.sum(ur * w) / (torch.sum(w) + 1e-12)).item()
-            gs["update_rms"] = torch.tensor(avg_ur, dtype=torch.float32, device=ref_device)
+            gs["update_rms"] = torch.tensor(avg_ur, dtype=ref_dtype, device=ref_device)
 
-            eps_t = torch.tensor(self.eps, dtype=torch.float32, device=ref_device)
+            eps_t = torch.tensor(self.eps, dtype=ref_dtype, device=ref_device)
             u_rms_t = gs["update_rms"]
             u_max = gs.get("update_rms_max")
             if u_max is None:
@@ -223,14 +215,14 @@ class OptimizerStepMetrics:
             elif isinstance(u_max, torch.Tensor):
                 u_max = u_max.to(ref_device)
             else:
-                u_max = torch.tensor(float(u_max), dtype=torch.float32, device=ref_device)
+                u_max = torch.tensor(float(u_max), dtype=ref_dtype, device=ref_device)
             g_mean_t = gs.get("grad_rms")
             if g_mean_t is None:
-                g_mean_t = torch.tensor(0.0, dtype=torch.float32, device=ref_device)
+                g_mean_t = torch.tensor(0.0, dtype=ref_dtype, device=ref_device)
             elif isinstance(g_mean_t, torch.Tensor):
                 g_mean_t = g_mean_t.to(ref_device)
             else:
-                g_mean_t = torch.tensor(float(g_mean_t), dtype=torch.float32, device=ref_device)
+                g_mean_t = torch.tensor(float(g_mean_t), dtype=ref_dtype, device=ref_device)
             gs["step_efficiency"] = u_rms_t / (u_max + eps_t)
             gs["dynamic_gain"] = u_rms_t / (g_mean_t + eps_t)
 

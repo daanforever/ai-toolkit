@@ -27,6 +27,13 @@ from .vae_wrapper import DiffSynthVAEWrapper
 scheduler_config = build_scheduler_config(use_dynamic_shifting=False)
 
 
+def _disable_network_merge_in(sd) -> None:
+    """Force residual LoRA on generate; never clone org Linear to fp32 via merge_in."""
+    for net in (getattr(sd, "network", None), getattr(sd, "_sampling_network", None)):
+        if net is not None and hasattr(net, "can_merge_in"):
+            net.can_merge_in = False
+
+
 def _resolve_use_dynamic_shifting(model_kwargs):
     """Resolve dynamic time shifting from model_kwargs (default False)."""
     mk = model_kwargs or {}
@@ -932,6 +939,7 @@ class ZImageDiffSynthModel(BaseModel):
         image_configs: List[GenerateImageConfig],
         sampler=None,
     ):
+        _disable_network_merge_in(self)
         saved_network = None
         train_on_turbo = getattr(self, "_train_on_turbo", False)
         use_sampling = (

@@ -3,6 +3,7 @@
 from toolkit.extension import Extension
 from toolkit.print import print_acc
 from extensions_built_in.sd_trainer.DiffusionTrainer import DiffusionTrainer
+from .model import _disable_network_merge_in
 
 
 def _read_use_diffsynth_training_loop_from_config(config) -> bool:
@@ -306,6 +307,7 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
                 bool(getattr(self.train_config, "turbo_teacher_weight", False))
             )
             self.network = sd.network
+            _disable_network_merge_in(sd)
             sd.gradient_checkpointing = bool(
                 getattr(self.train_config, "gradient_checkpointing", True)
             )
