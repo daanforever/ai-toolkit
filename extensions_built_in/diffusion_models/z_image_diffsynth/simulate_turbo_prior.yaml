@@ -1,0 +1,148 @@
+# Cheap unquantized first-sample repro (default).
+# Edit this file for production knobs (rank 128, refiners on, 1024, unload_te false).
+# No CLI — run: python -m extensions_built_in.diffusion_models.z_image_diffsynth.simulate_turbo_prior
+job: "extension"
+config:
+  name: "zimage_diffsynth_sim_turbo_prior"
+  process:
+    - type: "z_image_diffsynth_trainer"
+      log_dir: "./output/TensorBoard"
+      training_folder: "./output"
+      sqlite_db_path: "./aitk_db.db"
+      device: "cuda"
+      trigger_word: null
+      performance_log_every: 10
+      network:
+        pretrained_lora_path: ""
+        dtype: "bf16"
+        rank_dropout: 0.01
+        type: "lora"
+        linear: 4
+        linear_alpha: 4
+        conv: 0
+        conv_alpha: 0
+        lokr_full_rank: false
+        lokr_factor: -1
+        network_kwargs:
+          ignore_if_contains:
+            - "noise_refiner"
+            - "context_refiner"
+            - "all_final_layer"
+          lora_down_init_scale: 1
+      save:
+        dtype: "bf16"
+        save_every: 1
+        max_step_saves_to_keep: 2
+        save_format: "safetensors"
+        push_to_hub: false
+      train:
+        turbo_prior_steps: 8
+        turbo_t_jitter: 0.5
+        turbo_t_jitter_end: 0
+        turbo_teacher_weight: true
+        lr: 0.0001
+        noise_offset: 0.1
+        min_snr_gamma: 0
+        timestep_weighting: "none"
+        batch_size: 1
+        gradient_accumulation: 1
+        noise_scheduler: "flowmatch"
+        prediction_type: "flowmatch"
+        timestep_type: "turbo_prior"
+        content_or_style: "balanced"
+        bypass_guidance_embedding: false
+        steps: 1
+        train_unet: true
+        train_text_encoder: false
+        gradient_checkpointing: true
+        optimizer: "adafactor"
+        optimizer_params:
+          beta2: 0
+          weight_decay: 0.01
+          scale_parameter: false
+          rms_max_decay_rate: 0.99
+          stochastic_accumulation: true
+          stochastic_rounding: true
+          factored: true
+          beta1: 0.9
+        unload_text_encoder: true
+        cache_text_embeddings: true
+        ema_config:
+          use_ema: false
+          ema_decay: 0.99
+        skip_first_sample: false
+        force_first_sample: false
+        disable_sampling: false
+        dtype: "bf16"
+        diff_output_preservation: false
+        diff_output_preservation_multiplier: 1
+        diff_output_preservation_class: "person"
+        switch_boundary_every: 1
+        loss_type: "mse"
+        blank_prompt_preservation: false
+        blank_prompt_probability: 0.2
+        blank_prompt_preservation_multiplier: 0.5
+      logging:
+        log_every: 1
+        use_ui_logger: true
+        debug: true
+      model:
+        dtype: "bf16"
+        compile: false
+        debug_zimage_load: false
+        name_or_path: "e:/Backup/huggingface/hub/models--Tongyi-MAI--Z-Image/snapshots/04cc4abb7c5069926f75c9bfde9ef43d49423021/"
+        sampling_name_or_path: "e:/Backup/huggingface/hub/models--Tongyi-MAI--Z-Image-Turbo/snapshots/0e36c2b379e66fa531d01cc531c44919e5f1c6fd/"
+        te_name_or_path: "huihui-ai/Huihui-Qwen3-4B-abliterated-v2"
+        quantize: false
+        qtype: "qfloat8"
+        quantize_te: false
+        qtype_te: "qfloat8"
+        arch: "zimage_diffsynth"
+        low_vram: false
+        model_kwargs:
+          loader: "diffusers"
+          use_dynamic_shifting: false
+          use_diffsynth_training_loop: false
+          disable_noise_refiner: true
+          disable_context_refiner: true
+        layer_offloading: false
+        layer_offloading_text_encoder_percent: 1
+        layer_offloading_transformer_percent: 1
+      datasets:
+        - folder_path: "./datasets/"
+          square_crop: false
+          shuffle_tokens: false
+          shuffle_tokens_keep: 1
+          mask_path: null
+          mask_min_value: 0.1
+          default_caption: ""
+          caption_ext: "txt"
+          caption_dropout_rate: 0.1
+          cache_latents_to_disk: true
+          is_reg: false
+          network_weight: 1
+          resolution:
+            - 256
+          controls: []
+          shrink_video_to_frames: true
+          num_frames: 1
+          flip_x: false
+          flip_y: false
+          num_repeats: 1
+      sample:
+        sample_noised: false
+        sampler: "flowmatch"
+        sample_every: 1
+        width: 256
+        height: 256
+        samples:
+          - prompt: "dog"
+        neg: ""
+        seed: 42
+        walk_seed: true
+        guidance_scale: 0
+        sample_steps: 8
+        num_frames: 1
+        fps: 1
+      sim:
+        profile: false

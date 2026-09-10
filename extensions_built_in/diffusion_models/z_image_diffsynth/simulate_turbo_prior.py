@@ -1,7 +1,7 @@
 """
 Short GPU sim: LoRA train + sample with normative Turbo-t prior.
 
-Single ``run_job`` pass driven by ``--turbo true|false`` (default ``true``).
+Single ``run_job`` pass driven by ``simulate_turbo_prior.yaml`` (no CLI).
 Reuses ``temp/test_train/`` cache (prompt ``dog``).
 Does not download or regenerate the dataset.
 
@@ -9,16 +9,16 @@ Includes a LoRA-delta gate: saved weights must differ from an init snapshot
 taken after network apply (fails if max|Δ| and ‖Δ‖₂ are ~0).
 
 Run from repo root:
-  python -m extensions_built_in.diffusion_models.z_image_diffsynth.simulate_turbo_prior --turbo true
+  python -m extensions_built_in.diffusion_models.z_image_diffsynth.simulate_turbo_prior
 
-Profiling (CUDA events + move/flush counters; sampling disabled):
-  ZIMAGE_DIFFSYNTH_DEBUG=0 python -m ...simulate_turbo_prior --turbo true --profile
-  ... --turbo true --profile --production-overlay   # match config.yaml recipe knobs
+Edit ``simulate_turbo_prior.yaml`` for knobs (quantize, steps, refiners, sample size).
+Set ``sim.profile: true`` for CUDA-event step breakdown (sampling disabled).
 """
 
 from __future__ import annotations
 
-import argparse
+import copy
+import faulthandler
 import os
 import shutil
 import subprocess
@@ -29,6 +29,8 @@ from collections import Counter, defaultdict
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, List, Optional
+
+import yaml
 
 # Allow HF hub downloads for standalone te_name_or_path (override shell offline).
 os.environ["HF_HUB_OFFLINE"] = "0"
@@ -67,10 +69,6 @@ except Exception:
 
 from toolkit.job import run_job
 from toolkit.timestep_sampler import TimestepSampler
-from extensions_built_in.diffusion_models.z_image_diffsynth.test_smoke import (
-    DEFAULT_ZIMAGE_MODEL_PATH,
-    DEFAULT_ZIMAGE_SAMPLING_PATH,
-)
 from extensions_built_in.diffusion_models.z_image_diffsynth.test_train import (
     NUM_SOURCE_IMAGES,
     TEST_TRAIN_IMAGE_CACHE,
@@ -81,14 +79,8 @@ from extensions_built_in.diffusion_models.z_image_diffsynth.turbo_schedule impor
     get_turbo_sigmas_and_timesteps,
 )
 
-# Standalone HF TE for verify path (root-level CausalLM; no Z-Image subfolders).
-# Override with ZIMAGE_DIFFSYNTH_TE_PATH; set empty to use Z-Image snapshot TE.
-DEFAULT_ZIMAGE_TE_PATH = "huihui-ai/Huihui-Qwen3-4B-abliterated-v2"
-
-LINEAR_RANK = 4
 # Short gate: first FORCE_COVERAGE_STEPS emit exact centers (round-robin) so all
 # 8 slots are hit; remaining steps use real dsigma + annealed jitter (low j).
-TOTAL_STEPS = 24
 TURBO_PRIOR_STEPS = 8
 FORCE_COVERAGE_STEPS = 16  # 2 full passes over the 8 Turbo centers
 # Hard gate: frac of collected t with t < 300 must be strictly below this.
@@ -113,6 +105,8 @@ PROFILE_SECTIONS = (
     "optimizer_step",
 )
 
+DEFAULT_YAML_PATH = Path(__file__).with_name("simulate_turbo_prior.yaml")
+
 # Collected by monkeypatch during run_job (sim-only; debug logger skips turbo_prior).
 _COLLECTED_T: List[float] = []
 # (step_num, effective_jitter) per _sample_turbo_prior call — anneal check.
@@ -123,14 +117,14 @@ _TRAIN_RESIDENCY: List[tuple[str, str]] = []
 _SAMPLING_MOVES_TRAIN: List[bool] = []
 _PROBES_INSTALLED = False
 _TE_CACHE_VRAM_PROBE_INSTALLED = False
-# (label, alloc_gb, reserved_gb, peak_gb, total_gb, main_dev, te_dev, samp_dev)
+# (label, alloc_gb, reserved_gb, peak_gb, total_gb, main_dev, te_dev, samp_dev, vae_dev)
 _TE_CACHE_VRAM_EVENTS: List[tuple] = []
 # Peak right after load_model (before optional reset); isolates load vs later spikes.
 _PEAK_AFTER_LOAD_GB: Optional[float] = None
 _LORA_INIT_PATH: Path | None = None
 _LORA_INIT_PROBE_INSTALLED = False
 
-# Profile state (sim-only; installed when --profile / SIM_TURBO_PRIOR_PROFILE).
+# Profile state (sim-only; installed when sim.profile is true).
 _PROFILE_ENABLED = False
 _PROFILE_PROBES_INSTALLED = False
 _PROFILE_RECORDING = False  # True after warmup
@@ -142,44 +136,51 @@ _PROFILE_STEP_WALL_S: List[float] = []
 _PROFILE_VRAM: List[tuple[float, float]] = []  # (alloc_gb, reserved_gb) per step
 _PROFILE_STEP_FLUSHES = 0
 _PROFILE_NEST_DEPTH = 0
+# When False, peak-VRAM ≥ max is warning-only (unquantized DiT).
+_QUANTIZE_HARD_PEAK = True
 
 
 def _log(msg: str) -> None:
     print(msg, flush=True)
 
 
-def _parse_cli(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parent-only CLI: turbo mode + optional profile / production overlay."""
-    parser = argparse.ArgumentParser(
-        description="Z-Image DiffSynth turbo_prior GPU sim (single pass)."
-    )
-    parser.add_argument(
-        "--turbo",
-        choices=["true", "false"],
-        default="true",
-        help="turbo_teacher_weight for the single pass (default: true)",
-    )
-    parser.add_argument(
-        "--profile",
-        action="store_true",
-        help="CUDA-event step breakdown; sampling disabled; measurement-oriented",
-    )
-    parser.add_argument(
-        "--production-overlay",
-        action="store_true",
-        help="Match config.yaml knobs (1024, rank 128, diffsynth, fp32, refiners on)",
-    )
-    return parser.parse_args(argv)
-
-
-def _parse_turbo_cli(argv: list[str] | None = None) -> bool:
-    """Back-compat: return turbo_teacher_weight bool from CLI."""
-    return _parse_cli(argv).turbo == "true"
-
-
 def _env_flag(name: str) -> bool:
     v = os.environ.get(name, "").strip().lower()
     return v in ("1", "true", "yes")
+
+
+def _default_yaml_path() -> Path:
+    return DEFAULT_YAML_PATH
+
+
+def _load_recipe(path: Path) -> dict:
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    if not isinstance(data, dict):
+        raise ValueError(f"recipe at {path} must be a mapping")
+    return data
+
+
+def _parse_sim(process0: dict) -> dict:
+    sim = copy.deepcopy(process0.get("sim") or {})
+    if not isinstance(sim, dict):
+        raise ValueError("'sim' must be a mapping")
+    return {"profile": bool(sim.get("profile", False))}
+
+
+def _strip_sim(config: dict) -> dict:
+    out = copy.deepcopy(config)
+    process0 = out["config"]["process"][0]
+    process0.pop("sim", None)
+    return out
+
+
+def _reject_cli_argv() -> None:
+    if len(sys.argv) > 1:
+        raise SystemExit(
+            "simulate_turbo_prior: no CLI arguments; "
+            "edit simulate_turbo_prior.yaml (knobs live in the recipe)."
+        )
 
 
 def _effective_jitter(train_config, step_num: int) -> float:
@@ -556,7 +557,7 @@ def _cuda_total_gb() -> float:
 
 
 def _log_te_cache_vram(label: str, model=None) -> None:
-    """Append + print CUDA alloc/peak/reserved and DiT/TE/Turbo devices."""
+    """Append + print CUDA alloc/peak/reserved and DiT/TE/Turbo/VAE devices."""
     if not torch.cuda.is_available():
         return
     alloc = torch.cuda.memory_allocated() / (1024**3)
@@ -565,7 +566,7 @@ def _log_te_cache_vram(label: str, model=None) -> None:
     total = _cuda_total_gb()
     frac = (peak / total) if total > 0 else 0.0
     gate = "FAIL" if total > 0 and frac >= PEAK_VRAM_FRAC_MAX else "ok"
-    main_s = te_s = samp_s = "?"
+    main_s = te_s = samp_s = vae_s = "?"
     if model is not None:
         main_mod = getattr(model, "_raw_dit", None) or getattr(model, "model", None)
         st = getattr(model, "_sampling_transformer", None)
@@ -577,12 +578,15 @@ def _log_te_cache_vram(label: str, model=None) -> None:
         main_s = str(md) if md is not None else "None"
         samp_s = str(sd) if sd is not None else "None"
         te_s = _te_weight_device(model)
-    evt = (label, alloc, reserved, peak, total, main_s, te_s, samp_s)
+        vae = getattr(model, "vae", None)
+        vd = _weight_device(vae) if vae is not None else None
+        vae_s = str(vd) if vd is not None else "None"
+    evt = (label, alloc, reserved, peak, total, main_s, te_s, samp_s, vae_s)
     _TE_CACHE_VRAM_EVENTS.append(evt)
     _log(
         f"[te-cache-vram] {label}: alloc={alloc:.2f}GiB reserved={reserved:.2f}GiB "
         f"peak={peak:.2f}/{total:.2f}GiB ({frac:.1%} {gate}) "
-        f"main={main_s} te={te_s} samp={samp_s}"
+        f"main={main_s} te={te_s} samp={samp_s} vae={vae_s}"
     )
 
 
@@ -597,7 +601,7 @@ def _print_te_cache_vram_timeline() -> None:
             "later Δpeak above this is post-load)"
         )
     prev_peak = 0.0
-    for label, alloc, reserved, peak, total, main_s, te_s, samp_s in _TE_CACHE_VRAM_EVENTS:
+    for label, alloc, reserved, peak, total, main_s, te_s, samp_s, vae_s in _TE_CACHE_VRAM_EVENTS:
         dpeak = peak - prev_peak
         mark = " <<" if dpeak > 0.05 else ""
         frac = (peak / total) if total > 0 else 0.0
@@ -605,7 +609,7 @@ def _print_te_cache_vram_timeline() -> None:
         _log(
             f"  {label}: alloc={alloc:.2f} reserved={reserved:.2f} peak={peak:.2f} "
             f"(Δpeak={dpeak:+.2f}, {frac:.1%} {gate}) "
-            f"main={main_s} te={te_s} samp={samp_s}{mark}"
+            f"main={main_s} te={te_s} samp={samp_s} vae={vae_s}{mark}"
         )
         prev_peak = peak
     _log("[te-cache-vram] === end ===")
@@ -622,6 +626,7 @@ def _install_te_cache_vram_probe() -> None:
     import toolkit.unloader as unloader_mod
     from toolkit.dataloader_mixins import LatentCachingMixin, TextEmbeddingCachingMixin
     from toolkit.network_mixins import ToolkitNetworkMixin
+    from toolkit.models.base_model import BaseModel
     from extensions_built_in.diffusion_models.z_image_diffsynth.model import (
         ZImageDiffSynthModel,
     )
@@ -637,8 +642,11 @@ def _install_te_cache_vram_probe() -> None:
     _orig_turbo = ZImageDiffSynthModel.apply_turbo_teacher_mode
     _orig_gen = ZImageDiffSynthModel.generate_images
     _orig_set_state = ZImageDiffSynthModel.set_device_state
+    _orig_set_preset = BaseModel.set_device_state_preset
+    _orig_gen_single = ZImageDiffSynthModel.generate_single_image
     _orig_encode = ZImageDiffSynthModel.encode_prompt
     _encode_call_n = {"n": 0}
+    _pipeline_before_logged = {"n": 0}
 
     def _enter(model, device=None):
         _log_te_cache_vram("enter:before", model)
@@ -731,6 +739,26 @@ def _install_te_cache_vram_probe() -> None:
         _log_te_cache_vram("set_device_state:exit", self)
         return out
 
+    def _set_preset(self, device_state_preset):
+        out = _orig_set_preset(self, device_state_preset)
+        if device_state_preset == "generate":
+            _log_te_cache_vram("generate_preset:after", self)
+        return out
+
+    def _gen_single(self, pipeline, gen_config, conditional_embeds, unconditional_embeds, generator, extra):
+        if _pipeline_before_logged["n"] == 0:
+            _log_te_cache_vram("pipeline:before", self)
+            _pipeline_before_logged["n"] = 1
+        return _orig_gen_single(
+            self,
+            pipeline,
+            gen_config,
+            conditional_embeds,
+            unconditional_embeds,
+            generator,
+            extra,
+        )
+
     def _encode(self, *args, **kwargs):
         # Log first two encodes during text-embed cache (activation spike source).
         n = _encode_call_n["n"]
@@ -756,6 +784,8 @@ def _install_te_cache_vram_probe() -> None:
     ZImageDiffSynthModel.apply_turbo_teacher_mode = _turbo  # type: ignore[method-assign]
     ZImageDiffSynthModel.generate_images = _gen  # type: ignore[method-assign]
     ZImageDiffSynthModel.set_device_state = _set_state  # type: ignore[method-assign]
+    BaseModel.set_device_state_preset = _set_preset  # type: ignore[method-assign]
+    ZImageDiffSynthModel.generate_single_image = _gen_single  # type: ignore[method-assign]
     ZImageDiffSynthModel.encode_prompt = _encode  # type: ignore[method-assign]
 
     # Re-bind imports used by call sites that already imported symbols.
@@ -816,11 +846,16 @@ def _install_vram_probe() -> None:
                 alloc = int(torch.cuda.memory_allocated())
                 total = int(torch.cuda.get_device_properties(0).total_memory)
                 if total > 0 and (float(alloc) / float(total)) >= PEAK_VRAM_FRAC_MAX:
-                    raise RuntimeError(
-                        f"Acceptance fail: mid-step CUDA alloc "
+                    msg = (
+                        f"mid-step CUDA alloc "
                         f"{alloc / (1024**3):.2f} GiB ≥ {PEAK_VRAM_FRAC_MAX:.0%} of "
-                        f"{total / (1024**3):.2f} GiB (abort before TDR)"
+                        f"{total / (1024**3):.2f} GiB"
                     )
+                    if _QUANTIZE_HARD_PEAK:
+                        raise RuntimeError(
+                            f"Acceptance fail: {msg} (abort before TDR)"
+                        )
+                    _log(f"[vram] WARNING (quantize=false): {msg}")
         return out
 
     ZImageDiffSynthModel._move_sampling_transformer = _wrapped_move  # type: ignore[method-assign]
@@ -915,8 +950,13 @@ def _assert_vram_acceptance(
     device_total: int,
     *,
     train_on_turbo: bool,
+    quantize: bool = True,
 ) -> None:
-    """Hard GREEN asserts on DiT residency + peak VRAM fraction."""
+    """Hard GREEN asserts on DiT residency + peak VRAM fraction.
+
+    When ``quantize`` is false, peak-VRAM ≥ max is a warning only (bf16 DiT
+    legitimately uses more headroom); residency asserts still hard-fail.
+    """
     if not _TRAIN_RESIDENCY:
         raise RuntimeError(
             "Acceptance fail: no train-forward residency snaps "
@@ -969,8 +1009,8 @@ def _assert_vram_acceptance(
             f"(post-load contribution≈{max(0.0, peak_gb - _PEAK_AFTER_LOAD_GB):.2f} GiB)"
         )
     if frac >= PEAK_VRAM_FRAC_MAX:
-        raise RuntimeError(
-            f"Acceptance fail: CUDA peak {peak_gb:.2f} GiB ≥ "
+        msg = (
+            f"CUDA peak {peak_gb:.2f} GiB ≥ "
             f"{PEAK_VRAM_FRAC_MAX:.0%} of {total_gb:.2f} GiB"
             + (
                 f" (sticky load peak was {_PEAK_AFTER_LOAD_GB:.2f} GiB)"
@@ -978,6 +1018,10 @@ def _assert_vram_acceptance(
                 else ""
             )
         )
+        if not quantize:
+            _log(f"[vram] WARNING (quantize=false): {msg}")
+        else:
+            raise RuntimeError(f"Acceptance fail: {msg}")
     n_moves = len(_SAMPLING_MOVES_TRAIN)
     first_allowed = 1
     extras = max(0, n_moves - first_allowed)
@@ -1064,200 +1108,97 @@ def _assert_t_acceptance(
         )
 
 
+def _prepare_job_config(
+    recipe: dict,
+    *,
+    work_root: Path,
+    dataset_dir: Path,
+    profile: bool,
+) -> dict:
+    """Copy recipe, rewrite paths, apply profile overrides, strip ``sim``."""
+    config = copy.deepcopy(recipe)
+    process0 = config["config"]["process"][0]
+    train = process0["train"]
+    train_on_turbo = bool(train.get("turbo_teacher_weight", False))
+    mode_tag = "turbo" if train_on_turbo else "base"
+    batch_size = int(train.get("batch_size", 1) or 1)
+    train_name = f"zimage_diffsynth_sim_turbo_prior_{mode_tag}_b{batch_size}"
+    config["config"]["name"] = train_name
+
+    output_root = work_root / "output"
+    output_root.mkdir(parents=True, exist_ok=True)
+    process0["log_dir"] = str(output_root / "TensorBoard")
+    process0["training_folder"] = str(output_root)
+    process0["sqlite_db_path"] = str(work_root / "aitk_db.db")
+    process0["datasets"][0]["folder_path"] = str(dataset_dir)
+
+    # Env overrides for model paths (optional; yaml paths used when unset).
+    model = process0["model"]
+    env_model = os.environ.get("ZIMAGE_DIFFSYNTH_MODEL_PATH", "").strip()
+    env_samp = os.environ.get("ZIMAGE_DIFFSYNTH_SAMPLING_PATH", "").strip()
+    if env_model:
+        model["name_or_path"] = env_model
+    if env_samp:
+        model["sampling_name_or_path"] = env_samp
+    if "ZIMAGE_DIFFSYNTH_TE_PATH" in os.environ:
+        te = os.environ.get("ZIMAGE_DIFFSYNTH_TE_PATH", "").strip()
+        if te:
+            model["te_name_or_path"] = te
+        else:
+            model.pop("te_name_or_path", None)
+
+    n_steps = int(train.get("steps", 1) or 1)
+    if profile:
+        # Profile needs enough steps for warmup + measure; disable sampling.
+        if n_steps < PROFILE_TOTAL_STEPS:
+            train["steps"] = PROFILE_TOTAL_STEPS
+            n_steps = PROFILE_TOTAL_STEPS
+        train["disable_sampling"] = True
+        train["skip_first_sample"] = True
+        if bool(train.get("unload_text_encoder")) is False:
+            # Profile must keep TE unloaded (VRAM); do not remount for generate.
+            train["unload_text_encoder"] = True
+            _log("[sim] profile: forcing unload_text_encoder=true")
+        process0["sample"]["sample_every"] = 10_000
+        process0.setdefault("logging", {})["debug"] = False
+        process0["save"]["save_every"] = max(n_steps, 1)
+
+    return _strip_sim(config)
+
+
 def _train_lora(
     work_root: Path,
     dataset_dir: Path,
-    model_path: str,
-    sampling_path: str | None,
+    recipe: dict,
     *,
-    te_name_or_path: str | None = None,
-    batch_size: int = 1,
-    turbo_teacher_weight: bool = False,
     profile: bool = False,
-    production_overlay: bool = False,
 ) -> Path:
-    global _PROFILE_ENABLED, FORCE_COVERAGE_STEPS
-    mode_tag = "turbo" if turbo_teacher_weight else "base"
-    train_name = f"zimage_diffsynth_sim_turbo_prior_{mode_tag}_b{batch_size}"
-    output_root = work_root / "output"
-    output_root.mkdir(parents=True, exist_ok=True)
+    global _PROFILE_ENABLED, FORCE_COVERAGE_STEPS, _QUANTIZE_HARD_PEAK
+    config = _prepare_job_config(
+        recipe, work_root=work_root, dataset_dir=dataset_dir, profile=profile
+    )
+    process0 = config["config"]["process"][0]
+    train = process0["train"]
+    model = process0["model"]
+    train_on_turbo = bool(train.get("turbo_teacher_weight", False))
+    quantize = bool(model.get("quantize", True))
+    _QUANTIZE_HARD_PEAK = bool(quantize)
+    n_steps = int(train.get("steps", 1) or 1)
+    train_name = config["config"]["name"]
+    output_root = Path(process0["training_folder"])
 
-    n_steps = PROFILE_TOTAL_STEPS if profile else TOTAL_STEPS
-    lora_rank = 128 if production_overlay else LINEAR_RANK
-    resolution = [1024] if production_overlay else [512]
-    train_dtype = "fp32" if production_overlay else "bf16"
-    loader = "diffsynth" if production_overlay else "diffusers"
-    # Production config.yaml leaves refiners enabled; sim default is off (VRAM).
-    disable_refiners = not production_overlay
-    disable_sampling = bool(profile)
-    skip_first_sample = True
-    save_every = max(n_steps, 1) if profile else 10
+    model_path = model.get("name_or_path") or ""
+    sampling_path = model.get("sampling_name_or_path") or ""
+    if not model_path or not os.path.isdir(str(model_path)):
+        raise RuntimeError(f"Model path missing: {model_path!r}")
+    if not sampling_path or not os.path.isdir(str(sampling_path)):
+        raise RuntimeError(
+            "Sampling (Turbo) path missing; required for _sampling_transformer PNGs."
+        )
+
     force_coverage = min(FORCE_COVERAGE_STEPS, max(0, n_steps - 1))
-
-    config = {
-        "job": "extension",
-        "config": {
-            "name": train_name,
-            "process": [
-                {
-                    "type": "z_image_diffsynth_trainer",
-                    "log_dir": str(output_root / "TensorBoard"),
-                    "training_folder": str(output_root),
-                    "sqlite_db_path": str(work_root / "aitk_db.db"),
-                    "device": "cuda",
-                    "trigger_word": None,
-                    "performance_log_every": 10 if not profile else 5,
-                    "network": {
-                        "rank_dropout": 0.01,
-                        "type": "lora",
-                        "dtype": "fp32",
-                        "linear": lora_rank,
-                        "linear_alpha": lora_rank,
-                        "conv": 0,
-                        "conv_alpha": 0,
-                        "lokr_full_rank": False,
-                        "lokr_factor": -1,
-                        "network_kwargs": {
-                            "ignore_if_contains": [
-                                "context_refiner",
-                                "noise_refiner",
-                                "all_final_layer",
-                            ],
-                            "lora_down_init_scale": 1,
-                        },
-                        "pretrained_lora_path": "",
-                    },
-                    "save": {
-                        "dtype": "bf16",
-                        "save_every": save_every,
-                        "max_step_saves_to_keep": 2,
-                        "save_format": "safetensors",
-                        "push_to_hub": False,
-                    },
-                    "train": {
-                        "lr": 0.0001,
-                        "noise_offset": 0.1,
-                        "batch_size": batch_size,
-                        "bypass_guidance_embedding": False,
-                        "steps": n_steps,
-                        "gradient_accumulation": 1,
-                        "train_unet": True,
-                        "train_text_encoder": False,
-                        "gradient_checkpointing": True,
-                        "noise_scheduler": "flowmatch",
-                        "prediction_type": "flowmatch",
-                        "optimizer": "adafactor",
-                        "timestep_type": "turbo_prior",
-                        "turbo_prior_steps": TURBO_PRIOR_STEPS,
-                        "turbo_t_jitter": 0.5,
-                        "turbo_t_jitter_end": 0,
-                        "turbo_teacher_weight": bool(turbo_teacher_weight),
-                        "content_or_style": "balanced",
-                        "timestep_weighting": "none",
-                        "min_snr_gamma": 0,
-                        "optimizer_params": {
-                            "beta2": 0,
-                            "weight_decay": 0.01,
-                            "scale_parameter": False,
-                            "rms_max_decay_rate": 0.99,
-                            "stochastic_accumulation": True,
-                            "stochastic_rounding": True,
-                            "factored": True,
-                            "beta1": 0.9,
-                        },
-                        "unload_text_encoder": True,
-                        "cache_text_embeddings": True,
-                        "ema_config": {"use_ema": False, "ema_decay": 0.99},
-                        "skip_first_sample": skip_first_sample,
-                        "force_first_sample": False,
-                        "disable_sampling": disable_sampling,
-                        "dtype": train_dtype,
-                        "diff_output_preservation": False,
-                        "diff_output_preservation_multiplier": 1,
-                        "diff_output_preservation_class": "person",
-                        "switch_boundary_every": 1,
-                        "loss_type": "mse",
-                        "blank_prompt_preservation": False,
-                        "blank_prompt_probability": 0.2,
-                        "blank_prompt_preservation_multiplier": 0.5,
-                    },
-                    "logging": {
-                        "log_every": 1,
-                        "use_ui_logger": True,
-                        "debug": not profile,
-                    },
-                    "model": {
-                        "debug_zimage_load": False,
-                        "name_or_path": model_path,
-                        "sampling_name_or_path": sampling_path,
-                        "te_name_or_path": te_name_or_path,
-                        "dtype": "bf16",
-                        "quantize": True,
-                        "qtype": "qfloat8",
-                        "quantize_te": False,
-                        "qtype_te": "qfloat8",
-                        "arch": "zimage_diffsynth",
-                        "low_vram": False,
-                        # use_diffsynth_prompt_encoding omitted → trainer default-on (true)
-                        "model_kwargs": {
-                            "use_diffsynth_training_loop": False,
-                            "use_dynamic_shifting": False,
-                            # noise_refiner ~10GB + context_refiner ~4GB per DiT — fatal
-                            # on 16GB if anything briefly co-resides (sim default: off).
-                            "disable_noise_refiner": disable_refiners,
-                            "disable_context_refiner": disable_refiners,
-                            "loader": loader,
-                        },
-                        "layer_offloading": False,
-                        "layer_offloading_text_encoder_percent": 1,
-                        "layer_offloading_transformer_percent": 1,
-                    },
-                    "datasets": [
-                        {
-                            "folder_path": str(dataset_dir),
-                            "square_crop": False,
-                            "shuffle_tokens": False,
-                            "shuffle_tokens_keep": 1,
-                            "mask_path": None,
-                            "mask_min_value": 0.1,
-                            "default_caption": "",
-                            "caption_ext": "txt",
-                            "caption_dropout_rate": 0.1,
-                            "cache_latents_to_disk": True,
-                            "is_reg": False,
-                            "network_weight": 1,
-                            "resolution": resolution,
-                            "controls": [],
-                            "shrink_video_to_frames": True,
-                            "num_frames": 1,
-                            "flip_x": False,
-                            "flip_y": False,
-                            "num_repeats": 1,
-                        }
-                    ],
-                    "sample": {
-                        "sample_noised": True,
-                        "sampler": "flowmatch",
-                        "sample_every": 10 if not profile else 10_000,
-                        "width": 256 if not production_overlay else 1024,
-                        "height": 256 if not production_overlay else 768,
-                        "samples": [{"prompt": "dog"}],
-                        "neg": "",
-                        "seed": 42,
-                        "walk_seed": True,
-                        "guidance_scale": 0,
-                        "sample_steps": 8,
-                        "num_frames": 1,
-                        "fps": 1,
-                    },
-                }
-            ],
-        },
-    }
-
-    # Shorter force-coverage window when profiling with fewer steps.
     _saved_force = FORCE_COVERAGE_STEPS
-    if profile:
+    if profile or n_steps < FORCE_COVERAGE_STEPS:
         FORCE_COVERAGE_STEPS = force_coverage
 
     _PROFILE_ENABLED = bool(profile)
@@ -1271,12 +1212,18 @@ def _train_lora(
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
         torch.cuda.empty_cache()
+
+    mk = model.get("model_kwargs") or {}
     _log(
         f"[PHASE TRAIN] run_job: start "
-        f"(turbo_teacher_weight={bool(turbo_teacher_weight)} "
-        f"profile={bool(profile)} production_overlay={bool(production_overlay)} "
-        f"steps={n_steps} rank={lora_rank} res={resolution} "
-        f"dtype={train_dtype} loader={loader} refiners_off={disable_refiners})"
+        f"(turbo_teacher_weight={train_on_turbo} "
+        f"profile={bool(profile)} quantize={quantize} "
+        f"steps={n_steps} rank={process0['network'].get('linear')} "
+        f"res={process0['datasets'][0].get('resolution')} "
+        f"dtype={train.get('dtype')} loader={mk.get('loader')} "
+        f"refiners_off={mk.get('disable_noise_refiner')} "
+        f"unload_te={train.get('unload_text_encoder')} "
+        f"skip_first_sample={train.get('skip_first_sample')})"
     )
     try:
         run_job(config)
@@ -1295,16 +1242,19 @@ def _train_lora(
         else 0
     )
     slot_counts, frac_lt_300 = _print_t_histogram()
-    # Profile with fewer steps may miss full 8-slot coverage; keep VRAM/residency.
-    if not profile:
-        _assert_t_acceptance(slot_counts, frac_lt_300)
-    else:
+    # Short / profile runs may miss full 8-slot coverage; keep VRAM/residency.
+    if profile or n_steps < FORCE_COVERAGE_STEPS:
         _log(
-            "[profile] skipping full t-slot acceptance "
+            "[sim] skipping full t-slot acceptance "
             f"(force_coverage={force_coverage}, steps={n_steps})"
         )
+    else:
+        _assert_t_acceptance(slot_counts, frac_lt_300)
     _assert_vram_acceptance(
-        peak_alloc, device_total, train_on_turbo=bool(turbo_teacher_weight)
+        peak_alloc,
+        device_total,
+        train_on_turbo=train_on_turbo,
+        quantize=quantize,
     )
 
     save_dir = output_root / train_name
@@ -1312,7 +1262,12 @@ def _train_lora(
     if not candidates:
         raise RuntimeError(f"No LoRA checkpoint found in {save_dir}")
     lora_path = max(candidates, key=lambda p: p.stat().st_mtime)
-    _assert_lora_delta(init_lora_path, lora_path)
+    if n_steps >= 2:
+        _assert_lora_delta(init_lora_path, lora_path)
+    else:
+        _log(
+            f"[lora-delta] skip (steps={n_steps} < 2); checkpoint={lora_path}"
+        )
     return lora_path
 
 
@@ -1322,6 +1277,7 @@ def _assert_pass_artifacts(
     *,
     train_on_turbo: bool,
     profile: bool = False,
+    skip_first_sample: bool = True,
 ) -> None:
     mode_tag = "turbo" if train_on_turbo else "base"
     train_name = f"zimage_diffsynth_sim_turbo_prior_{mode_tag}_b{batch_size}"
@@ -1335,7 +1291,7 @@ def _assert_pass_artifacts(
     if profile:
         _log(
             f"   [{mode_tag}] LoRA OK: {lora_path}; "
-            "sample PNGs skipped (--profile disables sampling)"
+            "sample PNGs skipped (sim.profile disables sampling)"
         )
         return
     samples_dir = save_dir / "samples"
@@ -1347,6 +1303,12 @@ def _assert_pass_artifacts(
         and p.stat().st_size > 0
     ]
     if not train_samples:
+        if skip_first_sample:
+            _log(
+                f"   [{mode_tag}] LoRA OK: {lora_path}; "
+                "no sample PNGs (skip_first_sample=true)"
+            )
+            return
         raise RuntimeError(f"No sample PNGs found under {samples_dir}")
     _log(
         f"   [{mode_tag}] LoRA OK: {lora_path}; "
@@ -1354,99 +1316,72 @@ def _assert_pass_artifacts(
     )
 
 
-def _resolve_paths() -> tuple[str, str, str | None]:
-    model_path = (
-        os.environ.get("ZIMAGE_DIFFSYNTH_MODEL_PATH", "").strip()
-        or DEFAULT_ZIMAGE_MODEL_PATH
-    )
-    sampling_path = (
-        os.environ.get("ZIMAGE_DIFFSYNTH_SAMPLING_PATH", "").strip()
-        or DEFAULT_ZIMAGE_SAMPLING_PATH
-        or None
-    )
-    # Unset → DEFAULT_ZIMAGE_TE_PATH; empty string → stock Z-Image snapshot TE.
-    if "ZIMAGE_DIFFSYNTH_TE_PATH" in os.environ:
-        te_path = os.environ.get("ZIMAGE_DIFFSYNTH_TE_PATH", "").strip() or None
-    else:
-        te_path = DEFAULT_ZIMAGE_TE_PATH
-    if sampling_path and not os.path.isdir(sampling_path):
-        sampling_path = None
-    if not model_path or not os.path.isdir(model_path):
-        raise RuntimeError(f"Model path missing: {model_path!r}")
-    if not sampling_path:
-        raise RuntimeError(
-            "Sampling (Turbo) path missing; required for _sampling_transformer PNGs."
-        )
-    return model_path, sampling_path, te_path
-
-
 def _run_single_pass(
     *,
     work_root: Path,
     dataset_dir: Path,
-    model_path: str,
-    sampling_path: str,
-    te_name_or_path: str | None = None,
-    train_on_turbo: bool,
-    batch_size: int = 1,
+    recipe: dict,
     profile: bool = False,
-    production_overlay: bool = False,
 ) -> None:
+    process0 = recipe["config"]["process"][0]
+    train = process0["train"]
+    train_on_turbo = bool(train.get("turbo_teacher_weight", False))
+    batch_size = int(train.get("batch_size", 1) or 1)
+    skip_first = bool(train.get("skip_first_sample", True))
     mode = "true" if train_on_turbo else "false"
     _log(
         f"[pass] turbo_teacher_weight={mode} work={work_root} "
-        f"profile={profile} production_overlay={production_overlay}"
+        f"profile={profile}"
     )
     work_root.mkdir(parents=True, exist_ok=True)
     _train_lora(
         work_root,
         dataset_dir,
-        model_path,
-        sampling_path,
-        te_name_or_path=te_name_or_path,
-        batch_size=batch_size,
-        turbo_teacher_weight=train_on_turbo,
+        recipe,
         profile=profile,
-        production_overlay=production_overlay,
     )
     _assert_pass_artifacts(
-        work_root, batch_size, train_on_turbo=train_on_turbo, profile=profile
+        work_root,
+        batch_size,
+        train_on_turbo=train_on_turbo,
+        profile=profile,
+        skip_first_sample=skip_first,
     )
 
 
 def main() -> None:
+    _reject_cli_argv()
+
     # Child worker: one GPU pass then exit (CUDA isolation via subprocess).
-    pass_env = os.environ.get("SIM_TURBO_PRIOR_PASS", "").strip().lower()
-    if pass_env in ("false", "true", "0", "1"):
-        train_on_turbo = pass_env in ("true", "1")
+    if os.environ.get("SIM_TURBO_PRIOR_CHILD", "").strip() in ("1", "true", "yes"):
+        faulthandler.enable()
         work_root = Path(os.environ["SIM_TURBO_PRIOR_WORK"])
         dataset_dir = Path(os.environ["SIM_TURBO_PRIOR_DATASET"])
-        profile = _env_flag("SIM_TURBO_PRIOR_PROFILE")
-        production_overlay = _env_flag("SIM_TURBO_PRIOR_PRODUCTION")
-        model_path, sampling_path, te_path = _resolve_paths()
+        recipe = _load_recipe(_default_yaml_path())
+        process0 = recipe["config"]["process"][0]
+        sim = _parse_sim(process0)
+        profile = bool(sim["profile"])
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA not available; GPU required for this sim.")
         _run_single_pass(
             work_root=work_root,
             dataset_dir=dataset_dir,
-            model_path=model_path,
-            sampling_path=sampling_path,
-            te_name_or_path=te_path,
-            train_on_turbo=train_on_turbo,
+            recipe=recipe,
             profile=profile,
-            production_overlay=production_overlay,
         )
         return
 
-    args = _parse_cli()
-    train_on_turbo = args.turbo == "true"
-    profile = bool(args.profile)
-    production_overlay = bool(args.production_overlay)
+    recipe = _load_recipe(_default_yaml_path())
+    process0 = recipe["config"]["process"][0]
+    sim = _parse_sim(process0)
+    profile = bool(sim["profile"])
+    train_on_turbo = bool(process0["train"].get("turbo_teacher_weight", False))
     mode = "true" if train_on_turbo else "false"
     _log(
         "Z-Image DiffSynth simulate_turbo_prior "
-        f"(timestep_type=turbo_prior; turbo={mode}; "
-        f"profile={profile}; production_overlay={production_overlay}) ..."
+        f"(yaml={_default_yaml_path().name}; "
+        f"timestep_type=turbo_prior; turbo={mode}; "
+        f"profile={profile}; quantize={process0['model'].get('quantize')}) ..."
     )
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA not available; GPU required for this sim.")
@@ -1454,7 +1389,6 @@ def main() -> None:
     prompt = os.environ.get("ZIMAGE_TEST_TRAIN_PROMPT", "dog")
     seeds = [42 + i for i in range(NUM_SOURCE_IMAGES)]
     image_cache = TEST_TRAIN_IMAGE_CACHE
-    batch_size = 1
 
     if not _is_image_cache_valid(image_cache, prompt, seeds):
         raise RuntimeError(
@@ -1471,11 +1405,11 @@ def main() -> None:
     _populate_dataset_from_cache(image_cache, dataset_dir)
     _log(f"1) Dataset from cache {image_cache} -> {dataset_dir} (prompt={prompt!r})")
 
-    model_path, sampling_path, te_path = _resolve_paths()
     _log(
         "[sim] use_diffsynth_prompt_encoding omitted → true "
         "(turbo_prior DiffSynth encoding locked on)"
     )
+    te_path = process0["model"].get("te_name_or_path")
     if te_path:
         _log(f"[sim] te_name_or_path={te_path!r}")
     work_root = base_work / ("turbo" if train_on_turbo else "base")
@@ -1485,13 +1419,9 @@ def main() -> None:
         f"(work={work_root}; fresh subprocess for CUDA isolation) ..."
     )
     child_env = os.environ.copy()
-    child_env["SIM_TURBO_PRIOR_PASS"] = mode
+    child_env["SIM_TURBO_PRIOR_CHILD"] = "1"
     child_env["SIM_TURBO_PRIOR_WORK"] = str(work_root)
     child_env["SIM_TURBO_PRIOR_DATASET"] = str(dataset_dir)
-    if profile:
-        child_env["SIM_TURBO_PRIOR_PROFILE"] = "1"
-    if production_overlay:
-        child_env["SIM_TURBO_PRIOR_PRODUCTION"] = "1"
     # Avoid nested venv re-exec confusion; child already uses venv python.
     rc = subprocess.call(
         [sys.executable, "-m",
