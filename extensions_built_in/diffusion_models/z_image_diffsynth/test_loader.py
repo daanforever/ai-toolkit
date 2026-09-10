@@ -49,6 +49,7 @@ def test_load_transformer_by_mode_diffusers_only():
     logs = []
     fake_tr = MagicMock(name="diffusers_tr")
     with (
+        patch("os.path.isdir", return_value=True),
         patch.object(loader_mod, "load_dit_from_folder") as mock_ds,
         patch(
             "extensions_built_in.diffusion_models.z_image.loading.load_zimage_transformer_from_shards",
@@ -72,6 +73,7 @@ def test_load_transformer_by_mode_diffusers_only():
 def test_load_transformer_by_mode_diffusers_failure_raises():
     logs = []
     with (
+        patch("os.path.isdir", return_value=True),
         patch.object(loader_mod, "load_dit_from_folder") as mock_ds,
         patch(
             "extensions_built_in.diffusion_models.z_image.loading.load_zimage_transformer_from_shards",
@@ -94,6 +96,7 @@ def test_load_transformer_by_mode_auto_falls_back_to_diffsynth():
     logs = []
     fake_dit = MagicMock(name="dit")
     with (
+        patch("os.path.isdir", return_value=True),
         patch.object(loader_mod, "load_dit_from_folder", return_value=fake_dit) as mock_ds,
         patch(
             "extensions_built_in.diffusion_models.z_image.loading.load_zimage_transformer_from_shards",
@@ -112,6 +115,39 @@ def test_load_transformer_by_mode_auto_falls_back_to_diffsynth():
     assert is_df is False
     mock_df.assert_called_once()
     mock_ds.assert_called_once()
+
+
+def test_load_transformer_by_mode_hub_id_uses_from_pretrained():
+    logs = []
+    fake_tr = MagicMock(name="hub_tr")
+    with (
+        patch("os.path.isdir", return_value=False),
+        patch.object(loader_mod, "load_dit_from_folder") as mock_ds,
+        patch(
+            "extensions_built_in.diffusion_models.z_image.loading.load_zimage_transformer_from_shards"
+        ) as mock_df,
+        patch(
+            "extensions_built_in.diffusion_models.z_image_diffsynth.loader.ZImageTransformer2DModel.from_pretrained",
+            return_value=fake_tr,
+        ) as mock_fp,
+    ):
+        dit, is_df = loader_mod._load_transformer_by_mode(
+            "Tongyi-MAI/Z-Image-Turbo",
+            torch.float32,
+            torch.device("cpu"),
+            "diffusers",
+            logs.append,
+            "transformer",
+        )
+    assert dit is fake_tr
+    assert is_df is True
+    mock_fp.assert_called_once_with(
+        "Tongyi-MAI/Z-Image-Turbo",
+        subfolder="transformer",
+        torch_dtype=torch.float32,
+    )
+    mock_df.assert_not_called()
+    mock_ds.assert_not_called()
 
 
 def _stub_te_vae_side_effects():
