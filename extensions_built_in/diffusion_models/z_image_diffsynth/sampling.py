@@ -4,7 +4,7 @@
 
 import os
 import sys
-from typing import List, Optional
+from typing import List, Optional, Union
 import torch
 import numpy as np
 from PIL import Image
@@ -71,6 +71,7 @@ class ZImageDiffSynthPipelineWrapper:
         guidance_scale: float = 1.0,
         latents: Optional[torch.Tensor] = None,
         generator: Optional[torch.Generator] = None,
+        output_type: str = "pil",
         **kwargs,
     ):
         device = self.device
@@ -161,6 +162,13 @@ class ZImageDiffSynthPipelineWrapper:
         else:
             _run_sampling_loop()
 
+        if output_type == "latent":
+            return _ImagesOutput(latents)
+        return _ImagesOutput(self.decode_latents_to_pil(latents))
+
+    def decode_latents_to_pil(self, latents: torch.Tensor) -> List[Image.Image]:
+        """VAE decode with wrapper numerics. Not used by HuggingFace ZImagePipeline."""
+        device = self.device
         vae = self.vae
         decoder = getattr(vae, "vae_decoder", vae)
         if hasattr(decoder, "parameters") and next(decoder.parameters(), None) is not None:
@@ -180,12 +188,11 @@ class ZImageDiffSynthPipelineWrapper:
         image = (image / 2 + 0.5).clamp(0, 1)
         image = image.float().cpu().numpy()
         image = (image.transpose(0, 2, 3, 1) * 255).round().astype(np.uint8)
-        images = [Image.fromarray(img) for img in image]
-        return _ImagesOutput(images)
+        return [Image.fromarray(img) for img in image]
 
 
 class _ImagesOutput:
-    def __init__(self, images: List[Image.Image]):
+    def __init__(self, images: Union[List[Image.Image], torch.Tensor]):
         self.images = images
 
 

@@ -894,7 +894,12 @@ class ZImageDiffSynthModel(BaseModel):
                     uncond = [uncond[i][uncond_mask[i].bool()] for i in range(uncond.shape[0])]
                 else:
                     uncond = [uncond[i] for i in range(uncond.shape[0])]
-            return pipeline(
+            # Restore Turbo for denoise if it was parked on CPU after the previous decode.
+            # No flush on restore. No-op when already on device_torch or st is None.
+            self._move_sampling_transformer(self.device_torch)
+            call_kw = dict(extra)
+            call_kw["output_type"] = "latent"
+            out = pipeline(
                 prompt_embeds=cond,
                 negative_prompt_embeds=uncond,
                 height=gen_config.height,
@@ -903,8 +908,35 @@ class ZImageDiffSynthModel(BaseModel):
                 guidance_scale=gen_config.guidance_scale,
                 latents=gen_config.latents,
                 generator=generator,
-                **extra,
-            ).images[0]
+                **call_kw,
+            )
+            latents = out.images
+            if isinstance(latents, (list, tuple)):
+                latents = latents[0]
+            if not torch.is_tensor(latents):
+                raise TypeError(
+                    "[zimage_diffsynth] pipeline output_type=latent must return a "
+                    f"tensor in .images, got {type(latents)}"
+                )
+            moved = self._move_sampling_transformer("cpu")
+            if moved:
+                self._flush_cuda()
+            if getattr(pipeline, "image_processor", None) is not None:
+                vae = pipeline.vae
+                latents = latents.to(vae.dtype)
+                latents = (latents / vae.config.scaling_factor) + vae.config.shift_factor
+                decoded = vae.decode(latents, return_dict=False)[0]
+                images = pipeline.image_processor.postprocess(
+                    decoded, output_type="pil"
+                )
+                img = images[0]
+                del decoded
+            else:
+                images = pipeline.decode_latents_to_pil(latents)
+                img = images[0]
+            del latents, out
+            self._flush_cuda()
+            return img
 
         use_sampling = (
             self._sampling_transformer is not None
@@ -913,7 +945,8 @@ class ZImageDiffSynthModel(BaseModel):
         )
         if not use_sampling:
             return _run()
-        # Batch path: BaseModel already moved main→CPU, sampling→GPU once; no per-prompt moves.
+        # Batch path: BaseModel pins base CPU / Turbo GPU once at enter.
+        # Per-prompt moves in _run() are decode-park only, not standalone enter/exit.
         if self._sampling_in_batch_generate:
             return _run()
         # Standalone path (e.g. smoke test): move sampling to GPU, main to CPU, then restore after.
