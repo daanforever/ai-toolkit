@@ -88,7 +88,7 @@ def run_forward(
     )
     with torch.autocast(
         device_type="cuda",
-        dtype=model_dtype if use_autocast else torch.float32,
+        dtype=model_dtype,
         enabled=use_autocast,
     ):
         if image_valid_patches:

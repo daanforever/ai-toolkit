@@ -16,7 +16,7 @@ def encode_prompt_diffsynth_literal_t2i(
     text_encoder: torch.nn.Module,
     prompt: Union[str, List[str]],
     device: torch.device,
-    dtype: torch.dtype = torch.float32,
+    dtype: torch.dtype,
     max_sequence_length: int = 512,
 ) -> PromptEmbeds:
     """

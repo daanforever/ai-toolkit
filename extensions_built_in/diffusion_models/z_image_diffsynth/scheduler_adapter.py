@@ -33,7 +33,7 @@ class DiffSynthZImageSchedulerAdapter(CustomFlowMatchEulerDiscreteScheduler):
         self.timesteps = self._scheduler.timesteps
         self.sigmas = self._scheduler.sigmas
         self.linear_timesteps_weights = getattr(
-            self._scheduler, "linear_timesteps_weights", torch.ones_like(self._scheduler.timesteps, dtype=torch.float32)
+            self._scheduler, "linear_timesteps_weights", torch.ones_like(self._scheduler.timesteps)
         )
         self.linear_timesteps_weights2 = getattr(
             self._scheduler, "linear_timesteps_weights2", self.linear_timesteps_weights
@@ -58,7 +58,7 @@ class DiffSynthZImageSchedulerAdapter(CustomFlowMatchEulerDiscreteScheduler):
         self.timesteps = self._scheduler.timesteps
         self.sigmas = self._scheduler.sigmas
         self.linear_timesteps_weights = getattr(
-            self._scheduler, "linear_timesteps_weights", torch.ones_like(self._scheduler.timesteps, dtype=torch.float32)
+            self._scheduler, "linear_timesteps_weights", torch.ones_like(self._scheduler.timesteps)
         )
         self.linear_timesteps_weights2 = getattr(
             self._scheduler, "linear_timesteps_weights2", self.linear_timesteps_weights

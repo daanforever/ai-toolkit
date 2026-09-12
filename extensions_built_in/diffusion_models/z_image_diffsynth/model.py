@@ -58,9 +58,10 @@ class _DiTUnetWrapper(torch.nn.Module):
     etc. are always reachable; nn.Module stores submodules in _modules, so we read from there in
     __getattr__ to avoid 'object has no attribute dit' after quantize."""
 
-    def __init__(self, dit):
+    def __init__(self, dit, fallback_dtype: Optional[torch.dtype] = None):
         super().__init__()
         self._inner_dit = dit
+        self._fallback_dtype = fallback_dtype
         self.config = type("_Config", (), {"patch_size": 2})()
 
     def forward(self, *args, **kwargs):
@@ -93,7 +94,7 @@ class _DiTUnetWrapper(torch.nn.Module):
             return self._modules["_inner_dit"].training
         if name == "dtype":
             params = list(self._modules["_inner_dit"].parameters())
-            return next(iter(params)).dtype if params else torch.float32
+            return next(iter(params)).dtype if params else self._fallback_dtype
         return getattr(self._modules["_inner_dit"], name)
 
 
@@ -539,7 +540,7 @@ class ZImageDiffSynthModel(BaseModel):
                         self.print_and_status_update(f"Disabled DiT module: {_ref_name}")
                     except Exception:
                         pass
-        self.model = _DiTUnetWrapper(self._raw_dit)
+        self.model = _DiTUnetWrapper(self._raw_dit, fallback_dtype=self.torch_dtype)
         self.vae = components["vae_wrapper"]
         # When caching text embeddings, keep VAE on CPU until latent-cache preset /
         # train device state so unquantized TE (~8GB) has headroom for encode.
@@ -570,7 +571,7 @@ class ZImageDiffSynthModel(BaseModel):
         # (main uses _DiTUnetWrapper → lora_unet__inner_dit_*). For diffusers sampling we unwrap
         # when building ZImagePipeline in get_generation_pipeline.
         if sampling_dit is not None:
-            self._sampling_transformer = _DiTUnetWrapper(sampling_dit)
+            self._sampling_transformer = _DiTUnetWrapper(sampling_dit, fallback_dtype=self.torch_dtype)
         else:
             self._sampling_transformer = None
 
@@ -730,7 +731,9 @@ class ZImageDiffSynthModel(BaseModel):
                     f"image_valid_mask_tensor batch {valid.shape[0]} != latents batch {B}"
                 )
             valid = valid.to(device=latent_model_input.device)
-            patch_grid = pixel_valid_to_patch_valid(valid, lh, lw, patch_size=2)
+            patch_grid = pixel_valid_to_patch_valid(
+                valid, lh, lw, patch_size=2, dtype=latent_model_input.dtype
+            )
             # Only activate adapter when at least one fully padded patch exists
             patches = [patch_grid[b] for b in range(B)]
             if any(not p.all().item() for p in patches):
@@ -765,7 +768,7 @@ class ZImageDiffSynthModel(BaseModel):
 
             with torch.autocast(
                 device_type="cuda",
-                dtype=model_dtype if use_autocast else torch.float32,
+                dtype=model_dtype,
                 enabled=use_autocast,
             ):
                 with spatial_attention_context(dit, image_valid_patches):
@@ -775,7 +778,7 @@ class ZImageDiffSynthModel(BaseModel):
                         text_embeds,
                         return_dict=False,
                     )[0]
-            noise_pred = torch.stack([t.float() for t in model_out_list], dim=0)
+            noise_pred = torch.stack([t.to(train_dtype) for t in model_out_list], dim=0)
             noise_pred = -noise_pred.squeeze(2)
             if noise_pred.dtype != train_dtype:
                 noise_pred = noise_pred.to(train_dtype)

@@ -29,7 +29,7 @@ def test_pixel_valid_to_patch_valid_any_content():
     # Latent 4x4, patch 2 → 2x2 patches. Bottom-right patch fully pad.
     valid = torch.zeros(1, 1, 4, 4)
     valid[0, 0, :3, :3] = 1.0
-    patches = pixel_valid_to_patch_valid(valid, 4, 4, patch_size=2)
+    patches = pixel_valid_to_patch_valid(valid, 4, 4, patch_size=2, dtype=torch.float32)
     assert patches.shape == (1, 2, 2)
     assert bool(patches[0, 0, 0])
     assert bool(patches[0, 0, 1])
@@ -39,7 +39,7 @@ def test_pixel_valid_to_patch_valid_any_content():
 
     valid2 = torch.zeros(1, 1, 4, 4)
     valid2[0, 0, :2, :2] = 1.0
-    patches2 = pixel_valid_to_patch_valid(valid2, 4, 4, patch_size=2)
+    patches2 = pixel_valid_to_patch_valid(valid2, 4, 4, patch_size=2, dtype=torch.float32)
     assert bool(patches2[0, 0, 0])
     assert not bool(patches2[0, 0, 1])
     assert not bool(patches2[0, 1, 0])
@@ -50,7 +50,7 @@ def test_pixel_valid_nearest_resize_to_latent():
     # Pixel mask 8x8 → latent 4x4
     valid = torch.zeros(1, 1, 8, 8)
     valid[0, 0, :, :4] = 1.0  # left half
-    patches = pixel_valid_to_patch_valid(valid, 4, 4, patch_size=2)
+    patches = pixel_valid_to_patch_valid(valid, 4, 4, patch_size=2, dtype=torch.float32)
     assert bool(patches[0, 0, 0])
     assert not bool(patches[0, 0, 1])
 

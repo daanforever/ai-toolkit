@@ -1546,7 +1546,9 @@ class Adafactor(torch.optim.Optimizer):
                 current_update_sq = scaled_update.pow(2).mean()
                 if "beta2_update_sq_ema" in state:
                     signal_sq = torch.as_tensor(
-                        state["beta2_update_sq_ema"], device=grad.device, dtype=torch.float32
+                        state["beta2_update_sq_ema"],
+                        device=grad.device,
+                        dtype=grad.dtype,
                     ).reshape(())
                 else:
                     signal_sq = current_update_sq.detach()
