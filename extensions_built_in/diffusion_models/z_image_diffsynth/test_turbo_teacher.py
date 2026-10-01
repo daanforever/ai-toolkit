@@ -233,7 +233,7 @@ def test_apply_runtime_turbo_teacher_weight_calls_mode(monkeypatch):
     trainer = ZImageDiffSynthTrainer(0, None, _base_cfg())
     trainer.use_diffsynth_training_loop = False
     trainer.is_ui_trainer = True
-    trainer._last_applied_runtime_turbo_teacher_weight = None
+    trainer.job_id = "job-turbo"
     trainer.sd = SimpleNamespace(
         _sampling_transformer=object(),
         apply_turbo_teacher_mode=MagicMock(),
@@ -242,11 +242,34 @@ def test_apply_runtime_turbo_teacher_weight_calls_mode(monkeypatch):
     monkeypatch.setattr(
         trainer, "get_runtime_turbo_teacher_weight", lambda: True
     )
+    cleared = []
+
+    def _db_connect():
+        class _Cur:
+            def execute(self, sql, params=None):
+                cleared.append(sql)
+
+            def fetchone(self):
+                return None
+
+        class _Conn:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def cursor(self):
+                return _Cur()
+
+        return _Conn()
+
+    trainer._db_connect = _db_connect
 
     DiffusionTrainer.apply_runtime_turbo_teacher_weight(trainer)
     trainer.sd.apply_turbo_teacher_mode.assert_called_with(True)
     assert trainer.train_config.turbo_teacher_weight is True
-    assert trainer._last_applied_runtime_turbo_teacher_weight is True
+    assert any("runtime_turbo_teacher_weight=NULL" in sql for sql in cleared)
     assert trainer.network is trainer.sd.network
 
 

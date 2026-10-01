@@ -91,11 +91,33 @@ def _make_trainer(
     t.is_ui_trainer = True
     t.job_id = "job-test"
     t.device_torch = "cpu"
-    t._last_applied_runtime_prompts = None
     t.is_caching_text_embeddings = caching
     t.train_config = SimpleNamespace(unload_text_encoder=unload_te)
     samples = [SimpleNamespace(prompt=p) for p in sample_prompts]
     t.sample_config = SimpleNamespace(samples=samples)
+    t._clear_sql = []
+
+    def _db_connect():
+        class _Cur:
+            def execute(self, sql, params=None):
+                t._clear_sql.append((sql, params))
+
+            def fetchone(self):
+                return None
+
+        class _Conn:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def cursor(self):
+                return _Cur()
+
+        return _Conn()
+
+    t._db_connect = _db_connect
     t.sd = SimpleNamespace(
         unet=MagicMock(),
         text_encoder_to=MagicMock(),
@@ -128,7 +150,6 @@ def _make_recache_trainer(
     t.is_caching_text_embeddings = caching
     t.train_config = SimpleNamespace(unload_text_encoder=unload_te)
     t.sample_config = SimpleNamespace(samples=[SimpleNamespace(prompt="old")])
-    t._last_applied_runtime_prompts = None
     t.cache_sample_prompts = MagicMock()
 
     te = _TinyLinear(2).to(device if not start_with_fake_te else _CPU)
@@ -254,7 +275,7 @@ def test_apply_same_strings_skips_recache():
         caching=True,
     )
     t.apply_runtime_prompts()
-    assert t._last_applied_runtime_prompts == ("hello", "world")
+    assert any("runtime_prompts=NULL" in sql for sql, _ in t._clear_sql)
     t._recache_sample_prompts_runtime.assert_not_called()
     t.cache_sample_prompts.assert_not_called()
 
@@ -503,37 +524,41 @@ def test_recache_cleanup_failure_chains_original(monkeypatch):
     assert "abort boom" in str(ei.value.__cause__)
 
 
-def test_reset_last_applied_clears_prompts():
-    t = DiffusionTrainer.__new__(DiffusionTrainer)
-    t._last_applied_runtime_lr = 1.0
-    t._last_applied_runtime_gaussian_mean = None
-    t._last_applied_runtime_gaussian_std = None
-    t._last_applied_runtime_gaussian_mean_2 = None
-    t._last_applied_runtime_gaussian_std_2 = None
-    t._last_applied_runtime_weight_decay = None
-    t._last_applied_runtime_weight_decay_increment = None
-    t._last_applied_runtime_weight_decay_mode = None
-    t._last_applied_runtime_beta1 = None
-    t._last_applied_runtime_beta2 = None
-    t._last_applied_runtime_content_or_style = None
-    t._last_applied_runtime_timestep_type = None
-    t._last_applied_runtime_timestep_weighting = None
-    t._last_applied_runtime_network_weights = None
-    t._last_applied_runtime_prompts = ("a",)
-    t._last_applied_runtime_batch_size = None
-    t._last_applied_runtime_gradient_accumulation = None
-    t._last_applied_runtime_save_every = None
-    t._last_applied_runtime_sample_every = None
-    t._last_applied_runtime_warmup_steps = None
-    t._last_applied_runtime_warmup_boost = None
-    t._last_applied_runtime_min_snr_gamma = None
-    t._last_applied_runtime_debug = None
-    t._last_applied_runtime_fc_key = None
-    t._last_applied_runtime_turbo_prior_steps = None
-    t._last_applied_runtime_turbo_t_jitter = None
-    t._last_applied_runtime_turbo_teacher_weight = None
-    DiffusionTrainer._reset_last_applied_runtime(t)
-    assert t._last_applied_runtime_prompts is None
+def test_apply_prompts_nulls_column_and_keeps_row(tmp_path):
+    import sqlite3
+
+    db_path = tmp_path / "prompts.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE RuntimeParams (jobId TEXT PRIMARY KEY, runtime_prompts TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO RuntimeParams VALUES (?, ?)",
+        ("job-test", json.dumps(["hello", "world"])),
+    )
+    conn.commit()
+    conn.close()
+
+    t = _make_trainer(
+        prompts_db=["hello", "world"],
+        sample_prompts=["hello", "world"],
+    )
+    t.sqlite_db_path = str(db_path)
+    t._db_connect = DiffusionTrainer._db_connect.__get__(t, DiffusionTrainer)
+    t.get_runtime_prompts = DiffusionTrainer.get_runtime_prompts.__get__(
+        t, DiffusionTrainer
+    )
+    t.apply_runtime_prompts()
+
+    check = sqlite3.connect(db_path)
+    row = check.execute(
+        "SELECT runtime_prompts FROM RuntimeParams WHERE jobId = ?",
+        ("job-test",),
+    ).fetchone()
+    count = check.execute("SELECT COUNT(*) FROM RuntimeParams").fetchone()[0]
+    check.close()
+    assert row == (None,)
+    assert count == 1
 
 
 @pytest.mark.skipif(not _HAS_CUDA, reason="CUDA required for residency check")

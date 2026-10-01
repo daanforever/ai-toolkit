@@ -418,37 +418,39 @@ class Adafactor(torch.optim.Optimizer):
             ntt, float(self.scale_lr_mean), float(self.scale_lr_std), dtype=pdf_dtype
         )
 
-    def _clear_stale_effective_warmup_state(self) -> None:
-        """Clear warmup fields whose LR space may be stale after scale_lr config change."""
-        keys = (
-            "warmup_progress",
-            "warmup_delta",
-            "warmup_start",
-            "warmup_start_unscaled",
-            "warmup_lr",
-            "warmup_lr_unscaled",
-            "warmup_interp",
-            "warmup_lr_effective",
-            "warmup_complete_pending_cleanup",
-            "warmup_target",
-            "warmup_steps_old",
-            "warmup_boost_old",
+    @staticmethod
+    def _scale_mask_key(mask: Optional[Sequence[str]]) -> Tuple[str, ...]:
+        """Normalize ``None`` and empty masks to one key. Both mean 'scale every group'."""
+        if not mask:
+            return ()
+        return tuple(mask)
+
+    def _scale_lr_fingerprint(
+        self,
+    ) -> Tuple[bool, Optional[float], Optional[float], Tuple[str, ...]]:
+        """Identity of the Gaussian scale config that warmup segments depend on."""
+        return (
+            bool(self.scale_lr_by_index),
+            self.scale_lr_mean,
+            self.scale_lr_std,
+            self._scale_mask_key(self.scale_lr_mask),
         )
-        for group in self.param_groups:
-            has_warmup_state = (
-                group.get("warmup_active")
-                or group.get("warmup_lr_effective")
-                or group.get("warmup_complete_pending_cleanup")
-                or "warmup_lr" in group
-                or "warmup_target" in group
-                or "warmup_lr_previous" in group
-            )
-            if not has_warmup_state:
-                continue
-            group["warmup_active"] = False
-            group.pop("warmup_lr_previous", None)
-            for k in keys:
-                group.pop(k, None)
+
+    def _scale_lr_config_is_current(
+        self,
+        enabled: bool,
+        mean: Optional[float],
+        std: Optional[float],
+        mask: Optional[Tuple[str, ...]],
+    ) -> bool:
+        if not hasattr(self, "scale_lr_by_index"):
+            return False
+        return self._scale_lr_fingerprint() == (
+            bool(enabled),
+            mean,
+            std,
+            self._scale_mask_key(mask),
+        )
 
     def _init_scale_lr_by_index(
         self,
@@ -456,15 +458,20 @@ class Adafactor(torch.optim.Optimizer):
         scale_lr_mean: Optional[float] = None,
         scale_lr_std: Optional[float] = None,
         scale_lr_mask: Optional[Sequence[str]] = None,
-        *,
-        clear_warmup: bool = False,
     ) -> None:
-        """Enable index-based Gaussian LR scaling and resolve max_index."""
+        """Enable index-based Gaussian LR scaling and resolve max_index.
+
+        Same effective config is a no-op: warmup keys are left untouched.
+        A real change only updates the scale fields. The next warmup step
+        opens a segment from ``warmup_lr_previous`` when the fingerprint differs.
+        """
         enabled = bool(scale_lr_by_index)
         mean, std = self._validate_scale_lr_mean_std(
             scale_lr_mean, scale_lr_std, required=enabled
         )
         mask = self._validate_scale_lr_mask(scale_lr_mask)
+        if self._scale_lr_config_is_current(enabled, mean, std, mask):
+            return
         self.scale_lr_mean = mean
         self.scale_lr_std = std
         self.scale_lr_mask = mask
@@ -472,8 +479,6 @@ class Adafactor(torch.optim.Optimizer):
         self._max_index = None
         self._scale_lr_lookup = None
         if not enabled:
-            if clear_warmup:
-                self._clear_stale_effective_warmup_state()
             return
         indices = [
             int(group["index"])
@@ -492,8 +497,6 @@ class Adafactor(torch.optim.Optimizer):
             )
         self._max_index = max_index
         self._rebuild_scale_lr_lookup()
-        if clear_warmup:
-            self._clear_stale_effective_warmup_state()
 
     def _scale_lr_applies(self, group) -> bool:
         """True when Gaussian LR scaling should modify this group's LR."""
@@ -528,13 +531,15 @@ class Adafactor(torch.optim.Optimizer):
 
     def set_scale_lr_by_index(self, value: bool) -> None:
         """Enable/disable index-based LR scaling at runtime (e.g. from UI)."""
+        before = self._scale_lr_fingerprint()
         self._init_scale_lr_by_index(
             bool(value),
             self.scale_lr_mean,
             self.scale_lr_std,
             self.scale_lr_mask,
-            clear_warmup=True,
         )
+        if self._scale_lr_fingerprint() == before:
+            return
         if is_debug_enabled():
             print_acc(
                 f"Adafactor: applied runtime scale_lr_by_index={self.scale_lr_by_index}"
@@ -547,13 +552,15 @@ class Adafactor(torch.optim.Optimizer):
         mask: Optional[Sequence[str]],
     ) -> None:
         """Atomically update Gaussian LR mean/std/mask and rebuild the lookup."""
+        before = self._scale_lr_fingerprint()
         self._init_scale_lr_by_index(
             self.scale_lr_by_index,
             mean,
             std,
             mask,
-            clear_warmup=True,
         )
+        if self._scale_lr_fingerprint() == before:
+            return
         if is_debug_enabled():
             print_acc(
                 f"Adafactor: applied runtime scale_lr_config "
@@ -843,17 +850,26 @@ class Adafactor(torch.optim.Optimizer):
     def _warmup_update_group(self, group) -> None:
         """Advance group warmup by one optimizer step.
 
-        Starts a new segment when ``group["lr"]``, ``warmup_steps``, or ``warmup_boost`` changes.
+        Starts a new segment when ``group["lr"]``, ``warmup_steps``, ``warmup_boost``,
+        or the scale fingerprint (``by_index`` / mean / std / mask) changes.
         Segment: linear ramp stored in ``warmup_lr``. Unscaled geometry uses prior unscaled
         start (or ``lr * eps[1]``) toward a boosted interp target; ``warmup_target`` stays the
         scheduled ``lr``. When ``scale_lr_by_index`` applies to the group, the ramp runs in
         effective-LR space with the absolute unscaled delta so lower-index-scale groups can
         finish earlier; ``_get_lr`` must not scale ``warmup_lr`` again (``warmup_lr_effective``).
+        A scale change keeps ``warmup_lr_previous`` and reuses ``_index_lr_multiplier`` /
+        ``_to_effective_lr`` so the new segment starts at the current level.
         ``warmup_lr_unscaled`` tracks the same progress in unscaled space for absolute WD.
         Completion is per-group when ``warmup_lr`` reaches ``warmup_interp`` (or ``warmup_steps``
         as a cap); cleanup runs on the next step via ``stop_warmup``.
         """
-        if group.pop("warmup_complete_pending_cleanup", False):
+        scale_fp = self._scale_lr_fingerprint()
+        stored_fp = group.get("warmup_scale_fp", None)
+        scale_changed = stored_fp is not None and stored_fp != scale_fp
+        if scale_changed and group.get("warmup_complete_pending_cleanup", False):
+            # stop_warmup would snap warmup_lr_previous onto the new effective target.
+            group.pop("warmup_complete_pending_cleanup", None)
+        elif group.pop("warmup_complete_pending_cleanup", False):
             self.stop_warmup(group)
 
         lr_target = group["lr"]
@@ -864,6 +880,7 @@ class Adafactor(torch.optim.Optimizer):
             group.pop("warmup_lr_unscaled", None)
             group.pop("warmup_lr_effective", None)
             group["warmup_lr_previous"] = group.get("warmup_lr_previous", 1.0)
+            group["warmup_scale_fp"] = scale_fp
             return
 
         use_effective = self._scale_lr_applies(group)
@@ -883,6 +900,7 @@ class Adafactor(torch.optim.Optimizer):
                 group["warmup_lr_previous"] = lr_target
                 group.pop("warmup_lr_unscaled", None)
                 group.pop("warmup_lr_effective", None)
+            group["warmup_scale_fp"] = scale_fp
             return
 
         warmup_steps_old = group.get("warmup_steps_old", 0)
@@ -894,6 +912,7 @@ class Adafactor(torch.optim.Optimizer):
             or warmup_steps != warmup_steps_old
             or boost_old is None
             or boost != boost_old
+            or scale_changed
         ):
             if "warmup_lr_previous" in group:
                 if use_effective:
@@ -939,6 +958,7 @@ class Adafactor(torch.optim.Optimizer):
             group["warmup_delta"] = delta_ref
             group["warmup_steps_old"] = warmup_steps
             group["warmup_boost_old"] = boost
+            group["warmup_scale_fp"] = scale_fp
             group["warmup_lr_effective"] = use_effective
             if not use_effective:
                 group.pop("warmup_lr_unscaled", None)
@@ -949,6 +969,8 @@ class Adafactor(torch.optim.Optimizer):
                     f"Adafactor: base_lr changed ({lr_start:.2e} -> interp {lr_interp:.2e}, "
                     f"target {lr_target:.2e}, {direction}), starting warmup"
                 )
+        elif stored_fp is None:
+            group["warmup_scale_fp"] = scale_fp
 
         if group.get("warmup_active", False):
             warmup_start = group["warmup_start"]

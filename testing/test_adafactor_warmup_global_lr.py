@@ -349,8 +349,51 @@ def test_warmup_scale_lr_lower_index_scale_finishes_earlier():
     assert g_hi.get("warmup_active") is True or "warmup_lr" in g_hi
 
 
+def _warmup_key_snapshot(group):
+    return {
+        key: group[key]
+        for key in group
+        if key.startswith("warmup_")
+    }
+
+
+def test_same_scale_lr_config_does_not_touch_warmup():
+    """Repeating the active scale config leaves warmup keys and LR unchanged."""
+    p0 = torch.nn.Parameter(torch.ones(2))
+    p1 = torch.nn.Parameter(torch.ones(2))
+    opt = Adafactor(
+        [
+            {"params": [p0], "index": 0, "name": "layers_0"},
+            {"params": [p1], "index": 1, "name": "layers_1"},
+        ],
+        lr=1e-4,
+        relative_step=False,
+        scale_parameter=False,
+        warmup_init=True,
+        warmup_steps=10,
+        beta1=None,
+        weight_decay=0.0,
+        factored=False,
+        scale_lr_by_index=True,
+        scale_lr_mean=0.0,
+        scale_lr_std=0.5,
+        scale_lr_mask=["layers"],
+    )
+    p0.grad = torch.zeros_like(p0)
+    p1.grad = torch.zeros_like(p1)
+    opt.step()
+    before_keys = [_warmup_key_snapshot(g) for g in opt.param_groups]
+    before_lrs = opt.get_learning_rates()
+
+    opt.set_scale_lr_config(mean=0.0, std=0.5, mask=["layers"])
+    opt.set_scale_lr_by_index(True)
+
+    assert [_warmup_key_snapshot(g) for g in opt.param_groups] == before_keys
+    assert opt.get_learning_rates() == before_lrs
+
+
 def test_warmup_after_runtime_scale_lr_config_change():
-    """Runtime Gaussian config clears effective warmup and rebuilds on next step."""
+    """A real scale change continues from the current warmup level."""
     p0 = torch.nn.Parameter(torch.ones(2))
     p1 = torch.nn.Parameter(torch.ones(2))
     lr = 1.0
@@ -378,30 +421,27 @@ def test_warmup_after_runtime_scale_lr_config_change():
     p1.grad = torch.zeros_like(p1)
     opt.step()
     assert g0.get("warmup_lr_effective") is True
-    assert "warmup_lr" in g0
-    old_warmup = g0["warmup_lr"]
+    prev = g0["warmup_lr_previous"]
 
     opt.set_scale_lr_config(mean=1.0, std=0.25, mask=["layers"])
-    assert g0.get("warmup_lr_effective") is None
-    assert "warmup_lr" not in g0
+    assert g0["warmup_lr_previous"] == prev
+    assert "warmup_lr" in g0
     assert opt.scale_lr_mean == pytest.approx(1.0)
     assert opt.scale_lr_std == pytest.approx(0.25)
 
     p0.grad = torch.zeros_like(p0)
     p1.grad = torch.zeros_like(p1)
     opt.step()
-    assert g0.get("warmup_lr_effective") is True
-    assert "warmup_lr" in g0
-    # New segment starts from lr * eps1 in effective space under the new curve.
+    assert g0["warmup_start"] == pytest.approx(prev)
+    assert g0["warmup_lr"] == pytest.approx(prev)
     eps1 = float(g0["eps"][1])
-    expected_start = opt._to_effective_lr(lr * eps1, g0)
-    assert g0["warmup_lr"] == pytest.approx(expected_start)
-    assert g0["warmup_lr"] != pytest.approx(old_warmup)
+    fresh = opt._to_effective_lr(lr * eps1, g0)
+    assert g0["warmup_lr"] != pytest.approx(fresh)
     assert g1.get("warmup_lr_effective") is True
 
 
-def test_warmup_mask_unmatched_to_matched_clears_stale_state():
-    """Mask change unmatched->matched must clear unscaled warmup and rebuild effective."""
+def test_warmup_mask_unmatched_to_matched_continues_from_current_level():
+    """Mask change unmatched->matched starts the new segment at the current LR."""
     p0 = torch.nn.Parameter(torch.ones(2))
     p1 = torch.nn.Parameter(torch.ones(2))
     lr = 1.0
@@ -434,23 +474,75 @@ def test_warmup_mask_unmatched_to_matched_clears_stale_state():
     assert g0.get("warmup_lr_effective") is True
     assert not g1.get("warmup_lr_effective")
     assert "warmup_lr" in g1
-    stale_unscaled = g1["warmup_lr"]
-    assert stale_unscaled == pytest.approx(lr * float(g1["eps"][1]))
+    prev = g1["warmup_lr_previous"]
+    assert prev == pytest.approx(lr * float(g1["eps"][1]))
 
     # Broaden mask so previously unmatched group becomes matched.
     opt.set_scale_lr_config(mean=0.0, std=0.5, mask=["layers", "other"])
     assert opt._scale_lr_applies(g1) is True
-    assert "warmup_lr" not in g1
-    assert "warmup_lr_effective" not in g1
-    assert "warmup_lr_previous" not in g1
+    assert g1["warmup_lr_previous"] == pytest.approx(prev)
+    assert "warmup_lr" in g1
 
     p0.grad = torch.zeros_like(p0)
     p1.grad = torch.zeros_like(p1)
     opt.step()
     assert g1.get("warmup_lr_effective") is True
+    assert g1["warmup_start"] == pytest.approx(prev)
+    assert g1["warmup_lr"] == pytest.approx(prev)
     eps1 = float(g1["eps"][1])
-    expected_start = opt._to_effective_lr(lr * eps1, g1)
-    assert g1["warmup_lr"] == pytest.approx(expected_start)
-    assert g1["warmup_lr"] != pytest.approx(stale_unscaled)
-    assert "warmup_lr_unscaled" in g1
-    assert g1["warmup_lr_unscaled"] == pytest.approx(lr * eps1)
+    fresh = opt._to_effective_lr(lr * eps1, g1)
+    assert g1["warmup_lr"] != pytest.approx(fresh)
+
+
+def test_completed_warmup_scale_change_ramps_from_current_lr():
+    """After warmup reaches the base LR, a scale change must not restart at lr*eps1."""
+    lr = 1e-4
+    steps = 100
+    p0 = torch.nn.Parameter(torch.ones(2))
+    p1 = torch.nn.Parameter(torch.ones(2))
+    opt = Adafactor(
+        [
+            {"params": [p0], "index": 0, "name": "layers_0"},
+            {"params": [p1], "index": 1, "name": "layers_1"},
+        ],
+        lr=lr,
+        relative_step=False,
+        scale_parameter=False,
+        warmup_init=True,
+        warmup_steps=steps,
+        beta1=None,
+        weight_decay=0.0,
+        factored=False,
+    )
+    for _ in range(steps + 2):
+        p0.grad = torch.zeros_like(p0)
+        p1.grad = torch.zeros_like(p1)
+        opt.step()
+
+    g1 = opt.param_groups[1]
+    assert g1["lr_mean"].item() == pytest.approx(lr)
+    prev = g1["warmup_lr_previous"]
+    assert prev == pytest.approx(lr)
+
+    opt.set_scale_lr_config(mean=0.0, std=0.5, mask=None)
+    opt.set_scale_lr_by_index(True)
+    assert g1["warmup_lr_previous"] == pytest.approx(prev)
+    assert opt.get_learning_rates()[1] == pytest.approx(lr)
+
+    p0.grad = torch.zeros_like(p0)
+    p1.grad = torch.zeros_like(p1)
+    opt.step()
+    eps1 = float(g1["eps"][1])
+    assert g1["warmup_start"] == pytest.approx(prev)
+    assert g1["warmup_lr"] == pytest.approx(prev)
+    assert g1["warmup_lr"] != pytest.approx(lr * eps1)
+    fresh = opt._to_effective_lr(lr * eps1, g1)
+    assert g1["warmup_lr"] != pytest.approx(fresh)
+
+    target = opt._to_effective_lr(lr, g1)
+    p0.grad = torch.zeros_like(p0)
+    p1.grad = torch.zeros_like(p1)
+    opt.step()
+    assert g1["warmup_lr"] != pytest.approx(lr * eps1)
+    assert g1["warmup_lr"] < prev
+    assert g1["warmup_lr"] > target
