@@ -119,17 +119,12 @@ def get_bucket_for_image_size(
 
         return closest_bucket
 
-    # Dynamic bucket: scale to effective resolution, round down to divisibility
-    if resolution is None:
-        resolution = max(width, height)
-    effective_resolution = min(resolution, max(width, height))
-    scale = effective_resolution / max(width, height)
-    new_width = int(width * scale)
-    new_height = int(height * scale)
-    new_width -= new_width % divisibility
-    new_height -= new_height % divisibility
-    if new_width < divisibility:
-        new_width = divisibility
-    if new_height < divisibility:
-        new_height = divisibility
-    return {"width": new_width, "height": new_height}
+    # Dynamic bucket: snap long side to grid (integer-only), floor short side
+    long_side = max(width, height)
+    short_side = min(width, height)
+    effective = min(resolution if resolution is not None else long_side, long_side)
+    target_long = max(divisibility, (effective // divisibility) * divisibility)
+    target_short = max(divisibility, (((short_side * target_long) // long_side) // divisibility) * divisibility)
+    if width >= height:
+        return {"width": target_long, "height": target_short}
+    return {"width": target_short, "height": target_long}
