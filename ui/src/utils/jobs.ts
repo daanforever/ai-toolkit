@@ -102,13 +102,29 @@ export const getJobConfig = (job: Job) => {
   return JSON.parse(job.job_config) as JobConfig;
 };
 
+const decimalPlaces = (n: number): number => {
+  const text = Math.abs(n).toString();
+  const exp = /^(\d+)(?:\.(\d+))?e([+-]?\d+)$/i.exec(text);
+  if (exp) {
+    const frac = exp[2]?.length ?? 0;
+    return Math.max(0, frac - Number(exp[3]));
+  }
+  const dot = text.indexOf('.');
+  return dot === -1 ? 0 : text.length - dot - 1;
+};
+
 export const adjustJobLr = async (job: Job, delta: number): Promise<void> => {
   const jobConfig = getJobConfig(job);
   const currentLr = jobConfig.config.process[0].train.lr;
   if (typeof currentLr !== 'number' || !Number.isFinite(currentLr)) {
     throw new Error('Current LR is not a finite number');
   }
-  const newLr = currentLr + delta;
+  const sum = currentLr + delta;
+  if (!Number.isFinite(sum)) {
+    throw new Error('Adjusted LR must be a positive finite number');
+  }
+  const places = Math.max(decimalPlaces(currentLr), decimalPlaces(delta));
+  const newLr = Number(sum.toFixed(places));
   if (!Number.isFinite(newLr) || newLr <= 0) {
     throw new Error('Adjusted LR must be a positive finite number');
   }
