@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useState, ReactNode, KeyboardEvent } from 'react';
+import React, { useRef, useEffect, useState, ReactNode, KeyboardEvent, MouseEvent } from 'react';
 import { FaTrashAlt, FaEye, FaEyeSlash } from 'react-icons/fa';
 import { openConfirm } from './ConfirmModal';
 import classNames from 'classnames';
@@ -12,6 +12,7 @@ interface DatasetImageCardProps {
   children?: ReactNode;
   className?: string;
   onDelete?: () => void;
+  onClick?: () => void;
 }
 
 const DatasetImageCard: React.FC<DatasetImageCardProps> = ({
@@ -19,7 +20,8 @@ const DatasetImageCard: React.FC<DatasetImageCardProps> = ({
   alt,
   children,
   className = '',
-  onDelete = () => {},
+  onDelete = () => { },
+  onClick,
 }) => {
   const cardRef = useRef<HTMLDivElement>(null);
   const [isVisible, setIsVisible] = useState<boolean>(false);
@@ -126,6 +128,14 @@ const DatasetImageCard: React.FC<DatasetImageCardProps> = ({
   const isItAVideo = isVideo(imageUrl);
   const isItAudio = isAudio(imageUrl);
   const isItImage = !isItAVideo && !isItAudio;
+  const canZoom = Boolean(onClick) && !isItAudio;
+
+  // Native <video controls> sit on the bottom edge; clicks there must not open the viewer.
+  const openViewerFromVideo = (e: MouseEvent<HTMLVideoElement>): void => {
+    const controlsHeight = 48;
+    if (e.nativeEvent.offsetY > e.currentTarget.clientHeight - controlsHeight) return;
+    onClick?.();
+  };
 
   return (
     <div className={`flex flex-col ${className}`}>
@@ -141,11 +151,12 @@ const DatasetImageCard: React.FC<DatasetImageCardProps> = ({
               {isItAVideo && (
                 <video
                   src={`/api/img/${encodeURIComponent(imageUrl)}`}
-                  className={`w-full h-full object-contain`}
+                  className={`w-full h-full object-contain${canZoom ? ' cursor-zoom-in' : ''}`}
                   autoPlay={false}
                   loop
                   muted
                   controls
+                  onClick={canZoom ? openViewerFromVideo : undefined}
                 />
               )}
               {isItAudio && (
@@ -159,9 +170,9 @@ const DatasetImageCard: React.FC<DatasetImageCardProps> = ({
                   src={`/api/img/${encodeURIComponent(imageUrl)}`}
                   alt={alt}
                   onLoad={handleLoad}
-                  className={`w-full h-full object-contain transition-opacity duration-300 ${
-                    loaded ? 'opacity-100' : 'opacity-0'
-                  }`}
+                  onClick={canZoom ? onClick : undefined}
+                  className={`w-full h-full object-contain transition-opacity duration-300 ${loaded ? 'opacity-100' : 'opacity-0'
+                    }${canZoom ? ' cursor-zoom-in' : ''}`}
                 />
               )}
             </>
@@ -175,7 +186,8 @@ const DatasetImageCard: React.FC<DatasetImageCardProps> = ({
           <div className="absolute top-1 right-1 flex space-x-2 z-10">
             <button
               className="bg-gray-800 rounded-full p-2"
-              onClick={() => {
+              onClick={e => {
+                e.stopPropagation();
                 openConfirm({
                   title: `Delete ${isItAVideo ? 'video' : 'image'}`,
                   message: `Are you sure you want to delete this ${isItAVideo ? 'video' : 'image'}? This action cannot be undone.`,
@@ -200,7 +212,11 @@ const DatasetImageCard: React.FC<DatasetImageCardProps> = ({
           </div>
         </div>
         {inViewport && isVisible && !isItAudio && (
-          <div className="text-xs text-gray-100 bg-gray-950 mt-1 absolute bottom-0 left-0 p-1 opacity-25 hover:opacity-90 transition-opacity duration-300 w-full">
+          <div
+            className={`text-xs text-gray-100 bg-gray-950 mt-1 absolute bottom-0 left-0 p-1 opacity-25 hover:opacity-90 transition-opacity duration-300 w-full${canZoom ? ' cursor-zoom-in' : ''
+              }`}
+            onClick={canZoom ? onClick : undefined}
+          >
             {imageUrl}
           </div>
         )}
@@ -213,6 +229,7 @@ const DatasetImageCard: React.FC<DatasetImageCardProps> = ({
       >
         {inViewport && isVisible && isCaptionLoaded && (
           <form
+            onClick={e => e.stopPropagation()}
             onSubmit={e => {
               e.preventDefault();
               saveCaption();

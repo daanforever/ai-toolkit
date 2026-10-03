@@ -4,6 +4,7 @@ import { useEffect, useState, use, useMemo } from 'react';
 import { LuImageOff, LuLoader, LuBan } from 'react-icons/lu';
 import { FaChevronLeft } from 'react-icons/fa';
 import DatasetImageCard from '@/components/DatasetImageCard';
+import DatasetImageViewer from '@/components/DatasetImageViewer';
 import { Button } from '@headlessui/react';
 import AddImagesModal, { openImagesModal } from '@/components/AddImagesModal';
 import { TopBar, MainContent } from '@/components/layout';
@@ -15,6 +16,7 @@ export default function DatasetPage({ params }: { params: { datasetName: string 
   const usableParams = use(params as any) as { datasetName: string };
   const datasetName = usableParams.datasetName;
   const [status, setStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
+  const [selectedImgPath, setSelectedImgPath] = useState<string | null>(null);
 
   const refreshImageList = (dbName: string) => {
     setStatus('loading');
@@ -39,6 +41,15 @@ export default function DatasetPage({ params }: { params: { datasetName: string 
       refreshImageList(datasetName);
     }
   }, [datasetName]);
+
+  const imagePaths = useMemo(() => imgList.map(img => img.img_path), [imgList]);
+
+  useEffect(() => {
+    if (!selectedImgPath || status !== 'success') return;
+    if (!imagePaths.includes(selectedImgPath)) {
+      setSelectedImgPath(null);
+    }
+  }, [imagePaths, selectedImgPath, status]);
 
   const PageInfoContent = useMemo(() => {
     let icon = null;
@@ -122,11 +133,13 @@ export default function DatasetPage({ params }: { params: { datasetName: string 
                 alt="image"
                 imageUrl={img.img_path}
                 onDelete={() => refreshImageList(datasetName)}
+                onClick={() => setSelectedImgPath(img.img_path)}
               />
             ))}
           </div>
         )}
       </MainContent>
+      <DatasetImageViewer imgPath={selectedImgPath} images={imagePaths} onChange={setSelectedImgPath} />
       <AddImagesModal />
       <FullscreenDropOverlay
         datasetName={datasetName}
