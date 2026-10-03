@@ -4,7 +4,7 @@ import { useEffect, useState, use, useMemo } from 'react';
 import { LuImageOff, LuLoader, LuBan } from 'react-icons/lu';
 import { FaChevronLeft } from 'react-icons/fa';
 import DatasetImageCard from '@/components/DatasetImageCard';
-import DatasetImageViewer from '@/components/DatasetImageViewer';
+import DatasetImageViewer, { CaptionSync } from '@/components/DatasetImageViewer';
 import { Button } from '@headlessui/react';
 import AddImagesModal, { openImagesModal } from '@/components/AddImagesModal';
 import { TopBar, MainContent } from '@/components/layout';
@@ -17,6 +17,7 @@ export default function DatasetPage({ params }: { params: { datasetName: string 
   const datasetName = usableParams.datasetName;
   const [status, setStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [selectedImgPath, setSelectedImgPath] = useState<string | null>(null);
+  const [captionSync, setCaptionSync] = useState<CaptionSync | null>(null);
 
   const refreshImageList = (dbName: string) => {
     setStatus('loading');
@@ -134,12 +135,18 @@ export default function DatasetPage({ params }: { params: { datasetName: string 
                 imageUrl={img.img_path}
                 onDelete={() => refreshImageList(datasetName)}
                 onClick={() => setSelectedImgPath(img.img_path)}
+                captionSync={captionSync}
               />
             ))}
           </div>
         )}
       </MainContent>
-      <DatasetImageViewer imgPath={selectedImgPath} images={imagePaths} onChange={setSelectedImgPath} />
+      <DatasetImageViewer
+        imgPath={selectedImgPath}
+        images={imagePaths}
+        onChange={setSelectedImgPath}
+        onCaptionSaved={setCaptionSync}
+      />
       <AddImagesModal />
       <FullscreenDropOverlay
         datasetName={datasetName}

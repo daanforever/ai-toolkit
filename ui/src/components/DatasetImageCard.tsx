@@ -13,6 +13,7 @@ interface DatasetImageCardProps {
   className?: string;
   onDelete?: () => void;
   onClick?: () => void;
+  captionSync?: { imgPath: string; caption: string } | null;
 }
 
 const DatasetImageCard: React.FC<DatasetImageCardProps> = ({
@@ -22,6 +23,7 @@ const DatasetImageCard: React.FC<DatasetImageCardProps> = ({
   className = '',
   onDelete = () => { },
   onClick,
+  captionSync = null,
 }) => {
   const cardRef = useRef<HTMLDivElement>(null);
   const [isVisible, setIsVisible] = useState<boolean>(false);
@@ -70,6 +72,13 @@ const DatasetImageCard: React.FC<DatasetImageCardProps> = ({
         console.error('Error saving caption:', error);
       });
   };
+
+  useEffect(() => {
+    if (!captionSync || captionSync.imgPath !== imageUrl) return;
+    setCaption(captionSync.caption);
+    setSavedCaption(captionSync.caption);
+    setIsCaptionLoaded(true);
+  }, [captionSync, imageUrl]);
 
   // Only fetch caption when the component is both in viewport and visible
   useEffect(() => {
