@@ -2123,7 +2123,6 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 param_rms_min = 0.0  # Running min of parameter RMS (for graphs)
                 grad_rms = 0.0  # Average gradient RMS across groups (Adafactor)
                 grad_rms_max = 0.0  # Running max of gradient RMS (for graphs)
-                gns = 0.0  # Gradient Noise Scale (Adafactor with momentum)
                 dir_consistency_mean = 0.0  # Mean directional consistency per group (Adafactor)
                 step_efficiency = 0.0  # Step efficiency: update_rms / update_rms_max (Adafactor)
                 dynamic_gain = 0.0  # Dynamic gain (Adafactor)
@@ -2192,7 +2191,6 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     step_efficiency = _safe_get(step_metrics, 'get_mean_step_efficiency', 0.0)
                     dynamic_gain = _safe_get(step_metrics, 'get_mean_dynamic_gain', 0.0)
                     # Adafactor-specific metrics from optimizer
-                    gns = _safe_get(optimizer, 'get_mean_gns', 0.0)
                     dir_consistency_mean = _safe_get(optimizer, 'get_mean_dir_consistency', 0.0)
                     effective_lr = _safe_get(optimizer, 'get_mean_effective_lr', 0.0)
                     effective_wd = _safe_get(optimizer, 'get_mean_effective_wd', 0.0)
@@ -2300,7 +2298,6 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                             self.writer.add_scalar(f"train/param_rms_min", param_rms_min, self.step_num)
                                             self.writer.add_scalar(f"train/grad_rms", grad_rms, self.step_num)
                                             self.writer.add_scalar(f"train/grad_rms_max", grad_rms_max, self.step_num)
-                                            self.writer.add_scalar(f"train/gns", gns, self.step_num)
                                             self.writer.add_scalar(f"train/dir_consistency_mean", dir_consistency_mean, self.step_num)
                                             self.writer.add_scalar(f"train/step_efficiency", step_efficiency, self.step_num)
                                             self.writer.add_scalar(f"train/dynamic_gain", dynamic_gain, self.step_num)
@@ -2352,10 +2349,6 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
                             self.logger.log({
                                 'train/grad_rms_max': grad_rms_max,
-                            })
-
-                            self.logger.log({
-                                'train/gns': gns,
                             })
 
                             self.logger.log({

@@ -7,8 +7,9 @@ Local stochastic_rounding/accumulation are disabled for a fair step comparison.
 Scenarios
 ---------
 A) Manual LR (HF T5-style): relative_step=False, scale_parameter=False.
-   Isolates the main remaining core difference: fixed beta2 (local) vs
-   time-decay beta2t = 1 - step**decay_rate (HF).
+   Both sides use time-decay beta2t = 1 - step**decay_rate.
+   Local step still applies finite-guards and clamp before rsqrt, so a
+   bitwise match with HF is not required.
 
 B) HF paper-style relative schedule vs local fixed LR:
    HF: relative_step=True, scale_parameter=True, lr=None
@@ -81,7 +82,6 @@ def _make_local(
         stochastic_accumulation=False,
         stochastic_rounding=False,
         factored=None,
-        beta2_adaptive=False,
     )
 
 
@@ -252,7 +252,7 @@ def run_scenario_a_manual_lr(
     seed: int = 0,
     steps: int = 400,
 ) -> Dict[str, List[RunResult]]:
-    """Manual LR: isolates fixed-beta2 (local) vs time-decay beta2 (HF)."""
+    """Manual LR: both sides use time-decay beta2t; local keeps finite-guards."""
     problems: List[Tuple[str, Callable[[], nn.Module], int]] = [
         ("quadratic_at_zero", lambda: _Quadratic(64, 1e4, target_scale=0.0), steps),
         ("quadratic_shifted", lambda: _Quadratic(64, 1e4, target_scale=1.0), steps),
@@ -280,7 +280,7 @@ def run_scenario_a_manual_lr(
                     ps, lr=lr, relative_step=False, scale_parameter=False, decay_rate=-0.8
                 ),
             ),
-            # Ablation: local with HF-like early beta2 via lower fixed beta2
+            # Stored beta2 is unused by step(); kept to show it does not change the path.
             (
                 "local_beta2_0.9",
                 lambda ps: _make_local(
@@ -402,7 +402,7 @@ def run_early_update_divergence(seed: int = 0) -> Dict[str, float]:
     Quantify early-step algorithmic divergence under identical grads.
 
     Same init, same grad stream for a few steps; compare ||Δθ|| and param drift.
-    Manual LR mode so only beta2 schedule (and tiny numeric extras) differ.
+    Manual LR mode. Remaining differences are local finite-guards and clamp.
     """
     _set_seed(seed)
     p0 = torch.randn(32, 24)
@@ -478,23 +478,6 @@ def test_scenario_a_report_relative_quality(seed: int):
         assert max(local_f, hf_f) < 1e-1
 
 
-def test_early_steps_diverge_due_to_beta2_schedule():
-    """
-    With identical grads/manual LR, trajectories diverge because HF uses
-    beta2t=1-step**(-0.8) while local uses fixed beta2=0.99.
-
-    Step-1 ||Δθ|| can match: update clipping forces RMS(Û)≤d, so with the same
-    lr the first clipped step norms coincide even when V̂ differs. Divergence
-    shows up as second-moment EMA paths separate.
-    """
-    m = run_early_update_divergence(seed=0)
-    assert m["param_drift_step20"] > 1e-4
-    # By step 10 the EMA states differ enough that update norms separate.
-    assert m["upd_norm_step10_local"] != pytest.approx(
-        m["upd_norm_step10_hf"], rel=1e-3, abs=1e-6
-    )
-
-
 def test_scenario_b_hf_relative_beats_badly_tuned_fixed_lr():
     """
     On matrix factorization, HF relative+scale should beat an untuned tiny fixed LR.
@@ -504,15 +487,17 @@ def test_scenario_b_hf_relative_beats_badly_tuned_fixed_lr():
     assert by["hf_relative_default"].final_loss < by["local_fixed_1e-3"].final_loss
 
 
-def test_scenario_c_relative_flags_are_not_equivalent():
-    """local relative_step=True is not HF relative_step=True; losses should differ."""
+def test_scenario_c_relative_runs_stay_finite():
+    """
+    For a few hundred steps HF relative_step is capped at 1e-2, so it matches
+    local ``base_lr * scale``. Final losses can land together. Bitwise equality
+    with HF is not required (local finite-guards and clamp before rsqrt).
+    """
     results = run_scenario_c_relative_semantics(seed=0, steps=300)["matrix_factor"]
     by = {r.name: r for r in results}
     local_rel = by["local_relative_fork"].final_loss
     hf_rel = by["hf_relative"].final_loss
     assert math.isfinite(local_rel) and math.isfinite(hf_rel)
-    # Different schedules → not numerically identical trajectories.
-    assert not math.isclose(local_rel, hf_rel, rel_tol=1e-3, abs_tol=1e-6)
 
 
 def test_full_benchmark_smoke_prints_summary():
@@ -544,8 +529,7 @@ def test_full_benchmark_smoke_prints_summary():
 
 if __name__ == "__main__":
     test_full_benchmark_smoke_prints_summary()
-    test_early_steps_diverge_due_to_beta2_schedule()
     test_scenario_a_both_converge_manual_lr(0)
     test_scenario_b_hf_relative_beats_badly_tuned_fixed_lr()
-    test_scenario_c_relative_flags_are_not_equivalent()
+    test_scenario_c_relative_runs_stay_finite()
     print("\nAll comparison checks passed.")

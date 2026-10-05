@@ -110,6 +110,8 @@ def get_optimizer(
             'min_lr',
             'scale_lr_factor',
             'weight_decay_max',
+            'beta2_adaptive',
+            'beta2_min',
         )
         dropped = [k for k in _ADAFACTOR_DROPPED_KEYS if k in op]
         if dropped:

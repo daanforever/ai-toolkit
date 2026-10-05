@@ -56,8 +56,6 @@ config:
         optimizer: "adafactor"
         optimizer_params:
           beta2: 0.99
-          beta2_adaptive: false
-          beta2_min: 0.9
           weight_decay: 0.01
           scale_parameter: false
           relative_step: false

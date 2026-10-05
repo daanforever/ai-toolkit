@@ -126,13 +126,10 @@ def test_group_running_max_not_poisoned_by_non_finite_rms():
     group = opt.param_groups[0]
     decay_rate = group["rms_max_decay_rate"]
     group["rms_max"] = torch.tensor(2.0)
-    group["grad_rms_max"] = torch.tensor(1.5)
     param.grad = torch.zeros_like(param)
     opt.step()
     assert math.isfinite(group["rms_max"].item())
     assert group["rms_max"].item() == pytest.approx(2.0 * decay_rate)
-    assert math.isfinite(group["grad_rms_max"].item())
-    assert group["grad_rms_max"].item() == pytest.approx(1.5 * decay_rate)
 
 
 def test_clamp_effective_wd_tensor_and_scalar():
@@ -141,9 +138,3 @@ def test_clamp_effective_wd_tensor_and_scalar():
     assert Adafactor._clamp_effective_wd(2.0) == pytest.approx(1.0 - 1e-6)
     clamped = Adafactor._clamp_effective_wd(torch.tensor(0.5))
     assert clamped.item() == pytest.approx(0.5)
-
-
-def test_effective_beta2_returns_min_on_non_finite_grad_rms():
-    group = {"beta2": 0.99, "beta2_adaptive": True, "beta2_min": 0.9, "grad_rms_max": torch.tensor(1.0)}
-    beta2 = Adafactor._effective_beta2(group, torch.tensor(float("nan")), eps0=1e-30)
-    assert beta2 == pytest.approx(0.9)
