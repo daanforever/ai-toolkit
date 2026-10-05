@@ -37,24 +37,37 @@ def _run(beta2, mid_set=None, steps=15):
         before = p.detach().clone()
         opt.step()
         updates.append((before - p.detach()).clone())
-    return p.detach().clone(), opt.state[p]["exp_avg_sq"].clone(), opt.get_mean_beta2(), updates
+    return (
+        p.detach().clone(),
+        opt.state[p]["exp_avg_sq"].clone(),
+        opt.get_mean_beta2(),
+        updates,
+        opt.param_groups[0]["beta2"],
+    )
 
 
 def test_stored_beta2_does_not_affect_parameters_or_second_moment():
-    p09, v09, mean09, _ = _run(0.9)
-    p99, v99, mean99, _ = _run(0.99)
+    p09, v09, mean09, _, stored09 = _run(0.9)
+    p99, v99, mean99, _, stored99 = _run(0.99)
+    expected = 1.0 - math.pow(15, -0.8)
     assert torch.equal(p09, p99)
     assert torch.equal(v09, v99)
-    assert mean09 == pytest.approx(0.9)
-    assert mean99 == pytest.approx(0.99)
+    assert stored09 == pytest.approx(0.9)
+    assert stored99 == pytest.approx(0.99)
+    assert mean09 == pytest.approx(expected)
+    assert mean99 == pytest.approx(mean09)
 
 
 def test_set_beta2_does_not_change_next_update():
-    _, _, _, updates_ctrl = _run(0.9)
-    _, _, mean_after, updates_set = _run(0.9, mid_set=0.5)
+    _, _, mean_ctrl, updates_ctrl, stored_ctrl = _run(0.9)
+    _, _, mean_after, updates_set, stored_set = _run(0.9, mid_set=0.5)
+    expected = 1.0 - math.pow(15, -0.8)
     assert torch.equal(updates_ctrl[7], updates_set[7])
     assert torch.equal(torch.stack(updates_ctrl), torch.stack(updates_set))
-    assert mean_after == pytest.approx(0.5)
+    assert stored_ctrl == pytest.approx(0.9)
+    assert stored_set == pytest.approx(0.5)
+    assert mean_ctrl == pytest.approx(expected)
+    assert mean_after == pytest.approx(expected)
 
 
 def test_second_moment_matches_time_decay_recurrence():
@@ -93,8 +106,11 @@ def test_second_moment_matches_time_decay_recurrence():
             wrong = 1.0 - math.pow(step, 0.97)
             assert wrong < 0
             assert beta2t != pytest.approx(wrong)
+            assert opt.get_mean_beta2() != pytest.approx(wrong)
         if step in (1, 10, 100):
             assert torch.allclose(opt.state[p]["exp_avg_sq"], v, rtol=1e-5, atol=0.0)
+            assert opt.get_mean_beta2() == pytest.approx(beta2t)
+            assert opt.param_groups[0]["beta2"] == pytest.approx(0.99)
 
 
 def test_get_optimizer_drops_adaptive_beta2_keys():
@@ -124,7 +140,8 @@ def test_resume_pops_stale_group_beta2_effective_and_gns():
     opt, p = _make_opt(0.97)
     p.grad = torch.ones_like(p) * 0.1
     opt.step()
-    assert opt.get_mean_beta2() == pytest.approx(0.97)
+    assert opt.param_groups[0]["beta2"] == pytest.approx(0.97)
+    assert opt.get_mean_beta2() == pytest.approx(0.0)
     sd = opt.state_dict()
     sd["param_groups"][0]["beta2"] = 0.5
     sd["param_groups"][0]["beta2_effective"] = 0.0
@@ -132,4 +149,5 @@ def test_resume_pops_stale_group_beta2_effective_and_gns():
     opt.load_state_dict(sd)
     assert "beta2_effective" not in opt.param_groups[0]
     assert "gns" not in opt.param_groups[0]
-    assert opt.get_mean_beta2() == pytest.approx(0.97)
+    assert opt.param_groups[0]["beta2"] == pytest.approx(0.97)
+    assert opt.get_mean_beta2() == pytest.approx(0.0)

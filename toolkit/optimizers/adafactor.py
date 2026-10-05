@@ -42,9 +42,11 @@ class Adafactor(torch.optim.Optimizer):
             (first moment, like in Adam). If not None, enables momentum.
             Suggested values when enabled: 0.9, 0.95 or 0.99 for smoother updates.
         beta2 (`float`, *optional*, defaults to 0.99):
-            Stored second-moment coefficient. Kept on the param group and returned by
-            ``get_beta2`` / ``get_mean_beta2`` (and updated by ``set_beta2``). ``step()``
-            does not read it; the second moment uses ``beta2t`` from ``decay_rate``.
+            Stored second-moment coefficient on ``group["beta2"]``, updated by
+            ``set_beta2``. ``get_beta2`` / ``get_mean_beta2`` return the applied
+            ``beta2t`` from the last step (0 before the first step). ``step()``
+            does not read ``group["beta2"]``; the second moment uses ``beta2t``
+            from ``decay_rate``.
         rms_max_decay_rate (`float`, *optional*, defaults to `0.97`):
             Must satisfy ``0 < rms_max_decay_rate <= 1``.
             When scale_parameter=True and relative_step=True, used for the group-level running max
@@ -1286,7 +1288,7 @@ class Adafactor(torch.optim.Optimizer):
             sum_lr_weighted / total_numel, dtype=ref_dtype, device=ref_device
         )
 
-        for key in ("effective_lr", "effective_wd", "precond_gain", "momentum_gain"):
+        for key in ("effective_lr", "effective_wd", "precond_gain", "momentum_gain", "beta2t"):
             val = self._get_group_scalars(
                 group, key, default=0.0, reduction='mean', params=params_list
             )
@@ -1404,6 +1406,7 @@ class Adafactor(torch.optim.Optimizer):
 
                 state["step"] += 1
                 beta2t = 1.0 - math.pow(state["step"], group["decay_rate"])
+                state["beta2t"] = float(beta2t)
 
                 p_data_fp32 = p
                 is_quantized = isinstance(p_data_fp32, QBytesTensor)
@@ -1665,13 +1668,12 @@ class Adafactor(torch.optim.Optimizer):
         return self._scalars_per_group_to_mean(self.get_beta1())
 
     def get_beta2(self):
-        """Get beta2 (second-moment coefficient) for each parameter group."""
+        """Applied ``beta2t`` for each parameter group (0 before the first step)."""
         out = []
         for group in self.param_groups:
-            val = group.get("beta2_effective", group.get("beta2", self._beta2))
-            out.append(float(val if val is not None else self._beta2))
+            out.append(self._group_scalar_item(group, "beta2t", 0.0))
         return out
 
     def get_mean_beta2(self):
-        """Mean beta2 (second-moment coefficient) across all parameter groups."""
+        """Mean applied ``beta2t`` across all parameter groups."""
         return self._scalars_per_group_to_mean(self.get_beta2())
