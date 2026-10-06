@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import useSettings from '@/hooks/useSettings';
 import { TopBar, MainContent } from '@/components/layout';
 import OpenAIApiUrlField from '@/components/OpenAIApiUrlField';
+import OpenAIDefaultModelField from '@/components/OpenAIDefaultModelField';
 import { apiClient } from '@/utils/api';
 
 export default function Settings() {
@@ -111,6 +112,7 @@ export default function Settings() {
                 </div>
 
                 <OpenAIApiUrlField value={settings.OPENAI_API_URL} onChange={handleChange} />
+                <OpenAIDefaultModelField value={settings.OPENAI_DEFAULT_MODEL} onChange={handleChange} />
               </div>
             </div>
           </div>

@@ -1,4 +1,4 @@
-import { getOpenAIApiUrl } from '@/server/settings';
+import { getOpenAIApiUrl, getOpenAIDefaultModel } from '@/server/settings';
 
 export type ContentPart = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } };
 
@@ -144,11 +144,11 @@ export async function resolveModel(signal: AbortSignal): Promise<string> {
     throw new OpenAIRequestError(502, 'OpenAI API returned invalid JSON');
   }
   const modelId = body.data?.[0]?.id;
-  if (!modelId) {
-    console.error('OpenAI models list is empty');
-    throw new OpenAIRequestError(502, 'No models available at the OpenAI API URL');
-  }
-  return modelId;
+  if (modelId) return modelId;
+  const defaultModel = (await getOpenAIDefaultModel()).trim();
+  if (defaultModel) return defaultModel;
+  console.error('OpenAI models list is empty');
+  throw new OpenAIRequestError(502, 'No models available at the OpenAI API URL');
 }
 
 function eventBoundary(buffer: string): { index: number; length: number } | null {

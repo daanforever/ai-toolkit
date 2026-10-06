@@ -8,6 +8,7 @@ export interface Settings {
   TRAINING_FOLDER: string;
   DATASETS_FOLDER: string;
   OPENAI_API_URL: string;
+  OPENAI_DEFAULT_MODEL: string;
 }
 
 export default function useSettings() {
@@ -16,6 +17,7 @@ export default function useSettings() {
     TRAINING_FOLDER: '',
     DATASETS_FOLDER: '',
     OPENAI_API_URL: '',
+    OPENAI_DEFAULT_MODEL: '',
   });
   const [isSettingsLoaded, setIsLoaded] = useState(false);
   useEffect(() => {
@@ -29,6 +31,7 @@ export default function useSettings() {
           TRAINING_FOLDER: data.TRAINING_FOLDER || '',
           DATASETS_FOLDER: data.DATASETS_FOLDER || '',
           OPENAI_API_URL: data.OPENAI_API_URL || '',
+          OPENAI_DEFAULT_MODEL: data.OPENAI_DEFAULT_MODEL || '',
         });
         setIsLoaded(true);
       })

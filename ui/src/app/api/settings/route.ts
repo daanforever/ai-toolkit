@@ -26,7 +26,7 @@ export async function GET() {
   }
 }
 
-const SETTING_KEYS = ['HF_TOKEN', 'TRAINING_FOLDER', 'DATASETS_FOLDER', 'OPENAI_API_URL'] as const;
+const SETTING_KEYS = ['HF_TOKEN', 'TRAINING_FOLDER', 'DATASETS_FOLDER', 'OPENAI_API_URL', 'OPENAI_DEFAULT_MODEL'] as const;
 
 export async function POST(request: Request) {
   try {

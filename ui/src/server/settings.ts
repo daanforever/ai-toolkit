@@ -86,6 +86,25 @@ export const getOpenAIApiUrl = async () => {
   return apiUrl;
 };
 
+export const getOpenAIDefaultModel = async () => {
+  const key = 'OPENAI_DEFAULT_MODEL';
+  let model = myCache.get(key) as string;
+  if (model) {
+    return model;
+  }
+  let row = await prisma.settings.findFirst({
+    where: {
+      key: key,
+    },
+  });
+  model = '';
+  if (row?.value && row.value !== '') {
+    model = row.value;
+  }
+  myCache.set(key, model);
+  return model;
+};
+
 export const getDataRoot = async () => {
   const key = 'DATA_ROOT';
   let dataRoot = myCache.get(key) as string;
