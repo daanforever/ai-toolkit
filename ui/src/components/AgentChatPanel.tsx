@@ -2,7 +2,7 @@
 
 import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from 'react';
 import axios from 'axios';
-import { Send } from 'lucide-react';
+import { Send, Square } from 'lucide-react';
 import { apiClient } from '@/utils/api';
 import { AgentChatRequest, AgentChatTurn } from '@/types/agentChat';
 
@@ -14,6 +14,13 @@ interface Props {
 interface AttachmentSnapshot {
   imgPath?: string;
   caption?: string;
+}
+
+interface PendingSend {
+  controller: AbortController;
+  message: string;
+  priorTurns: AgentChatTurn[];
+  isOpening: boolean;
 }
 
 function readChatError(error: unknown): string {
@@ -48,14 +55,15 @@ export default function AgentChatPanel({ imgPath, caption }: Props) {
   const [error, setError] = useState('');
   const [isSending, setIsSending] = useState(false);
   const sendingRef = useRef(false);
-  const abortRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(false);
+  const pendingRef = useRef<PendingSend | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const controller = new AbortController();
-    abortRef.current = controller;
+    mountedRef.current = true;
     return () => {
-      controller.abort();
+      mountedRef.current = false;
+      pendingRef.current?.controller.abort();
     };
   }, []);
 
@@ -67,13 +75,46 @@ export default function AgentChatPanel({ imgPath, caption }: Props) {
 
   const canSend = draft.trim().length > 0 && !isSending;
 
+  const rollback = (pending: PendingSend, errorText = '') => {
+    if (!mountedRef.current) return;
+    setTurns(pending.priorTurns);
+    if (pending.isOpening) setAttachment(null);
+    setError(errorText);
+    setDraft(current => (current.length > 0 ? current : pending.message));
+  };
+
+  const finishPending = (pending: PendingSend) => {
+    if (pendingRef.current !== pending) return;
+    pendingRef.current = null;
+    sendingRef.current = false;
+    if (mountedRef.current) setIsSending(false);
+  };
+
+  const cancel = () => {
+    const pending = pendingRef.current;
+    if (!pending) return;
+    pendingRef.current = null;
+    sendingRef.current = false;
+    pending.controller.abort();
+    rollback(pending);
+    if (mountedRef.current) setIsSending(false);
+  };
+
   const send = async () => {
     const message = draft.trim();
-    const signal = abortRef.current?.signal;
-    if (!message || sendingRef.current || !signal || signal.aborted) return;
+    if (!message || sendingRef.current || !mountedRef.current) return;
+
+    const pending: PendingSend = {
+      controller: new AbortController(),
+      message,
+      priorTurns: turns,
+      isOpening: turns.length === 0,
+    };
+    const { controller, priorTurns, isOpening } = pending;
+    const signal = controller.signal;
+    pendingRef.current = pending;
     sendingRef.current = true;
 
-    const isOpening = turns.length === 0;
     const snapshot = isOpening ? captureAttachment(imgPath, caption) : (attachment ?? {});
     const loadedCaption = typeof caption === 'string' ? caption.trim() : null;
     const content =
@@ -81,7 +122,7 @@ export default function AgentChatPanel({ imgPath, caption }: Props) {
         ? captionNotice(message, reflectedCaption, loadedCaption)
         : message;
     const userTurn: AgentChatTurn = { role: 'user', content };
-    const nextTurns: AgentChatTurn[] = [...turns, userTurn];
+    const nextTurns: AgentChatTurn[] = [...priorTurns, userTurn];
 
     setDraft('');
     setError('');
@@ -89,34 +130,31 @@ export default function AgentChatPanel({ imgPath, caption }: Props) {
     if (isOpening) setAttachment(snapshot);
     setIsSending(true);
 
-    const rollback = (text: string) => {
-      if (signal.aborted) return;
-      setTurns(turns);
-      if (isOpening) setAttachment(null);
-      setError(text);
-      setDraft(current => (current.length > 0 ? current : message));
-    };
+    const isCurrent = () => mountedRef.current && pendingRef.current === pending;
 
     try {
       const body: AgentChatRequest = { messages: nextTurns };
       if (snapshot.imgPath) body.imgPath = snapshot.imgPath;
       if (snapshot.caption) body.caption = snapshot.caption;
       const res = await apiClient.post<{ reply?: unknown }>('/api/agent/chat', body, { signal });
-      if (signal.aborted) return;
+      if (!isCurrent()) return;
+      if (signal.aborted) {
+        rollback(pending);
+        return;
+      }
       const reply = res.data?.reply;
       if (typeof reply !== 'string' || reply.trim() === '') {
-        rollback('Empty reply');
+        rollback(pending, 'Empty reply');
         return;
       }
       setTurns([...nextTurns, { role: 'assistant', content: reply }]);
       if (isOpening) setReflectedCaption(snapshot.caption ?? '');
       else if (loadedCaption !== null) setReflectedCaption(loadedCaption);
     } catch (requestError) {
-      if (signal.aborted) return;
-      rollback(readChatError(requestError));
+      if (!isCurrent()) return;
+      rollback(pending, signal.aborted ? '' : readChatError(requestError));
     } finally {
-      sendingRef.current = false;
-      if (!signal.aborted) setIsSending(false);
+      finishPending(pending);
     }
   };
 
@@ -161,12 +199,13 @@ export default function AgentChatPanel({ imgPath, caption }: Props) {
             className="w-full resize-none rounded-lg border border-gray-700 bg-gray-900 py-2 pl-3 pr-10 text-sm text-gray-200 outline-none focus:ring-2 focus:ring-gray-600"
           />
           <button
-            type="submit"
-            disabled={!canSend}
-            aria-label="Send"
+            type={isSending ? 'button' : 'submit'}
+            disabled={!isSending && !canSend}
+            aria-label={isSending ? 'Cancel' : 'Send'}
+            onClick={isSending ? cancel : undefined}
             className="absolute bottom-2 right-2 rounded-md p-1 text-gray-400 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            <Send className="h-4 w-4" />
+            {isSending ? <Square className="h-4 w-4" /> : <Send className="h-4 w-4" />}
           </button>
         </div>
       </form>

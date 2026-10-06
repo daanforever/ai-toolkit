@@ -14,9 +14,10 @@ Dev server, from `ui/`: `npx next dev --port 3000`.
 ### Panel (`DatasetImageViewer` + `AgentChatPanel`)
 
 - Layout: a `w-80` column on the right, hidden below the `md` breakpoint. Media and caption are on the left. Close and prev/next stay on the media column.
-- The column shows each sent message, then "Thinking…", the reply, or the error. A "Message" textarea at the bottom has a Send icon inside the field, bottom right.
-- Send is enabled when the trimmed text is non-empty and nothing is in flight. Enter sends, Shift+Enter inserts a newline. The input clears when the request starts.
-- The conversation lives in panel memory only. Closing the lightbox drops it. The panel remounts on `key={imgPath}`, so each image has its own conversation. Unmount aborts the in-flight browser request. A canceled request does not roll back into the field or show an error, because the panel is already gone.
+- The column shows each sent message, then "Thinking…", the reply, or the error. A "Message" textarea at the bottom has a button inside the field, bottom right. Send becomes Cancel while a request is in flight.
+- Send is enabled when the trimmed text is non-empty and nothing is in flight. Enter sends, Shift+Enter inserts a newline. The input clears when the request starts. Enter does nothing while a request is in flight.
+- Cancel aborts the request, drops the unanswered user turn, restores the text to the input if the input is still empty, and shows no error. Cancelling the first message also drops the stored image and caption pair. Text typed into the field during the request is kept.
+- The conversation lives in panel memory only. Closing the lightbox drops it. The panel remounts on `key={imgPath}`, so each image has its own conversation. Unmount aborts the in-flight browser request. That abort does not roll the text back or show an error, because the panel is already gone.
 - A failed send removes the unanswered user turn and restores the text to the input if the input is still empty. Roles in the stored conversation stay alternating.
 
 ### API: `POST /api/agent/chat`
@@ -62,7 +63,7 @@ Edited:
 - `ui/src/app/api/settings/route.ts` — POST writes the keys in `SETTING_KEYS`, including `OPENAI_API_URL`. GET is unchanged
 - `ui/src/hooks/useSettings.tsx` — `OPENAI_API_URL` on the type, the default, and the load mapping
 - `ui/src/app/settings/page.tsx` — field after Dataset Folder Path
-- `ui/src/components/AgentChatPanel.tsx` — conversation, in-flight state, reply, error, attachment snapshot. `AbortController` per mount, aborted on unmount, passed to the chat request
+- `ui/src/components/AgentChatPanel.tsx` — conversation, in-flight state, reply, error, attachment snapshot. A per-request `AbortController`, aborted on Cancel and on unmount, passed to the chat request
 - `ui/src/components/DatasetImageViewer.tsx` — horizontal layout, panel remount on `imgPath` change
 
 ## 2. To do
@@ -90,7 +91,7 @@ Edited:
 
 ### Verification
 
-Setup: LM Studio at `http://192.168.1.34:1234/v1`, model `qwen/qwen3-vl-8b`, dataset image `datasets/dogs/000.png` (a brown and white dog, caption `dog`).
+Setup: LM Studio at `http://192.168.1.34:1234/v1`, model `huihui-qwen3.5-9b-abliterated`, dataset image `datasets/dogs/000.png` (a brown and white dog, caption `dog`).
 
 API:
 
