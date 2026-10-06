@@ -4,6 +4,7 @@ import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from 'react';
 import { Send, Square } from 'lucide-react';
 import { authHeaders, clearUnauthorized } from '@/utils/api';
 import { AgentChatDisplayTurn, AgentChatRequest, AgentChatStreamEvent } from '@/types/agentChat';
+import MarkdownText from '@/components/MarkdownText';
 
 interface Props {
   imgPath: string | null;
@@ -27,10 +28,7 @@ interface StreamPartial {
   content: string;
 }
 
-type StreamOutcome =
-  | ({ status: 'ok' } & StreamPartial)
-  | { status: 'error'; message: string }
-  | { status: 'aborted' };
+type StreamOutcome = ({ status: 'ok' } & StreamPartial) | { status: 'error'; message: string } | { status: 'aborted' };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -157,11 +155,15 @@ function ThinkingBlock({ reasoning, expanded = false }: { reasoning: string; exp
   const body = (
     <>
       <summary className="cursor-pointer">Thinking</summary>
-      <p className="mt-1 whitespace-pre-wrap break-words">{reasoning}</p>
+      <MarkdownText className="mt-1 text-gray-500">{reasoning}</MarkdownText>
     </>
   );
   if (expanded) {
-    return <details open className="text-gray-500">{body}</details>;
+    return (
+      <details open className="text-gray-500">
+        {body}
+      </details>
+    );
   }
   return <details className="text-gray-500">{body}</details>;
 }
@@ -329,16 +331,19 @@ export default function AgentChatPanel({ imgPath, caption }: Props) {
 
   return (
     <aside className="flex h-full w-80 shrink-0 flex-col border-l border-gray-700 bg-gray-950">
-      <div ref={listRef} className="flex flex-1 flex-col gap-3 overflow-y-auto px-4 py-3 text-sm">
+      <div
+        ref={listRef}
+        className="flex min-w-0 flex-1 flex-col gap-3 overflow-y-auto overflow-x-hidden px-4 py-3 text-sm"
+      >
         {turns.map((turn, index) =>
           turn.role === 'user' ? (
             <p key={index} className="whitespace-pre-wrap break-words rounded-lg bg-gray-800 px-3 py-2 text-gray-200">
               {turn.content}
             </p>
           ) : (
-            <div key={index} className="flex flex-col gap-3">
+            <div key={index} className="flex min-w-0 flex-col gap-3">
               {turn.reasoning ? <ThinkingBlock reasoning={turn.reasoning} /> : null}
-              <p className="whitespace-pre-wrap break-words text-gray-200">{turn.content}</p>
+              <MarkdownText>{turn.content}</MarkdownText>
             </div>
           ),
         )}
@@ -349,9 +354,7 @@ export default function AgentChatPanel({ imgPath, caption }: Props) {
             expanded={streaming.content.length === 0}
           />
         ) : null}
-        {streaming?.content ? (
-          <p className="whitespace-pre-wrap break-words text-gray-200">{streaming.content}</p>
-        ) : null}
+        {streaming?.content ? <MarkdownText>{streaming.content}</MarkdownText> : null}
         {waiting && <p className="text-gray-500">Thinking…</p>}
         {error && <p className="whitespace-pre-wrap break-words text-red-400">{error}</p>}
       </div>
