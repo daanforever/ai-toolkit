@@ -204,7 +204,7 @@ export default function AgentChatPanel({ imgPath, caption }: Props) {
     if (pending.isOpening) setAttachment(null);
     setStreaming(null);
     setError(errorText);
-    setDraft(current => (current.length > 0 ? current : pending.message));
+    setDraft(pending.message);
   };
 
   const finishPending = (pending: PendingSend) => {

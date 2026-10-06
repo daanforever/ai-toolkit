@@ -69,6 +69,9 @@ export async function POST(request: NextRequest) {
   try {
     body = await request.json();
   } catch (error) {
+    if (request.signal.aborted) {
+      return new NextResponse(null, { status: 499 });
+    }
     console.error('Agent chat received invalid JSON:', error);
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 });
   }
