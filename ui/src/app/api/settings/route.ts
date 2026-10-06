@@ -26,29 +26,22 @@ export async function GET() {
   }
 }
 
+const SETTING_KEYS = ['HF_TOKEN', 'TRAINING_FOLDER', 'DATASETS_FOLDER', 'OPENAI_API_URL'] as const;
+
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { HF_TOKEN, TRAINING_FOLDER, DATASETS_FOLDER } = body;
 
-    // Upsert both settings
-    await Promise.all([
-      prisma.settings.upsert({
-        where: { key: 'HF_TOKEN' },
-        update: { value: HF_TOKEN },
-        create: { key: 'HF_TOKEN', value: HF_TOKEN },
+    await Promise.all(
+      SETTING_KEYS.map(key => {
+        const value = body[key];
+        return prisma.settings.upsert({
+          where: { key },
+          update: { value },
+          create: { key, value },
+        });
       }),
-      prisma.settings.upsert({
-        where: { key: 'TRAINING_FOLDER' },
-        update: { value: TRAINING_FOLDER },
-        create: { key: 'TRAINING_FOLDER', value: TRAINING_FOLDER },
-      }),
-      prisma.settings.upsert({
-        where: { key: 'DATASETS_FOLDER' },
-        update: { value: DATASETS_FOLDER },
-        create: { key: 'DATASETS_FOLDER', value: DATASETS_FOLDER },
-      }),
-    ]);
+    );
 
     flushCache();
 

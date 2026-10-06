@@ -7,6 +7,7 @@ import { ChevronLeft, ChevronRight, X } from 'lucide-react';
 import classNames from 'classnames';
 import { apiClient } from '@/utils/api';
 import { isAudio, isVideo } from '@/utils/basic';
+import AgentChatPanel from '@/components/AgentChatPanel';
 
 export interface CaptionSync {
   imgPath: string;
@@ -174,86 +175,93 @@ export default function DatasetImageViewer({ imgPath, images, onChange, onCaptio
         <div className="flex min-h-full items-center justify-center p-4 text-center">
           <DialogPanel
             transition
-            className="relative transform rounded-lg bg-gray-800 text-left shadow-xl transition-all data-closed:translate-y-4 data-closed:opacity-0 data-enter:duration-300 data-enter:ease-out data-leave:duration-200 data-leave:ease-in min-w-[75vw] max-w-[95%] max-h-[95vh] data-closed:sm:translate-y-0 data-closed:sm:scale-95 flex flex-col overflow-hidden"
+            className="relative transform rounded-lg bg-gray-800 text-left shadow-xl transition-all data-closed:translate-y-4 data-closed:opacity-0 data-enter:duration-300 data-enter:ease-out data-leave:duration-200 data-leave:ease-in min-w-[75vw] max-w-[95%] max-h-[95vh] data-closed:sm:translate-y-0 data-closed:sm:scale-95 flex flex-row items-stretch overflow-hidden"
           >
-            <div className="relative overflow-hidden flex items-center justify-center">
-              {imgPath &&
-                !isAudio(imgPath) &&
-                (isVideo(imgPath) ? (
-                  <video
-                    key={imgPath}
-                    src={`/api/img/${encodeURIComponent(imgPath)}`}
-                    className="w-auto h-auto max-w-[95vw] max-h-[calc(100vh-13rem)] object-contain"
-                    preload="none"
-                    playsInline
-                    loop
-                    autoPlay
-                    controls
-                  />
-                ) : (
-                  <img
-                    key={imgPath}
-                    src={`/api/img/${encodeURIComponent(imgPath)}`}
-                    alt={fileName(imgPath)}
-                    className="w-auto h-auto max-w-[95vw] max-h-[calc(100vh-13rem)] object-contain"
-                  />
-                ))}
-              {viewable.length > 1 && (
-                <>
-                  <button
-                    type="button"
-                    aria-label="Previous image"
-                    disabled={atStart}
-                    className="absolute left-2 top-1/2 -translate-y-1/2 bg-gray-900/80 text-white rounded-full p-2 disabled:opacity-30"
-                    onClick={showPrev}
+            <div className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
+              <div className="relative flex items-center justify-center overflow-hidden">
+                {imgPath &&
+                  !isAudio(imgPath) &&
+                  (isVideo(imgPath) ? (
+                    <video
+                      key={imgPath}
+                      src={`/api/img/${encodeURIComponent(imgPath)}`}
+                      className="w-auto h-auto max-w-full md:max-w-[calc(95vw-20rem)] max-h-[calc(100vh-13rem)] object-contain"
+                      preload="none"
+                      playsInline
+                      loop
+                      autoPlay
+                      controls
+                    />
+                  ) : (
+                    <img
+                      key={imgPath}
+                      src={`/api/img/${encodeURIComponent(imgPath)}`}
+                      alt={fileName(imgPath)}
+                      className="w-auto h-auto max-w-full md:max-w-[calc(95vw-20rem)] max-h-[calc(100vh-13rem)] object-contain"
+                    />
+                  ))}
+                {viewable.length > 1 && (
+                  <>
+                    <button
+                      type="button"
+                      aria-label="Previous image"
+                      disabled={atStart}
+                      className="absolute left-2 top-1/2 -translate-y-1/2 bg-gray-900/80 text-white rounded-full p-2 disabled:opacity-30"
+                      onClick={showPrev}
+                    >
+                      <ChevronLeft />
+                    </button>
+                    <button
+                      type="button"
+                      aria-label="Next image"
+                      disabled={atEnd}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 bg-gray-900/80 text-white rounded-full p-2 disabled:opacity-30"
+                      onClick={showNext}
+                    >
+                      <ChevronRight />
+                    </button>
+                  </>
+                )}
+              </div>
+              <div
+                className={classNames('shrink-0 bg-gray-950 text-sm px-4 py-2 max-h-40 overflow-auto border-2', {
+                  'border-blue-500': isCaptionLoaded && caption.trim() !== savedCaption,
+                  'border-transparent': !isCaptionLoaded || caption.trim() === savedCaption,
+                })}
+              >
+                {imgPath && <div className="text-xs text-gray-400 truncate">{fileName(imgPath)}</div>}
+                {imgPath && isCaptionLoaded && (
+                  <form
+                    onSubmit={e => {
+                      e.preventDefault();
+                      saveCaption();
+                    }}
+                    onBlur={saveCaption}
                   >
-                    <ChevronLeft />
-                  </button>
-                  <button
-                    type="button"
-                    aria-label="Next image"
-                    disabled={atEnd}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 bg-gray-900/80 text-white rounded-full p-2 disabled:opacity-30"
-                    onClick={showNext}
-                  >
-                    <ChevronRight />
-                  </button>
-                </>
-              )}
+                    <textarea
+                      className="mt-1 w-full bg-transparent resize-none outline-none focus:ring-0 focus:outline-none"
+                      value={caption}
+                      rows={3}
+                      onChange={e => setCaption(e.target.value)}
+                      onKeyDown={handleCaptionKeyDown}
+                    />
+                  </form>
+                )}
+              </div>
+              <button
+                type="button"
+                aria-label="Close"
+                className="absolute top-2 right-2 bg-gray-900 rounded-full p-1 text-white opacity-50 hover:opacity-100"
+                onClick={onCancel}
+              >
+                <X />
+              </button>
             </div>
-            <div
-              className={classNames('shrink-0 bg-gray-950 text-sm px-4 py-2 max-h-40 overflow-auto border-2', {
-                'border-blue-500': isCaptionLoaded && caption.trim() !== savedCaption,
-                'border-transparent': !isCaptionLoaded || caption.trim() === savedCaption,
-              })}
-            >
-              {imgPath && <div className="text-xs text-gray-400 truncate">{fileName(imgPath)}</div>}
-              {imgPath && isCaptionLoaded && (
-                <form
-                  onSubmit={e => {
-                    e.preventDefault();
-                    saveCaption();
-                  }}
-                  onBlur={saveCaption}
-                >
-                  <textarea
-                    className="mt-1 w-full bg-transparent resize-none outline-none focus:ring-0 focus:outline-none"
-                    value={caption}
-                    rows={3}
-                    onChange={e => setCaption(e.target.value)}
-                    onKeyDown={handleCaptionKeyDown}
-                  />
-                </form>
-              )}
+            <div className="relative hidden w-80 shrink-0 self-stretch md:block">
+              <div className="absolute inset-0">
+                <AgentChatPanel />
+              </div>
             </div>
-            <button
-              type="button"
-              aria-label="Close"
-              className="absolute top-2 right-2 bg-gray-900 rounded-full p-1 text-white opacity-50 hover:opacity-100"
-              onClick={onCancel}
-            >
-              <X />
-            </button>
           </DialogPanel>
         </div>
       </div>
