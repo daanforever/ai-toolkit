@@ -277,17 +277,16 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
                     "turbo_teacher_weight=true requires a loaded sampling transformer "
                     "(set model.sampling_name_or_path to Z-Image-Turbo)."
                 )
-        self.train_config.turbo_teacher_weight = enabled
         sd = getattr(self, "sd", None)
         if sd is not None:
             sd.apply_turbo_teacher_mode(enabled)
             self.network = sd.network
+        self.train_config.turbo_teacher_weight = enabled
 
     def hook_before_train_loop(self):
         """
         Run SDTrainer.setup (including optional text-encoder unload), then place main vs sampling
-        transformers before DiffusionTrainer clears runtime DB and before baseline sampling /
-        ``set_device_state`` at loop start.
+        transformers before baseline sampling / ``set_device_state`` at loop start.
         """
         sd = getattr(self, "sd", None)
         # Canonical turbo intent for text-cache exit restore. Do NOT call

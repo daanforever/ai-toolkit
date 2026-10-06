@@ -85,6 +85,8 @@ def _make_pipe(tokenizer, text_encoder):
 def _make_prompt_embeds_model(bundle: dict, model_kwargs: dict | None = None) -> ZImageDiffSynthModel:
     model = ZImageDiffSynthModel.__new__(ZImageDiffSynthModel)
     model.device_torch = bundle["device"]
+    model.torch_dtype = EMBED_DTYPE
+    model.train_torch_dtype = PRODUCTION_ENCODE_DTYPE
     model.tokenizer = [bundle["tokenizer"]]
     model.text_encoder = [bundle["text_encoder"]]
     model.model_config = SimpleNamespace(model_kwargs=model_kwargs or {})

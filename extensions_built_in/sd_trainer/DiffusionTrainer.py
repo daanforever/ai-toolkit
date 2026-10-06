@@ -10,7 +10,7 @@ from toolkit.accelerator import unwrap_model
 from toolkit.data_loader import get_dataloader_datasets
 from toolkit.print import print_acc
 from toolkit.util.debug import is_debug_enabled
-from typing import Callable, List, Literal, NamedTuple, Optional, Tuple, TypeVar
+from typing import Callable, List, Literal, NamedTuple, Optional, TypeVar
 import threading
 import time
 import signal
@@ -18,6 +18,44 @@ import signal
 AITK_Status = Literal["running", "stopped", "error", "completed"]
 T = TypeVar("T")
 RuntimeScaleLrMaskStatus = Literal["absent", "invalid", "ok"]
+
+
+_RUNTIME_CLEARABLE_COLUMNS = frozenset({
+    "runtime_lr",
+    "runtime_gaussian_mean",
+    "runtime_gaussian_std",
+    "runtime_gaussian_mean_2",
+    "runtime_gaussian_std_2",
+    "runtime_weight_decay",
+    "runtime_weight_decay_increment",
+    "runtime_weight_decay_mode",
+    "runtime_beta1",
+    "runtime_beta2",
+    "runtime_content_or_style",
+    "runtime_timestep_type",
+    "runtime_timestep_weighting",
+    "runtime_network_weights",
+    "runtime_prompts",
+    "runtime_batch_size",
+    "runtime_gradient_accumulation",
+    "runtime_save_every",
+    "runtime_sample_every",
+    "runtime_warmup_steps",
+    "runtime_warmup_boost",
+    "runtime_scale_lr_by_index",
+    "runtime_scale_lr_mean",
+    "runtime_scale_lr_std",
+    "runtime_scale_lr_mask",
+    "runtime_min_snr_gamma",
+    "runtime_debug",
+    "runtime_fixed_cycle_timesteps",
+    "runtime_fixed_cycle_seed",
+    "runtime_fixed_cycle_weight_peak_timesteps",
+    "runtime_fixed_cycle_weight_sigma",
+    "runtime_turbo_prior_steps",
+    "runtime_turbo_t_jitter",
+    "runtime_turbo_teacher_weight",
+})
 
 
 class RuntimeScaleLrMaskRead(NamedTuple):
@@ -54,44 +92,6 @@ class DiffusionTrainer(SDTrainer):
             self.thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             # Track all async tasks
             self._async_tasks = []
-            self._last_applied_runtime_lr = None
-            self._last_applied_runtime_gaussian_mean = None
-            self._last_applied_runtime_gaussian_std = None
-            self._last_applied_runtime_gaussian_mean_2 = None
-            self._last_applied_runtime_gaussian_std_2 = None
-            self._last_applied_runtime_weight_decay = None
-            self._last_applied_runtime_weight_decay_increment = None
-            self._last_applied_runtime_weight_decay_mode = None
-            self._last_applied_runtime_beta1 = None
-            self._last_applied_runtime_beta2 = None
-            self._last_applied_runtime_content_or_style = None
-            self._last_applied_runtime_timestep_type = None
-            self._last_applied_runtime_timestep_weighting = None
-            self._last_applied_runtime_network_weights: Optional[tuple] = None
-            self._last_applied_runtime_prompts: Optional[tuple] = None
-            self._last_applied_runtime_batch_size = None
-            self._last_applied_runtime_gradient_accumulation = None
-            self._last_applied_runtime_save_every = None
-            self._last_applied_runtime_sample_every = None
-            self._last_applied_runtime_warmup_steps = None
-            self._last_applied_runtime_warmup_boost = None
-            self._last_applied_runtime_scale_lr_by_index = None
-            self._last_applied_runtime_scale_lr_config: Optional[
-                Tuple[float, float, Tuple[str, ...]]
-            ] = None
-            self._last_applied_runtime_min_snr_gamma = None
-            self._last_applied_runtime_debug = None
-            self._last_applied_runtime_fc_key: Optional[
-                Tuple[
-                    Optional[Tuple[float, ...]],
-                    Optional[int],
-                    Optional[Tuple[float, ...]],
-                    Optional[float],
-                ]
-            ] = None
-            self._last_applied_runtime_turbo_prior_steps = None
-            self._last_applied_runtime_turbo_t_jitter = None
-            self._last_applied_runtime_turbo_teacher_weight = None
             # Initialize the status
             self._run_async_operation(self._update_status("running", "Starting"))
             self._stop_watcher_started = False
@@ -169,6 +169,37 @@ class DiffusionTrainer(SDTrainer):
         conn.isolation_level = None  # Enable autocommit mode
         return conn
 
+    def _runtime_optimizer(self):
+        """Unwrap Accelerator / wrapper optimizers to the object that owns setters."""
+        optimizer = unwrap_model(self.optimizer)
+        while getattr(optimizer, "optimizer", None) is not None:
+            optimizer = optimizer.optimizer
+        return optimizer
+
+    def _clear_runtime_columns(self, *cols: str) -> None:
+        """NULL consumed RuntimeParams columns for this job. Main process only.
+
+        Missing table/row is a no-op. The row itself is never deleted.
+        """
+        if not cols or not self.is_ui_trainer:
+            return
+        unknown = [col for col in cols if col not in _RUNTIME_CLEARABLE_COLUMNS]
+        if unknown:
+            raise ValueError(f"runtime column is not clearable: {unknown}")
+        accelerator = getattr(self, "accelerator", None)
+        if accelerator is not None and not accelerator.is_main_process:
+            return
+        assignments = ", ".join(f"{col}=NULL" for col in cols)
+        try:
+            with self._db_connect() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    f"UPDATE RuntimeParams SET {assignments} WHERE jobId = ?",
+                    (self.job_id,),
+                )
+        except sqlite3.OperationalError:
+            return
+
     def _get_runtime_scalar(self, column_name: str, caster: Callable[[object], T]) -> Optional[T]:
         """Read one runtime scalar column from RuntimeParams for current job."""
         if not self.is_ui_trainer:
@@ -235,24 +266,17 @@ class DiffusionTrainer(SDTrainer):
         value = self.get_runtime_lr()
         if value is None:
             return
-        if value == self._last_applied_runtime_lr:
-            return
-        optimizer = unwrap_model(self.optimizer)
-        while getattr(optimizer, "optimizer", None) is not None:
-            optimizer = optimizer.optimizer
+        optimizer = self._runtime_optimizer()
         if hasattr(optimizer, "set_lr"):
-            if getattr(optimizer, "_lr", None) == value:
-                self._last_applied_runtime_lr = value
-                return
-            if is_debug_enabled():
-                print_acc(f"\nruntime_lr from UI/DB: {value}")
-            optimizer.set_lr(value)
-        else:
-            if is_debug_enabled():
-                print_acc(
-                    f"\nruntime_lr from DB not applied: optimizer has no set_lr (type: {type(optimizer).__name__})"
-                )
-        self._last_applied_runtime_lr = value
+            if getattr(optimizer, "_lr", None) != value:
+                if is_debug_enabled():
+                    print_acc(f"\nruntime_lr from UI/DB: {value}")
+                optimizer.set_lr(value)
+        elif is_debug_enabled():
+            print_acc(
+                f"\nruntime_lr from DB not applied: optimizer has no set_lr (type: {type(optimizer).__name__})"
+            )
+        self._clear_runtime_columns("runtime_lr")
 
     def get_runtime_gaussian_params(self):
         """Read runtime_gaussian_mean, runtime_gaussian_std from DB (only when is_ui_trainer). Returns (mean, std) or (None, None)."""
@@ -282,24 +306,20 @@ class DiffusionTrainer(SDTrainer):
         mean, std = self.get_runtime_gaussian_params()
         if mean is None and std is None:
             return
-        if mean == self._last_applied_runtime_gaussian_mean and std == self._last_applied_runtime_gaussian_std:
-            return
-        mean_unchanged = mean is None or mean == self.train_config.gaussian_mean
-        std_unchanged = std is None or std == self.train_config.gaussian_std
-        if mean_unchanged and std_unchanged:
-            self._last_applied_runtime_gaussian_mean = mean
-            self._last_applied_runtime_gaussian_std = std
-            return
+        cols = []
         if mean is not None:
-            self.train_config.gaussian_mean = mean
+            if mean != self.train_config.gaussian_mean:
+                self.train_config.gaussian_mean = mean
+            cols.append("runtime_gaussian_mean")
         if std is not None:
-            self.train_config.gaussian_std = std
-        self._last_applied_runtime_gaussian_mean = mean
-        self._last_applied_runtime_gaussian_std = std
-        if is_debug_enabled():
+            if std != self.train_config.gaussian_std:
+                self.train_config.gaussian_std = std
+            cols.append("runtime_gaussian_std")
+        if is_debug_enabled() and cols:
             print_acc(
                 f"\nruntime gaussian_mean/std from UI/DB: {self.train_config.gaussian_mean}, {self.train_config.gaussian_std}"
             )
+        self._clear_runtime_columns(*cols)
 
     def get_runtime_gaussian_peak2_params(self):
         """Read runtime_gaussian_mean_2, runtime_gaussian_std_2 from DB. Returns (mean2, std2) or (None, None)."""
@@ -333,27 +353,20 @@ class DiffusionTrainer(SDTrainer):
         mean2, std2 = self.get_runtime_gaussian_peak2_params()
         if mean2 is None and std2 is None:
             return
-        if (
-            mean2 == self._last_applied_runtime_gaussian_mean_2
-            and std2 == self._last_applied_runtime_gaussian_std_2
-        ):
-            return
-        mean2_unchanged = mean2 is None or mean2 == self.train_config.gaussian_mean_2
-        std2_unchanged = std2 is None or std2 == self.train_config.gaussian_std_2
-        if mean2_unchanged and std2_unchanged:
-            self._last_applied_runtime_gaussian_mean_2 = mean2
-            self._last_applied_runtime_gaussian_std_2 = std2
-            return
+        cols = []
         if mean2 is not None:
-            self.train_config.gaussian_mean_2 = mean2
+            if mean2 != self.train_config.gaussian_mean_2:
+                self.train_config.gaussian_mean_2 = mean2
+            cols.append("runtime_gaussian_mean_2")
         if std2 is not None:
-            self.train_config.gaussian_std_2 = std2
-        self._last_applied_runtime_gaussian_mean_2 = mean2
-        self._last_applied_runtime_gaussian_std_2 = std2
-        if is_debug_enabled():
+            if std2 != self.train_config.gaussian_std_2:
+                self.train_config.gaussian_std_2 = std2
+            cols.append("runtime_gaussian_std_2")
+        if is_debug_enabled() and cols:
             print_acc(
                 f"\nruntime gaussian_mean_2/std_2 from UI/DB: {self.train_config.gaussian_mean_2}, {self.train_config.gaussian_std_2}"
             )
+        self._clear_runtime_columns(*cols)
 
     def get_runtime_batch_size(self):
         """Read runtime_batch_size from DB (only when is_ui_trainer). Returns int or None."""
@@ -386,36 +399,31 @@ class DiffusionTrainer(SDTrainer):
         batch_size = self.get_runtime_batch_size()
         if batch_size is None:
             return
-        if batch_size == self._last_applied_runtime_batch_size:
-            return
-        if batch_size == self.train_config.batch_size:
-            self._last_applied_runtime_batch_size = batch_size
-            return
+        if batch_size != self.train_config.batch_size:
+            old_batch_size = self.train_config.batch_size
+            self.train_config.batch_size = batch_size
 
-        old_batch_size = self.train_config.batch_size
-        self.train_config.batch_size = batch_size
-        self._last_applied_runtime_batch_size = batch_size
+            from toolkit.data_loader import resize_dataloader_batch_size
 
-        from toolkit.data_loader import resize_dataloader_batch_size
+            if self.data_loader is not None:
+                self.data_loader = resize_dataloader_batch_size(
+                    self.data_loader,
+                    self.train_config.batch_size,
+                    epoch_num=self.epoch_num,
+                )
 
-        if self.data_loader is not None:
-            self.data_loader = resize_dataloader_batch_size(
-                self.data_loader,
-                self.train_config.batch_size,
-                epoch_num=self.epoch_num,
-            )
+            if self.data_loader_reg is not None:
+                self.data_loader_reg = resize_dataloader_batch_size(
+                    self.data_loader_reg,
+                    self.train_config.batch_size,
+                    epoch_num=self.epoch_num,
+                )
 
-        if self.data_loader_reg is not None:
-            self.data_loader_reg = resize_dataloader_batch_size(
-                self.data_loader_reg,
-                self.train_config.batch_size,
-                epoch_num=self.epoch_num,
-            )
-
-        if is_debug_enabled():
-            print_acc(
-                f"\nruntime batch_size from UI/DB: {old_batch_size} -> {batch_size}, data loaders resized"
-            )
+            if is_debug_enabled():
+                print_acc(
+                    f"\nruntime batch_size from UI/DB: {old_batch_size} -> {batch_size}, data loaders resized"
+                )
+        self._clear_runtime_columns("runtime_batch_size")
 
     def get_runtime_gradient_accumulation(self):
         """Read runtime_gradient_accumulation from DB (only when is_ui_trainer). Returns int or None."""
@@ -428,17 +436,13 @@ class DiffusionTrainer(SDTrainer):
         value = self.get_runtime_gradient_accumulation()
         if value is None:
             return
-        if value == self._last_applied_runtime_gradient_accumulation:
-            return
-        if value == self.train_config.gradient_accumulation:
-            self._last_applied_runtime_gradient_accumulation = value
-            return
-        self.train_config.gradient_accumulation = value
-        self._last_applied_runtime_gradient_accumulation = value
-        if is_debug_enabled():
-            print_acc(
-                f"\nruntime gradient_accumulation from UI/DB: {value}"
-            )
+        if value != self.train_config.gradient_accumulation:
+            self.train_config.gradient_accumulation = value
+            if is_debug_enabled():
+                print_acc(
+                    f"\nruntime gradient_accumulation from UI/DB: {value}"
+                )
+        self._clear_runtime_columns("runtime_gradient_accumulation")
 
     def get_runtime_save_every(self):
         """Read runtime_save_every from DB (only when is_ui_trainer). Returns int or None."""
@@ -568,6 +572,13 @@ class DiffusionTrainer(SDTrainer):
             return []
         return values
 
+    @staticmethod
+    def _scale_mask_key(mask) -> tuple:
+        """None and empty masks compare equal. Both mean scale every indexed group."""
+        if not mask:
+            return ()
+        return tuple(mask)
+
     def apply_runtime_scale_lr(self):
         """Atomically apply runtime mean/std/mask then scale_lr_by_index to optimizer."""
         if not self.is_ui_trainer:
@@ -578,7 +589,7 @@ class DiffusionTrainer(SDTrainer):
         mask_result = self._read_runtime_scale_lr_mask()
         by_index = self.get_runtime_scale_lr_by_index()
 
-        # Malformed / partially invalid mask: do not change optimizer at all.
+        # Malformed / partially invalid mask: do not change optimizer or clear.
         if mask_result.status == "invalid":
             return
 
@@ -601,14 +612,17 @@ class DiffusionTrainer(SDTrainer):
         if not has_mean_std and by_index is None:
             return
 
-        optimizer = unwrap_model(self.optimizer)
-        while getattr(optimizer, "optimizer", None) is not None:
-            optimizer = optimizer.optimizer
+        optimizer = self._runtime_optimizer()
+        mask_key = self._scale_mask_key(mask_list)
 
-        if mean is not None and std is not None:
-            # Cache key is exactly (mean, std, tuple(mask)); [] is a valid explicit clear.
-            config_key = (mean, std, tuple(mask_list))
-            if config_key != self._last_applied_runtime_scale_lr_config:
+        if has_mean_std:
+            config_matches = (
+                getattr(optimizer, "scale_lr_mean", None) == mean
+                and getattr(optimizer, "scale_lr_std", None) == std
+                and self._scale_mask_key(getattr(optimizer, "scale_lr_mask", None))
+                == mask_key
+            )
+            if not config_matches:
                 if hasattr(optimizer, "set_scale_lr_config"):
                     if is_debug_enabled():
                         print_acc(
@@ -622,36 +636,38 @@ class DiffusionTrainer(SDTrainer):
                             f"\nruntime_scale_lr_config from DB not applied: {e}"
                         )
                         return
-                else:
-                    if is_debug_enabled():
-                        print_acc(
-                            "\nruntime_scale_lr_config from DB not applied: optimizer "
-                            f"has no set_scale_lr_config (type: {type(optimizer).__name__})"
-                        )
-                self._last_applied_runtime_scale_lr_config = config_key
+                elif is_debug_enabled():
+                    print_acc(
+                        "\nruntime_scale_lr_config from DB not applied: optimizer "
+                        f"has no set_scale_lr_config (type: {type(optimizer).__name__})"
+                    )
 
-        if by_index is None:
-            return
-        if by_index == self._last_applied_runtime_scale_lr_by_index:
-            return
-        if hasattr(optimizer, "set_scale_lr_by_index"):
-            if getattr(optimizer, "scale_lr_by_index", None) == by_index:
-                self._last_applied_runtime_scale_lr_by_index = by_index
-                return
-            if is_debug_enabled():
-                print_acc(f"\nruntime_scale_lr_by_index from UI/DB: {by_index}")
-            try:
-                optimizer.set_scale_lr_by_index(by_index)
-            except ValueError as e:
-                print_acc(f"\nruntime_scale_lr_by_index from DB not applied: {e}")
-                return
-        else:
-            if is_debug_enabled():
-                print_acc(
-                    f"\nruntime_scale_lr_by_index from DB not applied: optimizer has no "
-                    f"set_scale_lr_by_index (type: {type(optimizer).__name__})"
-                )
-        self._last_applied_runtime_scale_lr_by_index = by_index
+        if by_index is not None:
+            if getattr(optimizer, "scale_lr_by_index", None) != by_index:
+                if hasattr(optimizer, "set_scale_lr_by_index"):
+                    if is_debug_enabled():
+                        print_acc(f"\nruntime_scale_lr_by_index from UI/DB: {by_index}")
+                    try:
+                        optimizer.set_scale_lr_by_index(by_index)
+                    except ValueError as e:
+                        print_acc(
+                            f"\nruntime_scale_lr_by_index from DB not applied: {e}"
+                        )
+                        return
+                elif is_debug_enabled():
+                    print_acc(
+                        "\nruntime_scale_lr_by_index from DB not applied: optimizer has no "
+                        f"set_scale_lr_by_index (type: {type(optimizer).__name__})"
+                    )
+
+        cols = []
+        if has_mean_std:
+            cols.extend(("runtime_scale_lr_mean", "runtime_scale_lr_std"))
+            if mask_result.status == "ok":
+                cols.append("runtime_scale_lr_mask")
+        if by_index is not None:
+            cols.append("runtime_scale_lr_by_index")
+        self._clear_runtime_columns(*cols)
 
     def get_runtime_min_snr_gamma(self):
         """Read runtime_min_snr_gamma from DB (only when is_ui_trainer). Returns float or None."""
@@ -666,15 +682,13 @@ class DiffusionTrainer(SDTrainer):
         if not self.is_ui_trainer:
             return
         value = self.get_runtime_debug()
-        if value is None or value == self._last_applied_runtime_debug:
+        if value is None:
             return
-        if value == self.logging_config.debug:
-            self._last_applied_runtime_debug = value
-            return
-        self.logging_config.debug = value
-        self._last_applied_runtime_debug = value
-        if is_debug_enabled():
-            print_acc(f"\nruntime debug from UI/DB: {value}")
+        if value != self.logging_config.debug:
+            self.logging_config.debug = value
+            if is_debug_enabled():
+                print_acc(f"\nruntime debug from UI/DB: {value}")
+        self._clear_runtime_columns("runtime_debug")
 
     def apply_runtime_save_every(self):
         """If runtime_save_every is set in DB, apply it to save_config."""
@@ -683,20 +697,14 @@ class DiffusionTrainer(SDTrainer):
         save_every = self.get_runtime_save_every()
         if save_every is None:
             return
-        if save_every == self._last_applied_runtime_save_every:
-            return
-        if save_every == self.save_config.save_every:
-            self._last_applied_runtime_save_every = save_every
-            return
-
-        old_save_every = self.save_config.save_every
-        self.save_config.save_every = save_every
-        self._last_applied_runtime_save_every = save_every
-
-        if is_debug_enabled():
-            print_acc(
-                f"\nruntime save_every from UI/DB: {old_save_every} -> {save_every}"
-            )
+        if save_every != self.save_config.save_every:
+            old_save_every = self.save_config.save_every
+            self.save_config.save_every = save_every
+            if is_debug_enabled():
+                print_acc(
+                    f"\nruntime save_every from UI/DB: {old_save_every} -> {save_every}"
+                )
+        self._clear_runtime_columns("runtime_save_every")
 
     def apply_runtime_sample_every(self):
         """If runtime_sample_every is set in DB, apply it to sample_config."""
@@ -705,20 +713,14 @@ class DiffusionTrainer(SDTrainer):
         sample_every = self.get_runtime_sample_every()
         if sample_every is None:
             return
-        if sample_every == self._last_applied_runtime_sample_every:
-            return
-        if sample_every == self.sample_config.sample_every:
-            self._last_applied_runtime_sample_every = sample_every
-            return
-        
-        old_sample_every = self.sample_config.sample_every
-        self.sample_config.sample_every = sample_every
-        self._last_applied_runtime_sample_every = sample_every
-        
-        if is_debug_enabled():
-            print_acc(
-                f"\nruntime sample_every from UI/DB: {old_sample_every} -> {sample_every}"
-            )
+        if sample_every != self.sample_config.sample_every:
+            old_sample_every = self.sample_config.sample_every
+            self.sample_config.sample_every = sample_every
+            if is_debug_enabled():
+                print_acc(
+                    f"\nruntime sample_every from UI/DB: {old_sample_every} -> {sample_every}"
+                )
+        self._clear_runtime_columns("runtime_sample_every")
 
     def apply_runtime_warmup_steps(self):
         """If runtime_warmup_steps is set in DB, apply it to optimizer (e.g. Adafactor)."""
@@ -727,25 +729,18 @@ class DiffusionTrainer(SDTrainer):
         value = self.get_runtime_warmup_steps()
         if value is None:
             return
-        if value == self._last_applied_runtime_warmup_steps:
-            return
-        optimizer = unwrap_model(self.optimizer)
-        while getattr(optimizer, "optimizer", None) is not None:
-            optimizer = optimizer.optimizer
+        optimizer = self._runtime_optimizer()
         if hasattr(optimizer, "set_warmup_steps"):
             pg0 = optimizer.param_groups[0] if optimizer.param_groups else {}
-            if pg0.get("warmup_steps", None) == value:
-                self._last_applied_runtime_warmup_steps = value
-                return
-            if is_debug_enabled():
-                print_acc(f"\nruntime_warmup_steps from UI/DB: {value}")
-            optimizer.set_warmup_steps(value)
-        else:
-            if is_debug_enabled():
-                print_acc(
-                    f"\nruntime_warmup_steps from DB not applied: optimizer has no set_warmup_steps (type: {type(optimizer).__name__})"
-                )
-        self._last_applied_runtime_warmup_steps = value
+            if pg0.get("warmup_steps", None) != value:
+                if is_debug_enabled():
+                    print_acc(f"\nruntime_warmup_steps from UI/DB: {value}")
+                optimizer.set_warmup_steps(value)
+        elif is_debug_enabled():
+            print_acc(
+                f"\nruntime_warmup_steps from DB not applied: optimizer has no set_warmup_steps (type: {type(optimizer).__name__})"
+            )
+        self._clear_runtime_columns("runtime_warmup_steps")
 
     def apply_runtime_warmup_boost(self):
         """If runtime_warmup_boost is set in DB, apply it to optimizer (e.g. Adafactor)."""
@@ -754,25 +749,18 @@ class DiffusionTrainer(SDTrainer):
         value = self.get_runtime_warmup_boost()
         if value is None:
             return
-        if value == self._last_applied_runtime_warmup_boost:
-            return
-        optimizer = unwrap_model(self.optimizer)
-        while getattr(optimizer, "optimizer", None) is not None:
-            optimizer = optimizer.optimizer
+        optimizer = self._runtime_optimizer()
         if hasattr(optimizer, "set_warmup_boost"):
             pg0 = optimizer.param_groups[0] if optimizer.param_groups else {}
-            if pg0.get("warmup_boost", None) == value:
-                self._last_applied_runtime_warmup_boost = value
-                return
-            if is_debug_enabled():
-                print_acc(f"\nruntime_warmup_boost from UI/DB: {value}")
-            optimizer.set_warmup_boost(value)
-        else:
-            if is_debug_enabled():
-                print_acc(
-                    f"\nruntime_warmup_boost from DB not applied: optimizer has no set_warmup_boost (type: {type(optimizer).__name__})"
-                )
-        self._last_applied_runtime_warmup_boost = value
+            if pg0.get("warmup_boost", None) != value:
+                if is_debug_enabled():
+                    print_acc(f"\nruntime_warmup_boost from UI/DB: {value}")
+                optimizer.set_warmup_boost(value)
+        elif is_debug_enabled():
+            print_acc(
+                f"\nruntime_warmup_boost from DB not applied: optimizer has no set_warmup_boost (type: {type(optimizer).__name__})"
+            )
+        self._clear_runtime_columns("runtime_warmup_boost")
 
     def apply_runtime_min_snr_gamma(self):
         """If runtime_min_snr_gamma is set in DB, apply it to train_config."""
@@ -781,20 +769,14 @@ class DiffusionTrainer(SDTrainer):
         value = self.get_runtime_min_snr_gamma()
         if value is None:
             return
-        if value == self._last_applied_runtime_min_snr_gamma:
-            return
-        if value == self.train_config.min_snr_gamma:
-            self._last_applied_runtime_min_snr_gamma = value
-            return
-        
-        old_min_snr_gamma = self.train_config.min_snr_gamma
-        self.train_config.min_snr_gamma = value
-        self._last_applied_runtime_min_snr_gamma = value
-        
-        if is_debug_enabled():
-            print_acc(
-                f"\nruntime min_snr_gamma from UI/DB: {old_min_snr_gamma} -> {value}"
-            )
+        if value != self.train_config.min_snr_gamma:
+            old_min_snr_gamma = self.train_config.min_snr_gamma
+            self.train_config.min_snr_gamma = value
+            if is_debug_enabled():
+                print_acc(
+                    f"\nruntime min_snr_gamma from UI/DB: {old_min_snr_gamma} -> {value}"
+                )
+        self._clear_runtime_columns("runtime_min_snr_gamma")
 
     def apply_runtime_weight_decay(self):
         """If runtime_weight_decay is set in DB, apply it to the optimizer (e.g. Adafactor)."""
@@ -803,24 +785,17 @@ class DiffusionTrainer(SDTrainer):
         value = self.get_runtime_weight_decay()
         if value is None:
             return
-        if value == self._last_applied_runtime_weight_decay:
-            return
-        optimizer = unwrap_model(self.optimizer)
-        while getattr(optimizer, "optimizer", None) is not None:
-            optimizer = optimizer.optimizer
+        optimizer = self._runtime_optimizer()
         if hasattr(optimizer, "set_weight_decay"):
-            if getattr(optimizer, "_weight_decay", None) == value:
-                self._last_applied_runtime_weight_decay = value
-                return
-            if is_debug_enabled():
-                print_acc(f"\nruntime_weight_decay from UI/DB: {value}")
-            optimizer.set_weight_decay(value)
-        else:
-            if is_debug_enabled():
-                print_acc(
-                    f"\nruntime_weight_decay from DB not applied: optimizer has no set_weight_decay (type: {type(optimizer).__name__})"
-                )
-        self._last_applied_runtime_weight_decay = value
+            if getattr(optimizer, "_weight_decay", None) != value:
+                if is_debug_enabled():
+                    print_acc(f"\nruntime_weight_decay from UI/DB: {value}")
+                optimizer.set_weight_decay(value)
+        elif is_debug_enabled():
+            print_acc(
+                f"\nruntime_weight_decay from DB not applied: optimizer has no set_weight_decay (type: {type(optimizer).__name__})"
+            )
+        self._clear_runtime_columns("runtime_weight_decay")
 
     def apply_runtime_weight_decay_increment(self):
         """If runtime_weight_decay_increment is set in DB, apply it to the optimizer (e.g. Adafactor)."""
@@ -829,25 +804,18 @@ class DiffusionTrainer(SDTrainer):
         value = self.get_runtime_weight_decay_increment()
         if value is None:
             return
-        if value == self._last_applied_runtime_weight_decay_increment:
-            return
-        optimizer = unwrap_model(self.optimizer)
-        while getattr(optimizer, "optimizer", None) is not None:
-            optimizer = optimizer.optimizer
+        optimizer = self._runtime_optimizer()
         if hasattr(optimizer, "set_weight_decay_increment"):
             pg0 = optimizer.param_groups[0] if optimizer.param_groups else {}
-            if pg0.get("weight_decay_increment", 0.0) == value:
-                self._last_applied_runtime_weight_decay_increment = value
-                return
-            if is_debug_enabled():
-                print_acc(f"\nruntime_weight_decay_increment from UI/DB: {value}")
-            optimizer.set_weight_decay_increment(value)
-        else:
-            if is_debug_enabled():
-                print_acc(
-                    f"\nruntime_weight_decay_increment from DB not applied: optimizer has no set_weight_decay_increment (type: {type(optimizer).__name__})"
-                )
-        self._last_applied_runtime_weight_decay_increment = value
+            if pg0.get("weight_decay_increment", 0.0) != value:
+                if is_debug_enabled():
+                    print_acc(f"\nruntime_weight_decay_increment from UI/DB: {value}")
+                optimizer.set_weight_decay_increment(value)
+        elif is_debug_enabled():
+            print_acc(
+                f"\nruntime_weight_decay_increment from DB not applied: optimizer has no set_weight_decay_increment (type: {type(optimizer).__name__})"
+            )
+        self._clear_runtime_columns("runtime_weight_decay_increment")
 
     def apply_runtime_weight_decay_mode(self):
         """If runtime_weight_decay_mode is set in DB, apply it to the optimizer (e.g. Adafactor)."""
@@ -856,48 +824,57 @@ class DiffusionTrainer(SDTrainer):
         value = self.get_runtime_weight_decay_mode()
         if value is None:
             return
-        if value == self._last_applied_runtime_weight_decay_mode:
-            return
-        optimizer = unwrap_model(self.optimizer)
-        while getattr(optimizer, "optimizer", None) is not None:
-            optimizer = optimizer.optimizer
+        optimizer = self._runtime_optimizer()
         if hasattr(optimizer, "set_weight_decay_mode"):
-            if getattr(optimizer, "_weight_decay_mode", None) == value:
-                self._last_applied_runtime_weight_decay_mode = value
-                return
-            if is_debug_enabled():
-                print_acc(f"\nruntime_weight_decay_mode from UI/DB: {value}")
-            optimizer.set_weight_decay_mode(value)
-        else:
-            if is_debug_enabled():
-                print_acc(
-                    f"\nruntime_weight_decay_mode from DB not applied: optimizer has no set_weight_decay_mode (type: {type(optimizer).__name__})"
-                )
-        self._last_applied_runtime_weight_decay_mode = value
+            if getattr(optimizer, "_weight_decay_mode", None) != value:
+                if is_debug_enabled():
+                    print_acc(f"\nruntime_weight_decay_mode from UI/DB: {value}")
+                optimizer.set_weight_decay_mode(value)
+        elif is_debug_enabled():
+            print_acc(
+                f"\nruntime_weight_decay_mode from DB not applied: optimizer has no set_weight_decay_mode (type: {type(optimizer).__name__})"
+            )
+        self._clear_runtime_columns("runtime_weight_decay_mode")
 
     def apply_runtime_beta1(self):
-        """If runtime_beta1 is set in DB, apply it to the optimizer (e.g. Adafactor). None disables momentum."""
+        """Apply runtime_beta1. None disables momentum after a numeric value was consumed.
+
+        SQL NULL is the disable command, so a numeric value is left in the column.
+        Clearing it would look like a disable on the next poll. Repeated numbers
+        are idempotent via the optimizer's current beta1. An idle NULL (startup,
+        or after disable) does not call set_beta1.
+        """
         if not self.is_ui_trainer:
             return
         value = self.get_runtime_beta1()
-        if value == self._last_applied_runtime_beta1:
-            return
-        optimizer = unwrap_model(self.optimizer)
-        while getattr(optimizer, "optimizer", None) is not None:
-            optimizer = optimizer.optimizer
-        if hasattr(optimizer, "set_beta1"):
-            if getattr(optimizer, "_beta1", None) == value:
-                self._last_applied_runtime_beta1 = value
+        optimizer = self._runtime_optimizer()
+        has_setter = hasattr(optimizer, "set_beta1")
+        if value is None:
+            if not getattr(self, "_runtime_beta1_disable_armed", False):
                 return
-            if is_debug_enabled():
-                print_acc(f"\nruntime_beta1 from UI/DB: {value}")
-            optimizer.set_beta1(value)
-        else:
+            self._runtime_beta1_disable_armed = False
+            if has_setter and getattr(optimizer, "_beta1", None) is not None:
+                if is_debug_enabled():
+                    print_acc(f"\nruntime_beta1 from UI/DB: {value}")
+                optimizer.set_beta1(None)
+            elif is_debug_enabled() and not has_setter:
+                print_acc(
+                    f"\nruntime_beta1 from DB not applied: optimizer has no set_beta1 (type: {type(optimizer).__name__})"
+                )
+            self._clear_runtime_columns("runtime_beta1")
+            return
+        if not has_setter:
             if is_debug_enabled():
                 print_acc(
                     f"\nruntime_beta1 from DB not applied: optimizer has no set_beta1 (type: {type(optimizer).__name__})"
                 )
-        self._last_applied_runtime_beta1 = value
+            self._clear_runtime_columns("runtime_beta1")
+            return
+        if getattr(optimizer, "_beta1", None) != value:
+            if is_debug_enabled():
+                print_acc(f"\nruntime_beta1 from UI/DB: {value}")
+            optimizer.set_beta1(value)
+        self._runtime_beta1_disable_armed = True
 
     def apply_runtime_beta2(self):
         """If runtime_beta2 is set in DB, apply it to the optimizer (e.g. Adafactor)."""
@@ -906,24 +883,17 @@ class DiffusionTrainer(SDTrainer):
         value = self.get_runtime_beta2()
         if value is None:
             return
-        if value == self._last_applied_runtime_beta2:
-            return
-        optimizer = unwrap_model(self.optimizer)
-        while getattr(optimizer, "optimizer", None) is not None:
-            optimizer = optimizer.optimizer
+        optimizer = self._runtime_optimizer()
         if hasattr(optimizer, "set_beta2"):
-            if getattr(optimizer, "_beta2", None) == value:
-                self._last_applied_runtime_beta2 = value
-                return
-            if is_debug_enabled():
-                print_acc(f"\nruntime_beta2 from UI/DB: {value}")
-            optimizer.set_beta2(value)
-        else:
-            if is_debug_enabled():
-                print_acc(
-                    f"\nruntime_beta2 from DB not applied: optimizer has no set_beta2 (type: {type(optimizer).__name__})"
-                )
-        self._last_applied_runtime_beta2 = value
+            if getattr(optimizer, "_beta2", None) != value:
+                if is_debug_enabled():
+                    print_acc(f"\nruntime_beta2 from UI/DB: {value}")
+                optimizer.set_beta2(value)
+        elif is_debug_enabled():
+            print_acc(
+                f"\nruntime_beta2 from DB not applied: optimizer has no set_beta2 (type: {type(optimizer).__name__})"
+            )
+        self._clear_runtime_columns("runtime_beta2")
 
     def get_runtime_content_or_style(self):
         """Read runtime_content_or_style from DB (only when is_ui_trainer). Returns str or None."""
@@ -936,15 +906,11 @@ class DiffusionTrainer(SDTrainer):
         value = self.get_runtime_content_or_style()
         if value is None:
             return
-        if value == self._last_applied_runtime_content_or_style:
-            return
-        if (value == self.train_config.content_or_style):
-            self._last_applied_runtime_content_or_style = value
-            return
-        self.train_config.content_or_style = value
-        self._last_applied_runtime_content_or_style = value
-        if is_debug_enabled():
-            print_acc(f"\nruntime content_or_style from UI/DB: {value}")
+        if value != self.train_config.content_or_style:
+            self.train_config.content_or_style = value
+            if is_debug_enabled():
+                print_acc(f"\nruntime content_or_style from UI/DB: {value}")
+        self._clear_runtime_columns("runtime_content_or_style")
 
     def get_runtime_timestep_type(self):
         """Read runtime_timestep_type from DB (only when is_ui_trainer). Returns str or None."""
@@ -957,15 +923,11 @@ class DiffusionTrainer(SDTrainer):
         value = self.get_runtime_timestep_type()
         if value is None:
             return
-        if value == self._last_applied_runtime_timestep_type:
-            return
-        if value == self.train_config.timestep_type:
-            self._last_applied_runtime_timestep_type = value
-            return
-        self.train_config.timestep_type = value
-        self._last_applied_runtime_timestep_type = value
-        if is_debug_enabled():
-            print_acc(f"\nruntime timestep_type from UI/DB: {value}")
+        if value != self.train_config.timestep_type:
+            self.train_config.timestep_type = value
+            if is_debug_enabled():
+                print_acc(f"\nruntime timestep_type from UI/DB: {value}")
+        self._clear_runtime_columns("runtime_timestep_type")
 
     def get_runtime_turbo_prior_params(self):
         """Read runtime_turbo_prior_steps, runtime_turbo_t_jitter from DB. Returns (steps, jitter) or (None, None)."""
@@ -1000,29 +962,22 @@ class DiffusionTrainer(SDTrainer):
         steps, jitter = self.get_runtime_turbo_prior_params()
         if steps is None and jitter is None:
             return
-        if (
-            steps == self._last_applied_runtime_turbo_prior_steps
-            and jitter == self._last_applied_runtime_turbo_t_jitter
-        ):
-            return
-        steps_unchanged = steps is None or steps == self.train_config.turbo_prior_steps
-        jitter_unchanged = jitter is None or jitter == self.train_config.turbo_t_jitter
-        if steps_unchanged and jitter_unchanged:
-            self._last_applied_runtime_turbo_prior_steps = steps
-            self._last_applied_runtime_turbo_t_jitter = jitter
-            return
+        cols = []
         if steps is not None:
-            self.train_config.turbo_prior_steps = steps
+            if steps != self.train_config.turbo_prior_steps:
+                self.train_config.turbo_prior_steps = steps
+            cols.append("runtime_turbo_prior_steps")
         if jitter is not None:
-            self.train_config.turbo_t_jitter = jitter
-        self._last_applied_runtime_turbo_prior_steps = steps
-        self._last_applied_runtime_turbo_t_jitter = jitter
-        if is_debug_enabled():
+            if jitter != self.train_config.turbo_t_jitter:
+                self.train_config.turbo_t_jitter = jitter
+            cols.append("runtime_turbo_t_jitter")
+        if is_debug_enabled() and cols:
             print_acc(
                 f"\nruntime turbo_prior from UI/DB: "
                 f"steps={self.train_config.turbo_prior_steps}, "
                 f"jitter={self.train_config.turbo_t_jitter}"
             )
+        self._clear_runtime_columns(*cols)
 
     def get_runtime_turbo_teacher_weight(self):
         """Read runtime_turbo_teacher_weight from DB. Returns bool or None."""
@@ -1039,24 +994,26 @@ class DiffusionTrainer(SDTrainer):
         return _read()
 
     def apply_runtime_turbo_teacher_weight(self):
-        """If runtime_turbo_teacher_weight is set in DB, apply it to train_config."""
+        """If runtime_turbo_teacher_weight is set in DB, apply it to train_config.
+
+        ``apply_runtime_turbo_teacher_mode`` runs before the column is cleared.
+        ValueError from that hook leaves the column in place.
+        """
         if not self.is_ui_trainer:
             return
         value = self.get_runtime_turbo_teacher_weight()
         if value is None:
             return
-        if value == self._last_applied_runtime_turbo_teacher_weight:
-            return
+        enabled = bool(value)
         current = bool(getattr(self.train_config, "turbo_teacher_weight", False))
-        if value == current:
-            self._last_applied_runtime_turbo_teacher_weight = value
-            return
-        self.train_config.turbo_teacher_weight = bool(value)
-        if hasattr(self, "apply_runtime_turbo_teacher_mode"):
-            self.apply_runtime_turbo_teacher_mode(bool(value))
-        self._last_applied_runtime_turbo_teacher_weight = value
-        if is_debug_enabled():
-            print_acc(f"\nruntime turbo_teacher_weight from UI/DB: {value}")
+        if enabled != current:
+            if hasattr(self, "apply_runtime_turbo_teacher_mode"):
+                self.apply_runtime_turbo_teacher_mode(enabled)
+            else:
+                self.train_config.turbo_teacher_weight = enabled
+            if is_debug_enabled():
+                print_acc(f"\nruntime turbo_teacher_weight from UI/DB: {value}")
+        self._clear_runtime_columns("runtime_turbo_teacher_weight")
 
     def get_runtime_timestep_weighting(self):
         """Read runtime_timestep_weighting from DB (only when is_ui_trainer). Returns str or None."""
@@ -1069,15 +1026,11 @@ class DiffusionTrainer(SDTrainer):
         value = self.get_runtime_timestep_weighting()
         if value is None:
             return
-        if value == self._last_applied_runtime_timestep_weighting:
-            return
-        if value == self.train_config.timestep_weighting:
-            self._last_applied_runtime_timestep_weighting = value
-            return
-        self.train_config.timestep_weighting = value
-        self._last_applied_runtime_timestep_weighting = value
-        if is_debug_enabled():
-            print_acc(f"\nruntime timestep_weighting from UI/DB: {value}")
+        if value != self.train_config.timestep_weighting:
+            self.train_config.timestep_weighting = value
+            if is_debug_enabled():
+                print_acc(f"\nruntime timestep_weighting from UI/DB: {value}")
+        self._clear_runtime_columns("runtime_timestep_weighting")
 
     def get_runtime_network_weights(self):
         """Read runtime_network_weights from DB (only when is_ui_trainer). Returns list of float or None."""
@@ -1116,12 +1069,7 @@ class DiffusionTrainer(SDTrainer):
         if not self.is_ui_trainer:
             return
         weights = self.get_runtime_network_weights()
-        if weights is None:
-            return
-        weights_tuple = tuple(weights)
-        if weights_tuple == self._last_applied_runtime_network_weights:
-            return
-        if self.data_loader is None:
+        if weights is None or self.data_loader is None:
             return
 
         from toolkit.data_loader import rebuild_dataloader_network_weights
@@ -1141,19 +1089,16 @@ class DiffusionTrainer(SDTrainer):
             self.data_loader = rebuild_dataloader_network_weights(
                 self.data_loader, epoch_num=self.epoch_num
             )
-        except ValueError:
-            pass
-        if self.data_loader_reg is not None:
-            try:
+            if self.data_loader_reg is not None:
                 self.data_loader_reg = rebuild_dataloader_network_weights(
                     self.data_loader_reg, epoch_num=self.epoch_num
                 )
-            except ValueError:
-                pass
+        except ValueError:
+            return
 
-        self._last_applied_runtime_network_weights = weights_tuple
+        self._clear_runtime_columns("runtime_network_weights")
         if is_debug_enabled():
-            print_acc(f"\nruntime network_weights from UI/DB applied: {list(weights_tuple)}")
+            print_acc(f"\nruntime network_weights from UI/DB applied: {list(weights)}")
 
     def get_runtime_prompts(self):
         """Read runtime_prompts from DB (only when is_ui_trainer). Returns list of str or None."""
@@ -1227,20 +1172,11 @@ class DiffusionTrainer(SDTrainer):
         if not self.is_ui_trainer:
             return
         prompts = self.get_runtime_prompts()
-        if prompts is None:
-            return
-        if any(p is None for p in prompts):
+        if prompts is None or any(p is None for p in prompts):
             return
         prompts_tuple = tuple(prompts)
-        if prompts_tuple == getattr(self, "_last_applied_runtime_prompts", None):
-            return
 
         samples = getattr(self.sample_config, "samples", None) or []
-        current = tuple((s.prompt if s.prompt is not None else "") for s in samples)
-        if prompts_tuple == current:
-            self._last_applied_runtime_prompts = prompts_tuple
-            return
-
         changed = False
         for i, prompt in enumerate(prompts):
             if i >= len(samples):
@@ -1249,20 +1185,17 @@ class DiffusionTrainer(SDTrainer):
                 samples[i].prompt = prompt
                 changed = True
 
-        self._last_applied_runtime_prompts = prompts_tuple
-        if not changed:
-            return
-
-        need_recache = bool(getattr(self, "is_caching_text_embeddings", False)) or bool(
-            getattr(self.train_config, "unload_text_encoder", False)
-        )
-        if need_recache:
-            self._recache_sample_prompts_runtime()
-
-        if is_debug_enabled():
-            print_acc(
-                f"\nruntime prompts from UI/DB applied ({len(prompts_tuple)} prompts)"
+        if changed:
+            need_recache = bool(getattr(self, "is_caching_text_embeddings", False)) or bool(
+                getattr(self.train_config, "unload_text_encoder", False)
             )
+            if need_recache:
+                self._recache_sample_prompts_runtime()
+            if is_debug_enabled():
+                print_acc(
+                    f"\nruntime prompts from UI/DB applied ({len(prompts_tuple)} prompts)"
+                )
+        self._clear_runtime_columns("runtime_prompts")
 
     def _reset_fixed_cycle_sampling_cache(self) -> None:
         """Invalidate TimestepSampler fixed_cycle resolution after timesteps/seed change."""
@@ -1353,37 +1286,7 @@ class DiffusionTrainer(SDTrainer):
         ):
             return
 
-        fc_key = (
-            tuple(ts_db) if ts_db is not None else None,
-            seed_db,
-            tuple(peaks_db) if peaks_db is not None else None,
-            sigma_db,
-        )
-        if fc_key == self._last_applied_runtime_fc_key:
-            return
-
-        config_matches = True
-        if ts_db is not None:
-            config_matches = config_matches and tuple(
-                self.train_config.fixed_cycle_timesteps or []
-            ) == tuple(ts_db)
-        if seed_db is not None:
-            config_matches = config_matches and self.train_config.fixed_cycle_seed == seed_db
-        if peaks_db is not None:
-            expected_peaks = list(peaks_db) if len(peaks_db) > 0 else None
-            config_matches = (
-                config_matches
-                and self.train_config.fixed_cycle_weight_peak_timesteps == expected_peaks
-            )
-        if sigma_db is not None:
-            config_matches = (
-                config_matches
-                and self.train_config.fixed_cycle_weight_sigma == sigma_db
-            )
-        if config_matches:
-            self._last_applied_runtime_fc_key = fc_key
-            return
-
+        cols = []
         need_reset_cache = False
         old_ts = tuple(self.train_config.fixed_cycle_timesteps or [])
         old_seed = self.train_config.fixed_cycle_seed
@@ -1392,19 +1295,23 @@ class DiffusionTrainer(SDTrainer):
             new_ts = tuple(ts_db)
             if new_ts != old_ts:
                 need_reset_cache = True
-            self.train_config.fixed_cycle_timesteps = list(ts_db)
+                self.train_config.fixed_cycle_timesteps = list(ts_db)
+            cols.append("runtime_fixed_cycle_timesteps")
         if seed_db is not None:
             if seed_db != old_seed:
                 need_reset_cache = True
-            self.train_config.fixed_cycle_seed = seed_db
+                self.train_config.fixed_cycle_seed = seed_db
+            cols.append("runtime_fixed_cycle_seed")
         if peaks_db is not None:
-            self.train_config.fixed_cycle_weight_peak_timesteps = (
-                list(peaks_db) if len(peaks_db) > 0 else None
-            )
+            expected_peaks = list(peaks_db) if len(peaks_db) > 0 else None
+            if self.train_config.fixed_cycle_weight_peak_timesteps != expected_peaks:
+                self.train_config.fixed_cycle_weight_peak_timesteps = expected_peaks
+            cols.append("runtime_fixed_cycle_weight_peak_timesteps")
         if sigma_db is not None:
-            self.train_config.fixed_cycle_weight_sigma = sigma_db
+            if self.train_config.fixed_cycle_weight_sigma != sigma_db:
+                self.train_config.fixed_cycle_weight_sigma = sigma_db
+            cols.append("runtime_fixed_cycle_weight_sigma")
 
-        self._last_applied_runtime_fc_key = fc_key
         if need_reset_cache:
             self._reset_fixed_cycle_sampling_cache()
         if is_debug_enabled():
@@ -1415,54 +1322,7 @@ class DiffusionTrainer(SDTrainer):
                 f"weight_peaks={self.train_config.fixed_cycle_weight_peak_timesteps}, "
                 f"weight_sigma={self.train_config.fixed_cycle_weight_sigma}"
             )
-
-    def clear_runtime_params(self):
-        """Clear all runtime parameters from the RuntimeParams table for this job."""
-        if not self.is_ui_trainer:
-            return
-        
-        def _clear():
-            with self._db_connect() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "DELETE FROM RuntimeParams WHERE jobId = ?", (self.job_id,)
-                )
-        
-        _clear()
-        if is_debug_enabled():
-            print_acc("\nCleared runtime parameters from database")
-
-    def _reset_last_applied_runtime(self):
-        """Reset all cached runtime parameter values to None."""
-        self._last_applied_runtime_lr = None
-        self._last_applied_runtime_gaussian_mean = None
-        self._last_applied_runtime_gaussian_std = None
-        self._last_applied_runtime_gaussian_mean_2 = None
-        self._last_applied_runtime_gaussian_std_2 = None
-        self._last_applied_runtime_weight_decay = None
-        self._last_applied_runtime_weight_decay_increment = None
-        self._last_applied_runtime_weight_decay_mode = None
-        self._last_applied_runtime_beta1 = None
-        self._last_applied_runtime_beta2 = None
-        self._last_applied_runtime_content_or_style = None
-        self._last_applied_runtime_timestep_type = None
-        self._last_applied_runtime_timestep_weighting = None
-        self._last_applied_runtime_network_weights = None
-        self._last_applied_runtime_prompts = None
-        self._last_applied_runtime_batch_size = None
-        self._last_applied_runtime_gradient_accumulation = None
-        self._last_applied_runtime_save_every = None
-        self._last_applied_runtime_sample_every = None
-        self._last_applied_runtime_warmup_steps = None
-        self._last_applied_runtime_warmup_boost = None
-        self._last_applied_runtime_scale_lr_by_index = None
-        self._last_applied_runtime_scale_lr_config = None
-        self._last_applied_runtime_min_snr_gamma = None
-        self._last_applied_runtime_debug = None
-        self._last_applied_runtime_fc_key = None
-        self._last_applied_runtime_turbo_prior_steps = None
-        self._last_applied_runtime_turbo_t_jitter = None
-        self._last_applied_runtime_turbo_teacher_weight = None
+        self._clear_runtime_columns(*cols)
 
     async def _update_key(self, key, value):
         if not self.accelerator.is_main_process:
@@ -1614,10 +1474,8 @@ class DiffusionTrainer(SDTrainer):
             self.update_status("running", "Loading dataset")
 
     def internal_hook_before_train_loop(self):
-        """Clear runtime DB row, reset cached runtime, update job step/status; optional subclasses run before this."""
+        """Update job step/status before the train loop. Runtime columns clear on apply."""
         if self.is_ui_trainer:
-            self.clear_runtime_params()
-            self._reset_last_applied_runtime()
             self.maybe_stop()
             self.update_step()
             self.update_status("running", "Training")

@@ -7,13 +7,15 @@ export interface Settings {
   HF_TOKEN: string;
   TRAINING_FOLDER: string;
   DATASETS_FOLDER: string;
+  OPENAI_API_URL: string;
 }
 
 export default function useSettings() {
-  const [settings, setSettings] = useState({
+  const [settings, setSettings] = useState<Settings>({
     HF_TOKEN: '',
     TRAINING_FOLDER: '',
     DATASETS_FOLDER: '',
+    OPENAI_API_URL: '',
   });
   const [isSettingsLoaded, setIsLoaded] = useState(false);
   useEffect(() => {
@@ -26,6 +28,7 @@ export default function useSettings() {
           HF_TOKEN: data.HF_TOKEN || '',
           TRAINING_FOLDER: data.TRAINING_FOLDER || '',
           DATASETS_FOLDER: data.DATASETS_FOLDER || '',
+          OPENAI_API_URL: data.OPENAI_API_URL || '',
         });
         setIsLoaded(true);
       })

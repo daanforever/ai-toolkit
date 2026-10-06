@@ -9,7 +9,7 @@ from typing import Optional, Tuple, List, Any
 
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, Qwen3ForCausalLM
-from diffusers import AutoencoderKL
+from diffusers import AutoencoderKL, ZImageTransformer2DModel
 
 from toolkit.paths import normalize_path
 from toolkit.util.device import safe_module_to_device
@@ -121,16 +121,23 @@ def _load_transformer_by_mode(
 
     if mode in ("auto", "diffusers"):
         try:
-            from extensions_built_in.diffusion_models.z_image.loading import (
-                load_zimage_transformer_from_shards,
-            )
             log(f"Loading {label} (diffusers ZImage format)")
-            dit = load_zimage_transformer_from_shards(
-                transformer_folder,
-                subfolder=None,
-                torch_dtype=dtype,
-                device=device,
-            )
+            if os.path.isdir(transformer_folder):
+                from extensions_built_in.diffusion_models.z_image.loading import (
+                    load_zimage_transformer_from_shards,
+                )
+                dit = load_zimage_transformer_from_shards(
+                    transformer_folder,
+                    subfolder=None,
+                    torch_dtype=dtype,
+                    device=device,
+                )
+            else:
+                dit = ZImageTransformer2DModel.from_pretrained(
+                    transformer_folder,
+                    subfolder="transformer",
+                    torch_dtype=dtype,
+                )
             is_diffusers = True
         except (ValueError, FileNotFoundError, OSError, RuntimeError) as e:
             if mode == "diffusers":

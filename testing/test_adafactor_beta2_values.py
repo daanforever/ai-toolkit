@@ -1,70 +1,153 @@
+import math
+
 import pytest
 import torch
+
+from toolkit.optimizer import get_optimizer
 from toolkit.optimizers.adafactor import Adafactor
 
-def run_adafactor_with_beta2(beta2, steps=20, lr=1e-4, constant_grad=False):
-    torch.manual_seed(42)
-    p = torch.nn.Parameter(torch.ones(8, 8))
+
+def _make_opt(beta2, decay_rate=-0.8):
+    torch.manual_seed(1)
+    p = torch.nn.Parameter(torch.linspace(-0.5, 0.5, 6))
     opt = Adafactor(
         [p],
-        lr=lr,
+        lr=1e-3,
         beta1=None,
         beta2=beta2,
-        beta2_adaptive=False,
+        eps=(1e-30, 1e-3),
         scale_parameter=False,
         relative_step=False,
         weight_decay=0.0,
-        clip_threshold=1.0,
-        factored=False
+        factored=False,
+        decay_rate=decay_rate,
+        stochastic_accumulation=False,
+        stochastic_rounding=False,
     )
-    
+    return opt, p
+
+
+def _run(beta2, mid_set=None, steps=15):
+    opt, p = _make_opt(beta2)
     updates = []
     for i in range(steps):
-        if constant_grad:
-            grad = torch.ones(8, 8) * 0.1
-        else:
-            # Varying gradient to avoid constant clipping
-            grad = torch.ones(8, 8) * (0.1 / (i + 1))
-            
-        p.grad = grad.clone()
+        p.grad = torch.full((6,), 0.05 * ((i % 5) + 1))
+        if mid_set is not None and i == 7:
+            opt.set_beta2(mid_set)
         before = p.detach().clone()
         opt.step()
-        after = p.detach().clone()
-        update = before - after
-        updates.append(update.norm().item())
-        
-    return updates
+        updates.append((before - p.detach()).clone())
+    return (
+        p.detach().clone(),
+        opt.state[p]["exp_avg_sq"].clone(),
+        opt.get_mean_beta2(),
+        updates,
+        opt.param_groups[0]["beta2"],
+    )
 
-def test_beta2_values_with_varying_grad():
-    """
-    Test that different beta2 values (0.9, 0.95, 0.99) produce different updates
-    when gradients vary. This proves that beta2 is correctly applied.
-    """
-    updates_090 = run_adafactor_with_beta2(0.90, constant_grad=False)
-    updates_095 = run_adafactor_with_beta2(0.95, constant_grad=False)
-    updates_099 = run_adafactor_with_beta2(0.99, constant_grad=False)
-    
-    # After a few steps, the updates should diverge because the moving average
-    # of squared gradients will adapt at different rates.
-    assert updates_090[-1] != updates_095[-1]
-    assert updates_095[-1] != updates_099[-1]
-    assert updates_090[-1] != updates_099[-1]
 
-def test_beta2_clipping_with_constant_grad():
-    """
-    Test that with a constant gradient, the updates might be identical for different
-    beta2 values due to the clip_threshold. This explains why it might seem like
-    beta2 has no effect.
-    """
-    updates_090 = run_adafactor_with_beta2(0.90, steps=5, constant_grad=True)
-    updates_095 = run_adafactor_with_beta2(0.95, steps=5, constant_grad=True)
-    updates_099 = run_adafactor_with_beta2(0.99, steps=5, constant_grad=True)
-    
-    # Initially, because exp_avg_sq is small, the update magnitude is large and gets
-    # clipped to clip_threshold * lr. Thus, the updates are identical.
-    for i in range(5):
-        assert updates_090[i] == pytest.approx(updates_095[i], rel=1e-5)
-        assert updates_095[i] == pytest.approx(updates_099[i], rel=1e-5)
+def test_stored_beta2_does_not_affect_parameters_or_second_moment():
+    p09, v09, mean09, _, stored09 = _run(0.9)
+    p99, v99, mean99, _, stored99 = _run(0.99)
+    expected = 1.0 - math.pow(15, -0.8)
+    assert torch.equal(p09, p99)
+    assert torch.equal(v09, v99)
+    assert stored09 == pytest.approx(0.9)
+    assert stored99 == pytest.approx(0.99)
+    assert mean09 == pytest.approx(expected)
+    assert mean99 == pytest.approx(mean09)
 
-if __name__ == "__main__":
-    pytest.main([__file__])
+
+def test_set_beta2_does_not_change_next_update():
+    _, _, mean_ctrl, updates_ctrl, stored_ctrl = _run(0.9)
+    _, _, mean_after, updates_set, stored_set = _run(0.9, mid_set=0.5)
+    expected = 1.0 - math.pow(15, -0.8)
+    assert torch.equal(updates_ctrl[7], updates_set[7])
+    assert torch.equal(torch.stack(updates_ctrl), torch.stack(updates_set))
+    assert stored_ctrl == pytest.approx(0.9)
+    assert stored_set == pytest.approx(0.5)
+    assert mean_ctrl == pytest.approx(expected)
+    assert mean_after == pytest.approx(expected)
+
+
+def test_second_moment_matches_time_decay_recurrence():
+    """v = beta2t * v + (1 - beta2t) * (grad^2 + eps), beta2t = 1 - step ** decay_rate."""
+    torch.manual_seed(0)
+    eps0 = 1e-30
+    decay_rate = -0.8
+    p = torch.nn.Parameter(torch.randn(5))
+    opt = Adafactor(
+        [p],
+        lr=1e-3,
+        beta1=None,
+        beta2=0.99,
+        eps=(eps0, 1e-3),
+        scale_parameter=False,
+        relative_step=False,
+        weight_decay=0.0,
+        factored=False,
+        decay_rate=decay_rate,
+        stochastic_accumulation=False,
+        stochastic_rounding=False,
+    )
+    v = torch.zeros(5)
+    for step in range(1, 101):
+        grad = torch.randn(5)
+        p.grad = grad.clone()
+        opt.step()
+        beta2t = 1.0 - math.pow(step, decay_rate)
+        v = beta2t * v + (1.0 - beta2t) * (grad ** 2 + eps0)
+        if step == 1:
+            assert beta2t == pytest.approx(0.0)
+            assert torch.equal(opt.state[p]["exp_avg_sq"], grad ** 2 + eps0)
+        if step == 10:
+            assert beta2t == pytest.approx(0.842, abs=1e-3)
+            # rms_max_decay_rate (0.97) at step 10 is negative and must not match.
+            wrong = 1.0 - math.pow(step, 0.97)
+            assert wrong < 0
+            assert beta2t != pytest.approx(wrong)
+            assert opt.get_mean_beta2() != pytest.approx(wrong)
+        if step in (1, 10, 100):
+            assert torch.allclose(opt.state[p]["exp_avg_sq"], v, rtol=1e-5, atol=0.0)
+            assert opt.get_mean_beta2() == pytest.approx(beta2t)
+            assert opt.param_groups[0]["beta2"] == pytest.approx(0.99)
+
+
+def test_get_optimizer_drops_adaptive_beta2_keys():
+    p = torch.nn.Parameter(torch.ones(2))
+    opt = get_optimizer(
+        [p],
+        optimizer_type="adafactor",
+        learning_rate=1e-4,
+        optimizer_params={
+            "beta2": 0.99,
+            "beta2_adaptive": True,
+            "beta2_min": 0.9,
+            "relative_step": False,
+            "scale_parameter": False,
+            "beta1": None,
+        },
+    )
+    assert isinstance(opt, Adafactor)
+    for group in opt.param_groups:
+        assert "beta2_adaptive" not in group
+        assert "beta2_min" not in group
+        assert group["decay_rate"] == pytest.approx(-0.8)
+        assert group["beta2"] == pytest.approx(0.99)
+
+
+def test_resume_pops_stale_group_beta2_effective_and_gns():
+    opt, p = _make_opt(0.97)
+    p.grad = torch.ones_like(p) * 0.1
+    opt.step()
+    assert opt.param_groups[0]["beta2"] == pytest.approx(0.97)
+    assert opt.get_mean_beta2() == pytest.approx(0.0)
+    sd = opt.state_dict()
+    sd["param_groups"][0]["beta2"] = 0.5
+    sd["param_groups"][0]["beta2_effective"] = 0.0
+    sd["param_groups"][0]["gns"] = 7.0
+    opt.load_state_dict(sd)
+    assert "beta2_effective" not in opt.param_groups[0]
+    assert "gns" not in opt.param_groups[0]
+    assert opt.param_groups[0]["beta2"] == pytest.approx(0.97)
+    assert opt.get_mean_beta2() == pytest.approx(0.0)

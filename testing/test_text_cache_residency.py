@@ -867,7 +867,6 @@ def _make_recache_trainer_cuda() -> Any:
     t.is_caching_text_embeddings = True
     t.train_config = SimpleNamespace(unload_text_encoder=False)
     t.sample_config = SimpleNamespace(samples=[SimpleNamespace(prompt="old")])
-    t._last_applied_runtime_prompts = None
 
     te = _TinyLinear(2).to(_CUDA)
     unet = _TinyLinear(2).to(_CUDA)

@@ -5,7 +5,6 @@
 - From the repo root, invoke Python via the venv interpreter:
   - **Windows:** `venv\Scripts\python.exe` (e.g. `venv\Scripts\python.exe -m pytest ...`)
   - **Unix/macOS:** `venv/bin/python` (e.g. `venv/bin/python -m pytest ...`)
-
 - Do not rely on the system or IDE Python unless the user explicitly requests it; using the project venv ensures correct dependencies and avoids import errors.
 
 ## Instructions
@@ -54,11 +53,18 @@ Follow these rules for codebase exploration and any interactions with testing:
 ### Key Conventions:
 - Create modular code structures with separate files for models, data loading, training, and evaluation.
 
+## Code Health & Anti-Additive Programming
+- **No Additive Band-Aids:** NEVER solve tasks, bugs, or add new features simply by appending new `if` statements, flags, or nested logic to the end of existing functions.
+- **Holistic Refactoring:** If a new feature or bug fix makes an existing function overly complex or messy, you MUST rethink and rewrite the function to elegantly accommodate the new logic. 
+- **Subtractive Programming:** Actively look for opportunities to solve problems by modifying, simplifying, or deleting existing code rather than adding new code.
+- **Seamless Integration:** Your solution must look like it was part of the original design pattern, not a bolted-on afterthought.
+- **Cleanup:** Always remove dead, unreachable, or obsolete code that results from your changes.
+
 ## Follow the principle of "Minimal Viable Implementation":
 - Ask First: If you are unsure about any detail, stop and ask. Do not guess.
 - Implement only what is strictly required by the current plan. 
 - No "future-proofing," speculative features, or unsolicited optimizations.
-- Minimize changes to existing code: only add, replace, or delete the absolute necessary minimum of lines to achieve the goal.
+- **Keep changes localized but optimal:** Minimize changes to the overall codebase, but DO NOT sacrifice code clarity just to save lines of code. Refactoring the specifically targeted function/class to keep the codebase clean is EXPECTED and is not considered scope creep.
 - Strictly avoid "gold-plating" or "just-in-case" logic.
 - No Scope Creep: Do not add any functionality that is not explicitly mentioned in the plan, even if you think it would be helpful.
 - Context Preservation: Keep changes focused. Do not touch parts of the codebase that are not involved in the current plan.
@@ -71,4 +77,4 @@ Follow these rules for codebase exploration and any interactions with testing:
 - Use bullet points for explanations instead of long paragraphs. 
 - Do not explain basic concepts unless explicitly asked.
 - If a one-sentence answer or a single code block suffices, provide only that. 
-- Minimize fluff. Be extremely concise and direct. 
+- Minimize fluff. Be extremely concise and direct.

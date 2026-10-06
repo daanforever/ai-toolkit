@@ -76,7 +76,9 @@ def test_decomposition_approx_one_step():
 def test_mean_beta2_matches_group_setting():
     opt, p = _make_opt(beta2=0.97)
     _step_with_grad(opt, p, 1e-3)
-    assert math.isclose(opt.get_mean_beta2(), 0.97, rel_tol=1e-6)
+    assert math.isclose(opt.param_groups[0]["beta2"], 0.97, rel_tol=1e-6)
+    # Step 1 with default decay_rate=-0.8: beta2t = 1 - 1 ** -0.8 = 0.
+    assert opt.get_mean_beta2() == 0.0
 
 
 def test_get_group_scalars_returns_default_when_empty():

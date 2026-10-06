@@ -30,7 +30,20 @@ def get_meta_for_safetensors(meta: OrderedDict, name=None, add_software_info=Tru
     return save_meta
 
 
-def add_model_hash_to_meta(state_dict, meta: OrderedDict) -> OrderedDict:
+def _project_temp_dir() -> str:
+    """Scratch dir for the hash serialization.
+
+    ``tempfile`` defaults to the OS temp directory, which on Windows is usually
+    on the system drive and is too small for a full safetensors copy.
+    ``<repo>/temp`` is gitignored and lives with the project.
+    """
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+    path = os.path.join(root, "temp")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def add_model_hash_to_meta(state_dict, meta: OrderedDict, temp_dir: str = None) -> OrderedDict:
     """Precalculate the model hashes needed by sd-webui-additional-networks to
     save time on indexing the model later."""
 
@@ -46,7 +59,9 @@ def add_model_hash_to_meta(state_dict, meta: OrderedDict) -> OrderedDict:
 
     temp_path = None
     try:
-        with tempfile.NamedTemporaryFile(suffix=".safetensors", delete=False) as f:
+        directory = temp_dir if temp_dir else _project_temp_dir()
+        os.makedirs(directory, exist_ok=True)
+        with tempfile.NamedTemporaryFile(suffix=".safetensors", delete=False, dir=directory) as f:
             temp_path = f.name
         save_file(state_dict, temp_path, metadata=metadata_for_file)
         with open(temp_path, "rb") as f:

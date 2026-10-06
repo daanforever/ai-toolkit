@@ -19,6 +19,7 @@ def pixel_valid_to_patch_valid(
     image_valid_mask: torch.Tensor,
     latent_h: int,
     latent_w: int,
+    dtype: torch.dtype,
     patch_size: int = 2,
 ) -> torch.Tensor:
     """
@@ -28,6 +29,7 @@ def pixel_valid_to_patch_valid(
         image_valid_mask: (B, 1, H, W) or (B, H, W); True/1 = content.
         latent_h, latent_w: actual latent spatial size matching DiT input.
         patch_size: DiT patch size (Z-Image = 2).
+        dtype: Floating activation dtype used for interpolation and pooling.
 
     Returns:
         Bool tensor (B, Hp, Wp). A patch is valid if it contains any content pixel
@@ -39,7 +41,7 @@ def pixel_valid_to_patch_valid(
         raise ValueError(
             f"image_valid_mask expected BCHW or BHW, got shape {tuple(image_valid_mask.shape)}"
         )
-    v = image_valid_mask.float()
+    v = image_valid_mask.to(dtype=dtype)
     if v.shape[-2] != latent_h or v.shape[-1] != latent_w:
         v = F.interpolate(v, size=(latent_h, latent_w), mode="nearest")
     if latent_h % patch_size != 0 or latent_w % patch_size != 0:

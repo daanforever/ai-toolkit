@@ -34,33 +34,26 @@ class Adafactor(torch.optim.Optimizer):
         clip_threshold (`float`, *optional*, defaults to 1.0):
             Threshold of root mean square of final gradient update
         decay_rate (`float`, *optional*, defaults to -0.8):
-            Deprecated. Accepted for signature compatibility but ignored (not stored in defaults,
-            never read). Previously used to compute beta2 as `1.0 + decay_rate`. Use `beta2` instead.
+            Exponent for the second-moment time decay. Each step uses
+            ``beta2t = 1.0 - step ** decay_rate`` (``step`` is already incremented;
+            on step 1, ``beta2t`` is 0).
         beta1 (`float`, *optional*, defaults to `None`):
             Coefficient used for computing running averages of gradient
             (first moment, like in Adam). If not None, enables momentum.
             Suggested values when enabled: 0.9, 0.95 or 0.99 for smoother updates.
         beta2 (`float`, *optional*, defaults to 0.99):
-            Coefficient used to compute running averages of square
-            (second moment, like in Adam). Suggested values: 0.99 (default), 0.999.
-        beta2_adaptive (`bool`, *optional*, defaults to `False`):
-            If False, use fixed `group["beta2"]`. If True, `_effective_beta2` blends with
-            activity ``grad_rms / (grad_rms_max + eps0)`` between `beta2_min` and configured
-            `group["beta2"]` (honors ctor / `set_beta2`).
-        beta2_min (`float`, *optional*, defaults to `0.0`):
-            Lower bound for adaptive beta2 mixing:
-            ``beta2_min + (beta2 - beta2_min) * activity``, with `beta2` clamped to ``[0, 1)``
-            and `beta2_min` clamped into ``[0, beta2]``. If ``beta2 <= beta2_min``, returns
-            `beta2_min`.
+            Stored second-moment coefficient on ``group["beta2"]``, updated by
+            ``set_beta2``. ``get_beta2`` / ``get_mean_beta2`` return the applied
+            ``beta2t`` from the last step (0 before the first step). ``step()``
+            does not read ``group["beta2"]``; the second moment uses ``beta2t``
+            from ``decay_rate``.
         rms_max_decay_rate (`float`, *optional*, defaults to `0.97`):
-            Decay rate for running max of update RMS used in activity normalization.
             Must satisfy ``0 < rms_max_decay_rate <= 1``.
-            Applied each step to group-level gradient RMS running max (``grad_rms_max``).
-            When scale_parameter=True and relative_step=True, also used for the group-level running max
+            When scale_parameter=True and relative_step=True, used for the group-level running max
             of parameter RMS (``rms_max`` on each param group) and running min (``rms_min``), which normalizes each parameter's scale
             to (0, 1] for LR (useful for mixed-scale groups e.g. LoRA). Adafactor-specific group metrics
-            (``rms_ema``, ``lr_mean``, ``gns``, ``effective_lr``, ``effective_wd``, ``precond_gain``,
-            ``momentum_gain``, ``beta2_effective``, etc.) live on ``param_groups``. Generic param/grad/Δp
+            (``rms_ema``, ``lr_mean``, ``effective_lr``, ``effective_wd``, ``precond_gain``,
+            ``momentum_gain``, etc.) live on ``param_groups``. Generic param/grad/Δp
             RMS metrics are collected outside via ``OptimizerStepMetrics``.
         weight_decay (`float`, *optional*, defaults to 0.0):
             Weight decay (L2 penalty)
@@ -179,8 +172,6 @@ class Adafactor(torch.optim.Optimizer):
         decay_rate=-0.8,
         beta1=None,
         beta2=0.99,
-        beta2_adaptive: bool = False,
-        beta2_min: float = 0.0,
         rms_max_decay_rate=0.97,
         weight_decay=0.0,
         weight_decay_increment=0.0,
@@ -217,10 +208,9 @@ class Adafactor(torch.optim.Optimizer):
             "lr": lr,
             "eps": eps,
             "clip_threshold": clip_threshold,
+            "decay_rate": decay_rate,
             "beta1": beta1,
             "beta2": beta2,
-            "beta2_adaptive": beta2_adaptive,
-            "beta2_min": beta2_min,
             "rms_max_decay_rate": rms_max_decay_rate,
             "weight_decay": weight_decay,
             "weight_decay_increment": weight_decay_increment,
@@ -258,10 +248,9 @@ class Adafactor(torch.optim.Optimizer):
         self._warmup_init = warmup_init
         self._warmup_steps = warmup_steps
         self._warmup_boost = warmup_boost
+        self._decay_rate = decay_rate
         self._beta1 = beta1
         self._beta2 = beta2
-        self._beta2_adaptive = beta2_adaptive
-        self._beta2_min = beta2_min
         self._factored = factored
         self.is_stochastic_rounding_accumulation = False
         self.stochastic_rounding = stochastic_rounding
@@ -418,37 +407,39 @@ class Adafactor(torch.optim.Optimizer):
             ntt, float(self.scale_lr_mean), float(self.scale_lr_std), dtype=pdf_dtype
         )
 
-    def _clear_stale_effective_warmup_state(self) -> None:
-        """Clear warmup fields whose LR space may be stale after scale_lr config change."""
-        keys = (
-            "warmup_progress",
-            "warmup_delta",
-            "warmup_start",
-            "warmup_start_unscaled",
-            "warmup_lr",
-            "warmup_lr_unscaled",
-            "warmup_interp",
-            "warmup_lr_effective",
-            "warmup_complete_pending_cleanup",
-            "warmup_target",
-            "warmup_steps_old",
-            "warmup_boost_old",
+    @staticmethod
+    def _scale_mask_key(mask: Optional[Sequence[str]]) -> Tuple[str, ...]:
+        """Normalize ``None`` and empty masks to one key. Both mean 'scale every group'."""
+        if not mask:
+            return ()
+        return tuple(mask)
+
+    def _scale_lr_fingerprint(
+        self,
+    ) -> Tuple[bool, Optional[float], Optional[float], Tuple[str, ...]]:
+        """Identity of the Gaussian scale config that warmup segments depend on."""
+        return (
+            bool(self.scale_lr_by_index),
+            self.scale_lr_mean,
+            self.scale_lr_std,
+            self._scale_mask_key(self.scale_lr_mask),
         )
-        for group in self.param_groups:
-            has_warmup_state = (
-                group.get("warmup_active")
-                or group.get("warmup_lr_effective")
-                or group.get("warmup_complete_pending_cleanup")
-                or "warmup_lr" in group
-                or "warmup_target" in group
-                or "warmup_lr_previous" in group
-            )
-            if not has_warmup_state:
-                continue
-            group["warmup_active"] = False
-            group.pop("warmup_lr_previous", None)
-            for k in keys:
-                group.pop(k, None)
+
+    def _scale_lr_config_is_current(
+        self,
+        enabled: bool,
+        mean: Optional[float],
+        std: Optional[float],
+        mask: Optional[Tuple[str, ...]],
+    ) -> bool:
+        if not hasattr(self, "scale_lr_by_index"):
+            return False
+        return self._scale_lr_fingerprint() == (
+            bool(enabled),
+            mean,
+            std,
+            self._scale_mask_key(mask),
+        )
 
     def _init_scale_lr_by_index(
         self,
@@ -456,15 +447,20 @@ class Adafactor(torch.optim.Optimizer):
         scale_lr_mean: Optional[float] = None,
         scale_lr_std: Optional[float] = None,
         scale_lr_mask: Optional[Sequence[str]] = None,
-        *,
-        clear_warmup: bool = False,
     ) -> None:
-        """Enable index-based Gaussian LR scaling and resolve max_index."""
+        """Enable index-based Gaussian LR scaling and resolve max_index.
+
+        Same effective config is a no-op: warmup keys are left untouched.
+        A real change only updates the scale fields. The next warmup step
+        opens a segment from ``warmup_lr_previous`` when the fingerprint differs.
+        """
         enabled = bool(scale_lr_by_index)
         mean, std = self._validate_scale_lr_mean_std(
             scale_lr_mean, scale_lr_std, required=enabled
         )
         mask = self._validate_scale_lr_mask(scale_lr_mask)
+        if self._scale_lr_config_is_current(enabled, mean, std, mask):
+            return
         self.scale_lr_mean = mean
         self.scale_lr_std = std
         self.scale_lr_mask = mask
@@ -472,8 +468,6 @@ class Adafactor(torch.optim.Optimizer):
         self._max_index = None
         self._scale_lr_lookup = None
         if not enabled:
-            if clear_warmup:
-                self._clear_stale_effective_warmup_state()
             return
         indices = [
             int(group["index"])
@@ -492,8 +486,6 @@ class Adafactor(torch.optim.Optimizer):
             )
         self._max_index = max_index
         self._rebuild_scale_lr_lookup()
-        if clear_warmup:
-            self._clear_stale_effective_warmup_state()
 
     def _scale_lr_applies(self, group) -> bool:
         """True when Gaussian LR scaling should modify this group's LR."""
@@ -528,13 +520,15 @@ class Adafactor(torch.optim.Optimizer):
 
     def set_scale_lr_by_index(self, value: bool) -> None:
         """Enable/disable index-based LR scaling at runtime (e.g. from UI)."""
+        before = self._scale_lr_fingerprint()
         self._init_scale_lr_by_index(
             bool(value),
             self.scale_lr_mean,
             self.scale_lr_std,
             self.scale_lr_mask,
-            clear_warmup=True,
         )
+        if self._scale_lr_fingerprint() == before:
+            return
         if is_debug_enabled():
             print_acc(
                 f"Adafactor: applied runtime scale_lr_by_index={self.scale_lr_by_index}"
@@ -547,13 +541,15 @@ class Adafactor(torch.optim.Optimizer):
         mask: Optional[Sequence[str]],
     ) -> None:
         """Atomically update Gaussian LR mean/std/mask and rebuild the lookup."""
+        before = self._scale_lr_fingerprint()
         self._init_scale_lr_by_index(
             self.scale_lr_by_index,
             mean,
             std,
             mask,
-            clear_warmup=True,
         )
+        if self._scale_lr_fingerprint() == before:
+            return
         if is_debug_enabled():
             print_acc(
                 f"Adafactor: applied runtime scale_lr_config "
@@ -602,22 +598,6 @@ class Adafactor(torch.optim.Optimizer):
         if is_debug_enabled():
             print_acc(f"Adafactor: applied runtime beta2={value}")
 
-    def set_beta2_adaptive(self, value: bool) -> None:
-        """Enable/disable adaptive beta2 based on grad activity."""
-        self._beta2_adaptive = bool(value)
-        for group in self.param_groups:
-            group["beta2_adaptive"] = self._beta2_adaptive
-        if is_debug_enabled():
-            print_acc(f"Adafactor: applied runtime beta2_adaptive={self._beta2_adaptive}")
-
-    def set_beta2_min(self, value: float) -> None:
-        """Update floor for adaptive beta2."""
-        self._beta2_min = float(value)
-        for group in self.param_groups:
-            group["beta2_min"] = self._beta2_min
-        if is_debug_enabled():
-            print_acc(f"Adafactor: applied runtime beta2_min={self._beta2_min}")
-
     def state_dict(self):
         return super().state_dict()
 
@@ -634,10 +614,9 @@ class Adafactor(torch.optim.Optimizer):
             "warmup_init",
             "warmup_steps",
             "warmup_boost",
+            "decay_rate",
             "beta1",
             "beta2",
-            "beta2_adaptive",
-            "beta2_min",
             "factored",
         )
         # Keep current run configuration as source of truth on resume.
@@ -669,6 +648,8 @@ class Adafactor(torch.optim.Optimizer):
             group.pop("instability_score", None)
             group.pop("emergency_brake", None)
             group.pop("min_lr", None)
+            group.pop("beta2_effective", None)
+            group.pop("gns", None)
 
         self._migrate_optimizer_state_buffers()
 
@@ -843,17 +824,26 @@ class Adafactor(torch.optim.Optimizer):
     def _warmup_update_group(self, group) -> None:
         """Advance group warmup by one optimizer step.
 
-        Starts a new segment when ``group["lr"]``, ``warmup_steps``, or ``warmup_boost`` changes.
+        Starts a new segment when ``group["lr"]``, ``warmup_steps``, ``warmup_boost``,
+        or the scale fingerprint (``by_index`` / mean / std / mask) changes.
         Segment: linear ramp stored in ``warmup_lr``. Unscaled geometry uses prior unscaled
         start (or ``lr * eps[1]``) toward a boosted interp target; ``warmup_target`` stays the
         scheduled ``lr``. When ``scale_lr_by_index`` applies to the group, the ramp runs in
         effective-LR space with the absolute unscaled delta so lower-index-scale groups can
         finish earlier; ``_get_lr`` must not scale ``warmup_lr`` again (``warmup_lr_effective``).
+        A scale change keeps ``warmup_lr_previous`` and reuses ``_index_lr_multiplier`` /
+        ``_to_effective_lr`` so the new segment starts at the current level.
         ``warmup_lr_unscaled`` tracks the same progress in unscaled space for absolute WD.
         Completion is per-group when ``warmup_lr`` reaches ``warmup_interp`` (or ``warmup_steps``
         as a cap); cleanup runs on the next step via ``stop_warmup``.
         """
-        if group.pop("warmup_complete_pending_cleanup", False):
+        scale_fp = self._scale_lr_fingerprint()
+        stored_fp = group.get("warmup_scale_fp", None)
+        scale_changed = stored_fp is not None and stored_fp != scale_fp
+        if scale_changed and group.get("warmup_complete_pending_cleanup", False):
+            # stop_warmup would snap warmup_lr_previous onto the new effective target.
+            group.pop("warmup_complete_pending_cleanup", None)
+        elif group.pop("warmup_complete_pending_cleanup", False):
             self.stop_warmup(group)
 
         lr_target = group["lr"]
@@ -864,6 +854,7 @@ class Adafactor(torch.optim.Optimizer):
             group.pop("warmup_lr_unscaled", None)
             group.pop("warmup_lr_effective", None)
             group["warmup_lr_previous"] = group.get("warmup_lr_previous", 1.0)
+            group["warmup_scale_fp"] = scale_fp
             return
 
         use_effective = self._scale_lr_applies(group)
@@ -883,6 +874,7 @@ class Adafactor(torch.optim.Optimizer):
                 group["warmup_lr_previous"] = lr_target
                 group.pop("warmup_lr_unscaled", None)
                 group.pop("warmup_lr_effective", None)
+            group["warmup_scale_fp"] = scale_fp
             return
 
         warmup_steps_old = group.get("warmup_steps_old", 0)
@@ -894,6 +886,7 @@ class Adafactor(torch.optim.Optimizer):
             or warmup_steps != warmup_steps_old
             or boost_old is None
             or boost != boost_old
+            or scale_changed
         ):
             if "warmup_lr_previous" in group:
                 if use_effective:
@@ -939,6 +932,7 @@ class Adafactor(torch.optim.Optimizer):
             group["warmup_delta"] = delta_ref
             group["warmup_steps_old"] = warmup_steps
             group["warmup_boost_old"] = boost
+            group["warmup_scale_fp"] = scale_fp
             group["warmup_lr_effective"] = use_effective
             if not use_effective:
                 group.pop("warmup_lr_unscaled", None)
@@ -949,6 +943,8 @@ class Adafactor(torch.optim.Optimizer):
                     f"Adafactor: base_lr changed ({lr_start:.2e} -> interp {lr_interp:.2e}, "
                     f"target {lr_target:.2e}, {direction}), starting warmup"
                 )
+        elif stored_fp is None:
+            group["warmup_scale_fp"] = scale_fp
 
         if group.get("warmup_active", False):
             warmup_start = group["warmup_start"]
@@ -1063,22 +1059,6 @@ class Adafactor(torch.optim.Optimizer):
         delta = 0.01 * (limited - 1.0)
         group["beta1"] += delta
         group["beta1"] = max(0.1, min(0.99, group["beta1"]))
-
-    def _update_beta2_from_gns(self, group) -> None:
-        """
-        Softly adjust group["beta2"] toward a GNS-based target (only when relative_step=True).
-        Low GNS (< 4) -> target 0.88; high GNS (> 10) -> target 0.99; else 0.9.
-        """
-        # WIP: reserved for future use; currently not called.
-        target_beta2 = 0.9
-        current_gns = self._group_scalar_item(group, "gns", 0.0)
-
-        if current_gns < 4.0:
-            target_beta2 = 0.888
-        elif current_gns > 10.0:
-            target_beta2 = 0.999
-
-        group["beta2"] = group["beta2"] + 0.01 * (target_beta2 - group["beta2"])
 
     @staticmethod
     def _get_options(param_group, param_shape):
@@ -1274,40 +1254,13 @@ class Adafactor(torch.optim.Optimizer):
             group[key] = current
         group[key] = torch.minimum(current, candidate)
 
-    @staticmethod
-    def _effective_beta2(group, grad_rms: torch.Tensor, eps0: float) -> float:
-        beta2 = float(group["beta2"])
-
-        if not group.get("beta2_adaptive", False):
-            return beta2
-
-        # Configured beta2 is the activity-blend high end (honors ctor / set_beta2).
-        beta2 = max(0.0, min(beta2, 1.0 - 1e-12))
-        beta2_min = float(group.get("beta2_min", 0.0))
-        beta2_min = max(0.0, min(beta2, beta2_min))
-        if beta2 <= beta2_min:
-            return beta2_min
-
-        grad_rms_max = group.get("grad_rms_max")
-        if grad_rms_max is None:
-            return beta2
-        max_val = grad_rms_max.item() if isinstance(grad_rms_max, torch.Tensor) else float(grad_rms_max)
-        if not math.isfinite(max_val) or max_val <= eps0:
-            return beta2_min
-
-        grad_val = grad_rms.item() if isinstance(grad_rms, torch.Tensor) else float(grad_rms)
-        if not math.isfinite(grad_val):
-            return beta2_min
-        activity = max(0.0, min(1.0, grad_val / (max_val + eps0)))
-        return beta2_min + (beta2 - beta2_min) * activity
-
     def _finalize_group_step_metrics(
         self,
         group,
-        metrics: List[Tuple[torch.nn.Parameter, torch.Tensor, float, Optional[torch.Tensor]]],
+        metrics: List[Tuple[torch.nn.Parameter, torch.Tensor, float]],
     ) -> None:
         """Aggregate Adafactor-specific per-param state and per-step rows into group scalars."""
-        params_list = [p for p, _, _, _ in metrics if self.state.get(p) is not None]
+        params_list = [p for p, _, _ in metrics if self.state.get(p) is not None]
         if not params_list:
             return
 
@@ -1320,20 +1273,8 @@ class Adafactor(torch.optim.Optimizer):
         )
 
         sum_lr_weighted = sum(
-            lr * p.numel() for p, _, lr, _ in metrics if self.state.get(p) is not None
+            lr * p.numel() for p, _, lr in metrics if self.state.get(p) is not None
         )
-
-        gns_values = []
-        gns_weights = []
-        device_g = None
-        for p, _, _, gns_t in metrics:
-            if gns_t is None or self.state.get(p) is None:
-                continue
-            v_t = torch.as_tensor(gns_t, device=p.device, dtype=p.dtype).reshape(())
-            if device_g is None:
-                device_g = v_t.device
-            gns_values.append(v_t.to(device_g))
-            gns_weights.append(p.numel())
 
         dr = float(group["rms_max_decay_rate"])
         if "rms_ema" not in group:
@@ -1346,15 +1287,8 @@ class Adafactor(torch.optim.Optimizer):
         group["lr_mean"] = torch.tensor(
             sum_lr_weighted / total_numel, dtype=ref_dtype, device=ref_device
         )
-        if gns_values:
-            gv = torch.stack(gns_values)
-            gw = torch.tensor(gns_weights, device=device_g, dtype=ref_dtype)
-            avg_gns = (torch.sum(gv * gw) / (torch.sum(gw) + 1e-12)).item()
-            group["gns"] = torch.tensor(avg_gns, dtype=ref_dtype, device=ref_device)
-        else:
-            group["gns"] = torch.tensor(0.0, dtype=ref_dtype, device=ref_device)
 
-        for key in ("effective_lr", "effective_wd", "precond_gain", "momentum_gain", "beta2_effective"):
+        for key in ("effective_lr", "effective_wd", "precond_gain", "momentum_gain", "beta2t"):
             val = self._get_group_scalars(
                 group, key, default=0.0, reduction='mean', params=params_list
             )
@@ -1415,12 +1349,8 @@ class Adafactor(torch.optim.Optimizer):
                 group["rms_max"] = group["rms_max"] * decay_rate
             if "rms_min" in group:
                 group["rms_min"] = group["rms_min"] / decay_rate
-            if "grad_rms_max" in group:
-                group["grad_rms_max"] = group["grad_rms_max"] * decay_rate
 
-            metrics: List[
-                Tuple[torch.nn.Parameter, torch.Tensor, float, Optional[torch.Tensor]]
-            ] = []
+            metrics: List[Tuple[torch.nn.Parameter, torch.Tensor, float]] = []
 
             for p in group["params"]:
                 if p.grad is None or not p.requires_grad:
@@ -1475,6 +1405,8 @@ class Adafactor(torch.optim.Optimizer):
                     )
 
                 state["step"] += 1
+                beta2t = 1.0 - math.pow(state["step"], group["decay_rate"])
+                state["beta2t"] = float(beta2t)
 
                 p_data_fp32 = p
                 is_quantized = isinstance(p_data_fp32, QBytesTensor)
@@ -1495,18 +1427,16 @@ class Adafactor(torch.optim.Optimizer):
 
                 state["grad_rms"] = self._rms(grad)
                 gr = state["grad_rms"]
-                self._maybe_group_running_max_update(group, "grad_rms_max", gr)
 
-                beta2 = self._effective_beta2(group, gr, eps0)
                 update = (grad**2) + eps0
                 if factored:
                     exp_avg_sq_row = state["exp_avg_sq_row"]
                     exp_avg_sq_col = state["exp_avg_sq_col"]
 
-                    exp_avg_sq_row.mul_(beta2).add_(
-                        update.mean(dim=-1), alpha=(1.0 - beta2))
-                    exp_avg_sq_col.mul_(beta2).add_(
-                        update.mean(dim=-2), alpha=(1.0 - beta2))
+                    exp_avg_sq_row.mul_(beta2t).add_(
+                        update.mean(dim=-1), alpha=(1.0 - beta2t))
+                    exp_avg_sq_col.mul_(beta2t).add_(
+                        update.mean(dim=-2), alpha=(1.0 - beta2t))
                     self._maybe_finite_or_eps_inplace(exp_avg_sq_row, eps0, unsigned=True)
                     self._maybe_finite_or_eps_inplace(exp_avg_sq_col, eps0, unsigned=True)
 
@@ -1517,11 +1447,11 @@ class Adafactor(torch.optim.Optimizer):
                 else:
                     exp_avg_sq = state["exp_avg_sq"]
 
-                    exp_avg_sq.mul_(beta2).add_(update, alpha=(1.0 - beta2))
+                    exp_avg_sq.mul_(beta2t).add_(update, alpha=(1.0 - beta2t))
                     self._maybe_finite_or_eps_inplace(exp_avg_sq, eps0, unsigned=True)
                     update = exp_avg_sq.clamp(min=eps0).rsqrt().mul_(grad)
 
-                # Preconditioned + clipped direction (before LR) for metrics / GNS
+                # Preconditioned + clipped direction (before LR) for metrics
                 update_hat = update.div_(
                     (self._rms(update) / group["clip_threshold"]).clamp_(min=1.0))
                 update_hat = self._finite_or_eps(update_hat, eps0)
@@ -1539,22 +1469,22 @@ class Adafactor(torch.optim.Optimizer):
                 state["dir_consistency"] = torch.nn.functional.cosine_similarity(
                     update_hat.flatten(), beta2_direction_ema.flatten(), dim=0, eps=1e-8
                 )
-                beta2_direction_ema.mul_(beta2).add_(update_hat, alpha=(1.0 - beta2))
+                beta2_direction_ema.mul_(beta2t).add_(update_hat, alpha=(1.0 - beta2t))
 
                 lr = self._get_lr(group, state)
                 scaled_update = update_hat.mul(lr)
                 current_update_sq = scaled_update.pow(2).mean()
                 if "beta2_update_sq_ema" in state:
                     signal_sq = torch.as_tensor(
-                        state["beta2_update_sq_ema"], device=grad.device, dtype=torch.float32
+                        state["beta2_update_sq_ema"],
+                        device=grad.device,
+                        dtype=grad.dtype,
                     ).reshape(())
                 else:
                     signal_sq = current_update_sq.detach()
-                gns_tensor = (current_update_sq - signal_sq) / (signal_sq + 1e-12)
                 state["beta2_update_sq_ema"] = (
-                    signal_sq * beta2 + current_update_sq.detach() * (1.0 - beta2)
+                    signal_sq * beta2t + current_update_sq.detach() * (1.0 - beta2t)
                 ).to(dtype=p.dtype)
-                state["beta2_effective"] = float(beta2)
 
                 if use_first_moment:
                     exp_avg = state["exp_avg"]
@@ -1640,7 +1570,6 @@ class Adafactor(torch.optim.Optimizer):
                         p,
                         update_rms.detach(),
                         float(lr),
-                        gns_tensor.detach(),
                     )
                 )
 
@@ -1714,13 +1643,6 @@ class Adafactor(torch.optim.Optimizer):
         """Mean momentum_gain across all parameter groups."""
         return self._scalars_per_group_to_mean(self.get_momentum_gain())
 
-    def get_gns(self):
-        """Get Gradient Noise Scale per group (``gns`` on the param group)."""
-        out = []
-        for group in self.param_groups:
-            out.append(self._group_scalar_item(group, "gns", 0.0))
-        return out
-
     def get_dir_consistency(self):
         """Get Directional Consistency (cosine similarity to beta2 direction EMA) per group."""
         out = []
@@ -1728,10 +1650,6 @@ class Adafactor(torch.optim.Optimizer):
             v = self._get_group_scalars(group, "dir_consistency", default=0.0, reduction='mean')
             out.append(v)
         return out
-
-    def get_mean_gns(self):
-        """Mean GNS across all parameter groups."""
-        return self._scalars_per_group_to_mean(self.get_gns())
 
     def get_mean_dir_consistency(self):
         """Mean Directional Consistency across all parameter groups."""
@@ -1750,13 +1668,12 @@ class Adafactor(torch.optim.Optimizer):
         return self._scalars_per_group_to_mean(self.get_beta1())
 
     def get_beta2(self):
-        """Get beta2 (second-moment coefficient) for each parameter group."""
+        """Applied ``beta2t`` for each parameter group (0 before the first step)."""
         out = []
         for group in self.param_groups:
-            val = group.get("beta2_effective", group.get("beta2", self._beta2))
-            out.append(float(val if val is not None else self._beta2))
+            out.append(self._group_scalar_item(group, "beta2t", 0.0))
         return out
 
     def get_mean_beta2(self):
-        """Mean beta2 (second-moment coefficient) across all parameter groups."""
+        """Mean applied ``beta2t`` across all parameter groups."""
         return self._scalars_per_group_to_mean(self.get_beta2())

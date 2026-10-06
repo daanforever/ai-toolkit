@@ -67,6 +67,25 @@ export const getHFToken = async () => {
   return token;
 };
 
+export const getOpenAIApiUrl = async () => {
+  const key = 'OPENAI_API_URL';
+  let apiUrl = myCache.get(key) as string;
+  if (apiUrl) {
+    return apiUrl;
+  }
+  let row = await prisma.settings.findFirst({
+    where: {
+      key: key,
+    },
+  });
+  apiUrl = '';
+  if (row?.value && row.value !== '') {
+    apiUrl = row.value;
+  }
+  myCache.set(key, apiUrl);
+  return apiUrl;
+};
+
 export const getDataRoot = async () => {
   const key = 'DATA_ROOT';
   let dataRoot = myCache.get(key) as string;
