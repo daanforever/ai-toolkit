@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { AgentChatRequestError, buildChatMessages, parseAgentChatRequest } from '@/server/agentChat';
-import { createChatCompletion, OpenAIRequestError } from '@/server/openai';
+import { createChatCompletion, OpenAIRequestAborted, OpenAIRequestError } from '@/server/openai';
 
 export async function POST(request: NextRequest) {
   let body: unknown;
@@ -16,9 +16,12 @@ export async function POST(request: NextRequest) {
     if (!parsed) {
       return NextResponse.json({ error: 'Invalid messages' }, { status: 400 });
     }
-    const reply = await createChatCompletion(await buildChatMessages(parsed));
+    const reply = await createChatCompletion(await buildChatMessages(parsed), request.signal);
     return NextResponse.json({ reply });
   } catch (error) {
+    if (error instanceof OpenAIRequestAborted) {
+      return new NextResponse(null, { status: 499 });
+    }
     if (error instanceof AgentChatRequestError || error instanceof OpenAIRequestError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }

@@ -17,6 +17,13 @@ export class OpenAIRequestError extends Error {
   }
 }
 
+export class OpenAIRequestAborted extends Error {
+  constructor() {
+    super('Client aborted the request');
+    this.name = 'OpenAIRequestAborted';
+  }
+}
+
 const MODELS_TIMEOUT_MS = 10_000;
 const COMPLETION_TIMEOUT_MS = 120_000;
 
@@ -48,6 +55,18 @@ function errorMessage(error: unknown): string {
   return error.message;
 }
 
+function upstreamSignal(signal: AbortSignal, timeoutMs: number): AbortSignal {
+  return AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]);
+}
+
+function rethrowUpstream(signal: AbortSignal, error: unknown, label: string): never {
+  if (signal.aborted) {
+    throw new OpenAIRequestAborted();
+  }
+  console.error(label, error);
+  throw new OpenAIRequestError(502, errorMessage(error));
+}
+
 async function readUpstreamError(response: Response): Promise<string> {
   try {
     const body = (await response.json()) as ChatCompletionResponse;
@@ -60,14 +79,13 @@ async function readUpstreamError(response: Response): Promise<string> {
   return response.statusText || `Upstream request failed (${response.status})`;
 }
 
-export async function resolveModel(): Promise<string> {
+export async function resolveModel(signal: AbortSignal): Promise<string> {
   const apiUrl = await requireBaseUrl();
   let response: Response;
   try {
-    response = await fetch(`${apiUrl}/models`, { signal: AbortSignal.timeout(MODELS_TIMEOUT_MS) });
+    response = await fetch(`${apiUrl}/models`, { signal: upstreamSignal(signal, MODELS_TIMEOUT_MS) });
   } catch (error) {
-    console.error('OpenAI models request failed:', error);
-    throw new OpenAIRequestError(502, errorMessage(error));
+    rethrowUpstream(signal, error, 'OpenAI models request failed:');
   }
   if (!response.ok) {
     const message = await readUpstreamError(response);
@@ -89,20 +107,19 @@ export async function resolveModel(): Promise<string> {
   return modelId;
 }
 
-export async function createChatCompletion(messages: ChatMessage[]): Promise<string> {
+export async function createChatCompletion(messages: ChatMessage[], signal: AbortSignal): Promise<string> {
   const apiUrl = await requireBaseUrl();
-  const model = await resolveModel();
+  const model = await resolveModel(signal);
   let response: Response;
   try {
     response = await fetch(`${apiUrl}/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model, messages, stream: false }),
-      signal: AbortSignal.timeout(COMPLETION_TIMEOUT_MS),
+      signal: upstreamSignal(signal, COMPLETION_TIMEOUT_MS),
     });
   } catch (error) {
-    console.error('OpenAI chat completion failed:', error);
-    throw new OpenAIRequestError(502, errorMessage(error));
+    rethrowUpstream(signal, error, 'OpenAI chat completion failed:');
   }
   if (!response.ok) {
     const message = await readUpstreamError(response);

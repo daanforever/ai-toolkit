@@ -34,20 +34,28 @@ function captureAttachment(imgPath: string | null, caption: string | null): Atta
   return snapshot;
 }
 
+function captionNotice(typed: string, reflected: string, loaded: string): string {
+  if (loaded === reflected) return typed;
+  const notice = loaded ? `Caption changed to:\n${loaded}` : 'Caption removed.';
+  return `${notice}\n\n${typed}`;
+}
+
 export default function AgentChatPanel({ imgPath, caption }: Props) {
   const [draft, setDraft] = useState('');
   const [turns, setTurns] = useState<AgentChatTurn[]>([]);
   const [attachment, setAttachment] = useState<AttachmentSnapshot | null>(null);
+  const [reflectedCaption, setReflectedCaption] = useState<string | null>(null);
   const [error, setError] = useState('');
   const [isSending, setIsSending] = useState(false);
   const sendingRef = useRef(false);
-  const mountedRef = useRef(true);
+  const abortRef = useRef<AbortController | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    mountedRef.current = true;
+    const controller = new AbortController();
+    abortRef.current = controller;
     return () => {
-      mountedRef.current = false;
+      controller.abort();
     };
   }, []);
 
@@ -61,12 +69,18 @@ export default function AgentChatPanel({ imgPath, caption }: Props) {
 
   const send = async () => {
     const message = draft.trim();
-    if (!message || sendingRef.current) return;
+    const signal = abortRef.current?.signal;
+    if (!message || sendingRef.current || !signal || signal.aborted) return;
     sendingRef.current = true;
 
     const isOpening = turns.length === 0;
     const snapshot = isOpening ? captureAttachment(imgPath, caption) : (attachment ?? {});
-    const userTurn: AgentChatTurn = { role: 'user', content: message };
+    const loadedCaption = typeof caption === 'string' ? caption.trim() : null;
+    const content =
+      !isOpening && reflectedCaption !== null && loadedCaption !== null
+        ? captionNotice(message, reflectedCaption, loadedCaption)
+        : message;
+    const userTurn: AgentChatTurn = { role: 'user', content };
     const nextTurns: AgentChatTurn[] = [...turns, userTurn];
 
     setDraft('');
@@ -76,7 +90,7 @@ export default function AgentChatPanel({ imgPath, caption }: Props) {
     setIsSending(true);
 
     const rollback = (text: string) => {
-      if (!mountedRef.current) return;
+      if (signal.aborted) return;
       setTurns(turns);
       if (isOpening) setAttachment(null);
       setError(text);
@@ -87,19 +101,22 @@ export default function AgentChatPanel({ imgPath, caption }: Props) {
       const body: AgentChatRequest = { messages: nextTurns };
       if (snapshot.imgPath) body.imgPath = snapshot.imgPath;
       if (snapshot.caption) body.caption = snapshot.caption;
-      const res = await apiClient.post<{ reply?: unknown }>('/api/agent/chat', body);
-      if (!mountedRef.current) return;
+      const res = await apiClient.post<{ reply?: unknown }>('/api/agent/chat', body, { signal });
+      if (signal.aborted) return;
       const reply = res.data?.reply;
       if (typeof reply !== 'string' || reply.trim() === '') {
         rollback('Empty reply');
         return;
       }
       setTurns([...nextTurns, { role: 'assistant', content: reply }]);
+      if (isOpening) setReflectedCaption(snapshot.caption ?? '');
+      else if (loadedCaption !== null) setReflectedCaption(loadedCaption);
     } catch (requestError) {
+      if (signal.aborted) return;
       rollback(readChatError(requestError));
     } finally {
       sendingRef.current = false;
-      if (mountedRef.current) setIsSending(false);
+      if (!signal.aborted) setIsSending(false);
     }
   };
 
