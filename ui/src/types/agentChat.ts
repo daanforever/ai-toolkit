@@ -1,3 +1,10 @@
+export interface AgentChatTurn {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
 export interface AgentChatRequest {
-  message: string;
+  messages: AgentChatTurn[];
+  imgPath?: string;
+  caption?: string;
 }

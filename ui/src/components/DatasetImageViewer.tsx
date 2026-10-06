@@ -259,7 +259,7 @@ export default function DatasetImageViewer({ imgPath, images, onChange, onCaptio
             </div>
             <div className="relative hidden w-80 shrink-0 self-stretch md:block">
               <div className="absolute inset-0">
-                <AgentChatPanel />
+                <AgentChatPanel key={imgPath ?? ''} imgPath={imgPath} caption={isCaptionLoaded ? caption : null} />
               </div>
             </div>
           </DialogPanel>

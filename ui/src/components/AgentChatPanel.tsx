@@ -4,7 +4,17 @@ import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import { Send } from 'lucide-react';
 import { apiClient } from '@/utils/api';
-import { AgentChatRequest } from '@/types/agentChat';
+import { AgentChatRequest, AgentChatTurn } from '@/types/agentChat';
+
+interface Props {
+  imgPath: string | null;
+  caption: string | null;
+}
+
+interface AttachmentSnapshot {
+  imgPath?: string;
+  caption?: string;
+}
 
 function readChatError(error: unknown): string {
   if (axios.isAxiosError(error)) {
@@ -16,14 +26,23 @@ function readChatError(error: unknown): string {
   return 'Request failed';
 }
 
-export default function AgentChatPanel() {
+function captureAttachment(imgPath: string | null, caption: string | null): AttachmentSnapshot {
+  const snapshot: AttachmentSnapshot = {};
+  if (imgPath) snapshot.imgPath = imgPath;
+  const trimmedCaption = caption?.trim() ?? '';
+  if (trimmedCaption) snapshot.caption = trimmedCaption;
+  return snapshot;
+}
+
+export default function AgentChatPanel({ imgPath, caption }: Props) {
   const [draft, setDraft] = useState('');
-  const [sentMessage, setSentMessage] = useState('');
-  const [reply, setReply] = useState('');
+  const [turns, setTurns] = useState<AgentChatTurn[]>([]);
+  const [attachment, setAttachment] = useState<AttachmentSnapshot | null>(null);
   const [error, setError] = useState('');
   const [isSending, setIsSending] = useState(false);
   const sendingRef = useRef(false);
   const mountedRef = useRef(true);
+  const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -32,29 +51,52 @@ export default function AgentChatPanel() {
     };
   }, []);
 
+  useEffect(() => {
+    const list = listRef.current;
+    if (!list) return;
+    list.scrollTop = list.scrollHeight;
+  }, [turns, isSending, error]);
+
   const canSend = draft.trim().length > 0 && !isSending;
 
   const send = async () => {
     const message = draft.trim();
     if (!message || sendingRef.current) return;
     sendingRef.current = true;
+
+    const isOpening = turns.length === 0;
+    const snapshot = isOpening ? captureAttachment(imgPath, caption) : (attachment ?? {});
+    const userTurn: AgentChatTurn = { role: 'user', content: message };
+    const nextTurns: AgentChatTurn[] = [...turns, userTurn];
+
     setDraft('');
-    setSentMessage(message);
-    setReply('');
     setError('');
+    setTurns(nextTurns);
+    if (isOpening) setAttachment(snapshot);
     setIsSending(true);
+
+    const rollback = (text: string) => {
+      if (!mountedRef.current) return;
+      setTurns(turns);
+      if (isOpening) setAttachment(null);
+      setError(text);
+      setDraft(current => (current.length > 0 ? current : message));
+    };
+
     try {
-      const body: AgentChatRequest = { message };
+      const body: AgentChatRequest = { messages: nextTurns };
+      if (snapshot.imgPath) body.imgPath = snapshot.imgPath;
+      if (snapshot.caption) body.caption = snapshot.caption;
       const res = await apiClient.post<{ reply?: unknown }>('/api/agent/chat', body);
       if (!mountedRef.current) return;
-      if (typeof res.data?.reply !== 'string') {
-        setError('Empty reply');
+      const reply = res.data?.reply;
+      if (typeof reply !== 'string' || reply.trim() === '') {
+        rollback('Empty reply');
         return;
       }
-      setReply(res.data.reply);
+      setTurns([...nextTurns, { role: 'assistant', content: reply }]);
     } catch (requestError) {
-      if (!mountedRef.current) return;
-      setError(readChatError(requestError));
+      rollback(readChatError(requestError));
     } finally {
       sendingRef.current = false;
       if (mountedRef.current) setIsSending(false);
@@ -75,14 +117,19 @@ export default function AgentChatPanel() {
 
   return (
     <aside className="flex h-full w-80 shrink-0 flex-col border-l border-gray-700 bg-gray-950">
-      <div className="flex flex-1 flex-col gap-3 overflow-y-auto px-4 py-3 text-sm">
-        {sentMessage && (
-          <p className="whitespace-pre-wrap break-words rounded-lg bg-gray-800 px-3 py-2 text-gray-200">
-            {sentMessage}
-          </p>
+      <div ref={listRef} className="flex flex-1 flex-col gap-3 overflow-y-auto px-4 py-3 text-sm">
+        {turns.map((turn, index) =>
+          turn.role === 'user' ? (
+            <p key={index} className="whitespace-pre-wrap break-words rounded-lg bg-gray-800 px-3 py-2 text-gray-200">
+              {turn.content}
+            </p>
+          ) : (
+            <p key={index} className="whitespace-pre-wrap break-words text-gray-200">
+              {turn.content}
+            </p>
+          ),
         )}
         {isSending && <p className="text-gray-500">Thinking…</p>}
-        {reply && <p className="whitespace-pre-wrap break-words text-gray-200">{reply}</p>}
         {error && <p className="whitespace-pre-wrap break-words text-red-400">{error}</p>}
       </div>
       <form className="shrink-0 border-t border-gray-700 p-3" onSubmit={onSubmit}>
