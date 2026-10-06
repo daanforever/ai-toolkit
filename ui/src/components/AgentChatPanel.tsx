@@ -1,10 +1,9 @@
 'use client';
 
 import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from 'react';
-import axios from 'axios';
 import { Send, Square } from 'lucide-react';
-import { apiClient } from '@/utils/api';
-import { AgentChatRequest, AgentChatTurn } from '@/types/agentChat';
+import { authHeaders, clearUnauthorized } from '@/utils/api';
+import { AgentChatDisplayTurn, AgentChatRequest, AgentChatStreamEvent } from '@/types/agentChat';
 
 interface Props {
   imgPath: string | null;
@@ -19,18 +18,125 @@ interface AttachmentSnapshot {
 interface PendingSend {
   controller: AbortController;
   message: string;
-  priorTurns: AgentChatTurn[];
+  priorTurns: AgentChatDisplayTurn[];
   isOpening: boolean;
 }
 
-function readChatError(error: unknown): string {
-  if (axios.isAxiosError(error)) {
-    const data = error.response?.data as { error?: unknown } | undefined;
-    if (typeof data?.error === 'string' && data.error) {
-      return data.error;
-    }
+interface StreamPartial {
+  reasoning: string;
+  content: string;
+}
+
+type StreamOutcome =
+  | ({ status: 'ok' } & StreamPartial)
+  | { status: 'error'; message: string }
+  | { status: 'aborted' };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function parseStreamLine(line: string): AgentChatStreamEvent | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(line);
+  } catch (error) {
+    console.error('Agent chat stream line was invalid JSON:', error);
+    return null;
+  }
+  if (!isRecord(value)) {
+    console.error('Agent chat stream line was invalid:', value);
+    return null;
+  }
+  if ((value.type === 'reasoning' || value.type === 'content') && typeof value.delta === 'string') {
+    return { type: value.type, delta: value.delta };
+  }
+  if (value.type === 'error' && typeof value.message === 'string') {
+    return { type: 'error', message: value.message };
+  }
+  console.error('Agent chat stream line was invalid:', value);
+  return null;
+}
+
+function takeLines(buffer: string): { lines: string[]; rest: string } {
+  const lines = buffer.split('\n');
+  const rest = lines.pop() ?? '';
+  return { lines, rest };
+}
+
+async function readErrorResponse(response: Response): Promise<string> {
+  try {
+    const data: unknown = await response.json();
+    if (isRecord(data) && typeof data.error === 'string' && data.error) return data.error;
+  } catch (error) {
+    console.error('Agent chat error response was not JSON:', error);
   }
   return 'Request failed';
+}
+
+async function readAgentChatStream(
+  response: Response,
+  signal: AbortSignal,
+  onPartial: (partial: StreamPartial) => void,
+): Promise<StreamOutcome> {
+  const body = response.body;
+  if (!body) return { status: 'error', message: 'Request failed' };
+
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  const partial: StreamPartial = { reasoning: '', content: '' };
+  let changed = false;
+
+  const fail = (message: string): StreamOutcome => ({ status: 'error', message });
+
+  const applyLine = (line: string): StreamOutcome | null => {
+    const trimmed = line.replace(/\r$/, '').trim();
+    if (!trimmed) return null;
+    const event = parseStreamLine(trimmed);
+    if (!event) return fail('Request failed');
+    if (event.type === 'error') return fail(event.message || 'Request failed');
+    if (event.type === 'reasoning') partial.reasoning += event.delta;
+    else partial.content += event.delta;
+    changed = true;
+    return null;
+  };
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (signal.aborted) return { status: 'aborted' };
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parsed = takeLines(buffer);
+      buffer = parsed.rest;
+      for (const line of parsed.lines) {
+        const outcome = applyLine(line);
+        if (outcome) return outcome;
+      }
+      if (changed) {
+        changed = false;
+        onPartial({ reasoning: partial.reasoning, content: partial.content });
+      }
+    }
+    buffer += decoder.decode();
+    if (buffer.trim()) {
+      const outcome = applyLine(buffer);
+      if (outcome) return outcome;
+      if (changed) onPartial({ reasoning: partial.reasoning, content: partial.content });
+    }
+    return { status: 'ok', reasoning: partial.reasoning, content: partial.content };
+  } catch (error) {
+    if (signal.aborted) return { status: 'aborted' };
+    console.error('Agent chat request failed:', error);
+    return fail('Request failed');
+  } finally {
+    try {
+      await reader.cancel();
+    } catch (error) {
+      if (!signal.aborted) console.error('Agent chat stream cancel failed:', error);
+    }
+  }
 }
 
 function captureAttachment(imgPath: string | null, caption: string | null): AttachmentSnapshot {
@@ -47,9 +153,23 @@ function captionNotice(typed: string, reflected: string, loaded: string): string
   return `${notice}\n\n${typed}`;
 }
 
+function ThinkingBlock({ reasoning, expanded = false }: { reasoning: string; expanded?: boolean }) {
+  const body = (
+    <>
+      <summary className="cursor-pointer">Thinking</summary>
+      <p className="mt-1 whitespace-pre-wrap break-words">{reasoning}</p>
+    </>
+  );
+  if (expanded) {
+    return <details open className="text-gray-500">{body}</details>;
+  }
+  return <details className="text-gray-500">{body}</details>;
+}
+
 export default function AgentChatPanel({ imgPath, caption }: Props) {
   const [draft, setDraft] = useState('');
-  const [turns, setTurns] = useState<AgentChatTurn[]>([]);
+  const [turns, setTurns] = useState<AgentChatDisplayTurn[]>([]);
+  const [streaming, setStreaming] = useState<StreamPartial | null>(null);
   const [attachment, setAttachment] = useState<AttachmentSnapshot | null>(null);
   const [reflectedCaption, setReflectedCaption] = useState<string | null>(null);
   const [error, setError] = useState('');
@@ -71,14 +191,16 @@ export default function AgentChatPanel({ imgPath, caption }: Props) {
     const list = listRef.current;
     if (!list) return;
     list.scrollTop = list.scrollHeight;
-  }, [turns, isSending, error]);
+  }, [turns, isSending, error, streaming]);
 
   const canSend = draft.trim().length > 0 && !isSending;
+  const waiting = isSending && !streaming?.reasoning && !streaming?.content;
 
   const rollback = (pending: PendingSend, errorText = '') => {
     if (!mountedRef.current) return;
     setTurns(pending.priorTurns);
     if (pending.isOpening) setAttachment(null);
+    setStreaming(null);
     setError(errorText);
     setDraft(current => (current.length > 0 ? current : pending.message));
   };
@@ -121,11 +243,12 @@ export default function AgentChatPanel({ imgPath, caption }: Props) {
       !isOpening && reflectedCaption !== null && loadedCaption !== null
         ? captionNotice(message, reflectedCaption, loadedCaption)
         : message;
-    const userTurn: AgentChatTurn = { role: 'user', content };
-    const nextTurns: AgentChatTurn[] = [...priorTurns, userTurn];
+    const userTurn: AgentChatDisplayTurn = { role: 'user', content };
+    const nextTurns: AgentChatDisplayTurn[] = [...priorTurns, userTurn];
 
     setDraft('');
     setError('');
+    setStreaming(null);
     setTurns(nextTurns);
     if (isOpening) setAttachment(snapshot);
     setIsSending(true);
@@ -133,26 +256,60 @@ export default function AgentChatPanel({ imgPath, caption }: Props) {
     const isCurrent = () => mountedRef.current && pendingRef.current === pending;
 
     try {
-      const body: AgentChatRequest = { messages: nextTurns };
+      const body: AgentChatRequest = {
+        messages: nextTurns.map(({ role, content: turnContent }) => ({ role, content: turnContent })),
+      };
       if (snapshot.imgPath) body.imgPath = snapshot.imgPath;
       if (snapshot.caption) body.caption = snapshot.caption;
-      const res = await apiClient.post<{ reply?: unknown }>('/api/agent/chat', body, { signal });
+      const response = await fetch('/api/agent/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeaders(),
+        },
+        body: JSON.stringify(body),
+        signal,
+      });
       if (!isCurrent()) return;
+      clearUnauthorized(response.status);
       if (signal.aborted) {
         rollback(pending);
         return;
       }
-      const reply = res.data?.reply;
-      if (typeof reply !== 'string' || reply.trim() === '') {
+      if (!response.ok) {
+        const messageText = await readErrorResponse(response);
+        if (!isCurrent()) return;
+        rollback(pending, signal.aborted ? '' : messageText);
+        return;
+      }
+
+      const outcome = await readAgentChatStream(response, signal, partial => {
+        if (isCurrent()) setStreaming(partial);
+      });
+      if (!isCurrent()) return;
+      if (signal.aborted || outcome.status === 'aborted') {
+        rollback(pending);
+        return;
+      }
+      if (outcome.status === 'error') {
+        rollback(pending, outcome.message);
+        return;
+      }
+      if (outcome.content.trim() === '') {
         rollback(pending, 'Empty reply');
         return;
       }
-      setTurns([...nextTurns, { role: 'assistant', content: reply }]);
+
+      const assistantTurn: AgentChatDisplayTurn = { role: 'assistant', content: outcome.content };
+      if (outcome.reasoning.trim()) assistantTurn.reasoning = outcome.reasoning;
+      setStreaming(null);
+      setTurns([...nextTurns, assistantTurn]);
       if (isOpening) setReflectedCaption(snapshot.caption ?? '');
       else if (loadedCaption !== null) setReflectedCaption(loadedCaption);
     } catch (requestError) {
       if (!isCurrent()) return;
-      rollback(pending, signal.aborted ? '' : readChatError(requestError));
+      if (!signal.aborted) console.error('Agent chat request failed:', requestError);
+      rollback(pending, signal.aborted ? '' : 'Request failed');
     } finally {
       finishPending(pending);
     }
@@ -179,12 +336,23 @@ export default function AgentChatPanel({ imgPath, caption }: Props) {
               {turn.content}
             </p>
           ) : (
-            <p key={index} className="whitespace-pre-wrap break-words text-gray-200">
-              {turn.content}
-            </p>
+            <div key={index} className="flex flex-col gap-3">
+              {turn.reasoning ? <ThinkingBlock reasoning={turn.reasoning} /> : null}
+              <p className="whitespace-pre-wrap break-words text-gray-200">{turn.content}</p>
+            </div>
           ),
         )}
-        {isSending && <p className="text-gray-500">Thinking…</p>}
+        {streaming?.reasoning ? (
+          <ThinkingBlock
+            key={streaming.content.length > 0 ? 'settled' : 'live'}
+            reasoning={streaming.reasoning}
+            expanded={streaming.content.length === 0}
+          />
+        ) : null}
+        {streaming?.content ? (
+          <p className="whitespace-pre-wrap break-words text-gray-200">{streaming.content}</p>
+        ) : null}
+        {waiting && <p className="text-gray-500">Thinking…</p>}
         {error && <p className="whitespace-pre-wrap break-words text-red-400">{error}</p>}
       </div>
       <form className="shrink-0 border-t border-gray-700 p-3" onSubmit={onSubmit}>

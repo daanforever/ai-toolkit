@@ -1,15 +1,29 @@
 import axios from 'axios';
 import { createGlobalState } from 'react-global-hooks';
 
+const AUTH_TOKEN_KEY = 'AI_TOOLKIT_AUTH';
+
 export const isAuthorizedState = createGlobalState(false);
+
+export function authHeaders(): { Authorization: string } | Record<string, never> {
+  const token = localStorage.getItem(AUTH_TOKEN_KEY);
+  if (!token) return {};
+  return { Authorization: `Bearer ${token}` };
+}
+
+export function clearUnauthorized(status: number | undefined): void {
+  if (status !== 401) return;
+  localStorage.removeItem(AUTH_TOKEN_KEY);
+  isAuthorizedState.set(false);
+}
 
 export const apiClient = axios.create();
 
 // Add a request interceptor to add token from localStorage
 apiClient.interceptors.request.use(config => {
-  const token = localStorage.getItem('AI_TOOLKIT_AUTH');
-  if (token) {
-    config.headers['Authorization'] = `Bearer ${token}`;
+  const headers = authHeaders();
+  if ('Authorization' in headers) {
+    config.headers['Authorization'] = headers.Authorization;
   }
   return config;
 });
@@ -18,12 +32,8 @@ apiClient.interceptors.request.use(config => {
 apiClient.interceptors.response.use(
   response => response, // Return successful responses as-is
   error => {
-    // Check if the error is a 401 Unauthorized
-    if (error.response && error.response.status === 401) {
-      // Clear the auth token from localStorage
-      localStorage.removeItem('AI_TOOLKIT_AUTH');
-      isAuthorizedState.set(false);
-    }
+    const status = typeof error?.response?.status === 'number' ? error.response.status : undefined;
+    clearUnauthorized(status);
 
     // Reject the promise with the error so calling code can still catch it
     return Promise.reject(error);
