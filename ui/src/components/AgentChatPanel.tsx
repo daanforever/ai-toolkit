@@ -1,6 +1,6 @@
 'use client';
 
-import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from 'react';
+import { FormEvent, KeyboardEvent, MouseEvent, useEffect, useRef, useState } from 'react';
 import { Send, Square } from 'lucide-react';
 import { authHeaders, clearUnauthorized } from '@/utils/api';
 import { AgentChatDisplayTurn, AgentChatRequest, AgentChatStreamEvent } from '@/types/agentChat';
@@ -317,9 +317,17 @@ export default function AgentChatPanel({ imgPath, caption }: Props) {
     }
   };
 
+  // Firefox runs the button's default action after this click. Cancel restores
+  // the draft and flips the control back to Send; a submit would send that
+  // draft again, clear the textarea, and show Thinking once more.
   const onSubmit = (event: FormEvent) => {
     event.preventDefault();
-    void send();
+  };
+
+  const onButtonClick = (event: MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    if (sendingRef.current) cancel();
+    else void send();
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -370,10 +378,10 @@ export default function AgentChatPanel({ imgPath, caption }: Props) {
             className="w-full resize-none rounded-lg border border-gray-700 bg-gray-900 py-2 pl-3 pr-10 text-sm text-gray-200 outline-none focus:ring-2 focus:ring-gray-600"
           />
           <button
-            type={isSending ? 'button' : 'submit'}
+            type="button"
             disabled={!isSending && !canSend}
             aria-label={isSending ? 'Cancel' : 'Send'}
-            onClick={isSending ? cancel : undefined}
+            onClick={onButtonClick}
             className="absolute bottom-2 right-2 rounded-md p-1 text-gray-400 disabled:cursor-not-allowed disabled:opacity-40"
           >
             {isSending ? <Square className="h-4 w-4" /> : <Send className="h-4 w-4" />}
