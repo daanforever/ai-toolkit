@@ -6,6 +6,9 @@ import { authHeaders, clearUnauthorized } from '@/utils/api';
 import { AgentChatDisplayTurn, AgentChatRequest, AgentChatStreamEvent } from '@/types/agentChat';
 import { Checkbox } from '@/components/formInputs';
 import MarkdownText from '@/components/MarkdownText';
+import { usePersistedBoolean } from '@/hooks/usePersistedBoolean';
+
+const AGENT_REASONING_KEY = 'AI_TOOLKIT_AGENT_REASONING';
 
 interface Props {
   imgPath: string | null;
@@ -171,7 +174,7 @@ function ThinkingBlock({ reasoning, expanded = false }: { reasoning: string; exp
 
 export default function AgentChatPanel({ imgPath, caption }: Props) {
   const [draft, setDraft] = useState('');
-  const [reasoning, setReasoning] = useState(true);
+  const [reasoning, setReasoning] = usePersistedBoolean(AGENT_REASONING_KEY, true);
   const [turns, setTurns] = useState<AgentChatDisplayTurn[]>([]);
   const [streaming, setStreaming] = useState<StreamPartial | null>(null);
   const [attachment, setAttachment] = useState<AttachmentSnapshot | null>(null);
