@@ -1,6 +1,7 @@
 """Adafactor beta2-path step metrics: effective_lr, effective_wd, precond_gain, momentum_gain."""
 import math
 
+import pytest
 import torch
 import torch.nn as nn
 
@@ -130,3 +131,124 @@ def test_group_running_min_update_detaches_requires_grad_candidate():
     Adafactor._group_running_min_update(group, "rms_min", torch.tensor(1.0, requires_grad=True))
     _assert_detached_group_scalar(group, "rms_min")
     assert group["rms_min"].item() == 1.0
+
+
+def _count_step_syncs(
+    n,
+    *,
+    weight_decay,
+    factored,
+    beta1,
+    relative_step=False,
+    weight_decay_mode="absolute",
+):
+    """Count Tensor.item and Tensor.__bool__ calls during one step, after init."""
+    item_n = 0
+    bool_n = 0
+    orig_item = torch.Tensor.item
+    orig_bool = torch.Tensor.__bool__
+
+    def _item(self):
+        nonlocal item_n
+        item_n += 1
+        return orig_item(self)
+
+    def _bool(self):
+        nonlocal bool_n
+        bool_n += 1
+        return orig_bool(self)
+
+    torch.Tensor.item = _item
+    torch.Tensor.__bool__ = _bool
+    try:
+        torch.manual_seed(0)
+        params = [torch.nn.Parameter(torch.randn(4, 3)) for _ in range(n)]
+        opt = Adafactor(
+            params,
+            lr=1e-3,
+            relative_step=relative_step,
+            scale_parameter=False,
+            warmup_init=False,
+            beta1=beta1,
+            weight_decay=weight_decay,
+            weight_decay_mode=weight_decay_mode,
+            factored=factored,
+            stochastic_accumulation=False,
+            stochastic_rounding=False,
+        )
+        for p in params:
+            p.grad = torch.randn_like(p)
+        item_n = 0
+        bool_n = 0
+        opt.step()
+        return item_n, bool_n
+    finally:
+        torch.Tensor.item = orig_item
+        torch.Tensor.__bool__ = orig_bool
+
+
+def test_step_host_syncs_are_four_items_per_parameter():
+    """Exactly four per-parameter host syncs, all Tensor.item, and no tensor __bool__.
+
+    Remaining .item() calls inside the parameter loop:
+    parameter RMS, gradient RMS, preconditioned update RMS, beta2 signal RMS.
+    Group reductions are removed by subtracting the 1-parameter count from the
+    4-parameter count. The bound is the measured count with no slack.
+    """
+    configs = (
+        dict(weight_decay=0.0, factored=False, beta1=None),
+        dict(weight_decay=0.0, factored=True, beta1=0.9),
+        dict(weight_decay=0.1, factored=False, beta1=None),
+        dict(weight_decay=0.1, factored=True, beta1=0.9),
+    )
+    for cfg in configs:
+        one = _count_step_syncs(1, **cfg)
+        four = _count_step_syncs(4, **cfg)
+        per_item = (four[0] - one[0]) / 3
+        per_bool = (four[1] - one[1]) / 3
+        assert per_item == 4
+        assert per_bool == 0
+
+
+@pytest.mark.parametrize("relative_step", (False, True))
+@pytest.mark.parametrize(
+    "weight_decay_mode",
+    ("absolute", "constant", "param_rms", "update_rms"),
+)
+def test_step_host_syncs_by_relative_step_and_weight_decay_mode(
+    relative_step, weight_decay_mode
+):
+    """Per-parameter host syncs for relative_step and every weight-decay mode.
+
+    Remaining .item() calls inside the parameter loop: parameter RMS, gradient
+    RMS, preconditioned update RMS, beta2 signal RMS, and effective_wd when
+    weight_decay_mode is update_rms. relative_step adds none. No tensor __bool__.
+
+    Baseline before this change (weight_decay=0.1): relative_step=False was
+    4 items (5 items and 1 bool for update_rms); relative_step=True was 5 items
+    (6 for absolute and for update_rms, and update_rms also had 1 bool).
+
+    Group reductions are removed by subtracting the 1-parameter count from the
+    4-parameter count. The bound is the measured count with no slack.
+    """
+    expected_items = 5 if weight_decay_mode == "update_rms" else 4
+    one = _count_step_syncs(
+        1,
+        weight_decay=0.1,
+        factored=False,
+        beta1=None,
+        relative_step=relative_step,
+        weight_decay_mode=weight_decay_mode,
+    )
+    four = _count_step_syncs(
+        4,
+        weight_decay=0.1,
+        factored=False,
+        beta1=None,
+        relative_step=relative_step,
+        weight_decay_mode=weight_decay_mode,
+    )
+    per_item = (four[0] - one[0]) / 3
+    per_bool = (four[1] - one[1]) / 3
+    assert per_item == expected_items
+    assert per_bool == 0

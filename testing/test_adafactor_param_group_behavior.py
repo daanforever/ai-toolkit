@@ -1,5 +1,7 @@
 """Behavior-focused tests for Adafactor param-group semantics and safeguards."""
 
+import math
+
 import pytest
 import torch
 
@@ -153,6 +155,135 @@ def test_get_lr_none_uses_base_lr_one():
     opt.param_groups[0]["rms_max"] = torch.tensor(1.0)
     # relative = 1.0; scale=1 → new_lr ≈ 1.0
     assert opt._get_lr(opt.param_groups[0], state) == pytest.approx(1.0)
+
+
+def test_get_lr_accepts_float_and_tensor_rms():
+    p = torch.nn.Parameter(torch.ones(2, 2))
+    opt = Adafactor(
+        [p],
+        lr=1e-3,
+        relative_step=False,
+        scale_parameter=True,
+        warmup_init=False,
+        beta1=None,
+        weight_decay=0.0,
+    )
+    group = opt.param_groups[0]
+    from_tensor = opt._get_lr(group, {"RMS": torch.tensor(0.5)})
+    from_float = opt._get_lr(group, {"RMS": 0.5})
+    assert from_tensor == pytest.approx(from_float)
+
+
+def _plain_opt(param):
+    return Adafactor(
+        [param],
+        lr=1e-2,
+        relative_step=False,
+        scale_parameter=False,
+        warmup_init=False,
+        beta1=None,
+        weight_decay=0.0,
+        factored=False,
+        stochastic_accumulation=False,
+    )
+
+
+def test_rms_float_roundtrip_and_legacy_tensor_checkpoint():
+    """step() stores RMS as a float; a checkpoint that still holds a tensor RMS still steps."""
+    p = torch.nn.Parameter(torch.ones(4))
+    opt = _plain_opt(p)
+    p.grad = torch.ones_like(p)
+    opt.step()
+    assert isinstance(opt.state[p]["RMS"], float)
+    assert math.isfinite(opt.state[p]["RMS"])
+
+    q = torch.nn.Parameter(p.detach().clone())
+    opt_q = _plain_opt(q)
+    opt_q.load_state_dict(opt.state_dict())
+    assert isinstance(opt_q.state[q]["RMS"], float)
+    q.grad = torch.ones_like(q)
+    opt_q.step()
+    assert isinstance(opt_q.state[q]["RMS"], float)
+    assert math.isfinite(opt_q.state[q]["RMS"])
+
+    legacy = opt.state_dict()
+    legacy["state"][0]["RMS"] = torch.tensor(float("nan"))
+    r = torch.nn.Parameter(torch.ones(4))
+    opt_r = _plain_opt(r)
+    opt_r.load_state_dict(legacy)
+    assert torch.is_tensor(opt_r.state[r]["RMS"])
+    r.grad = torch.ones_like(r)
+    opt_r.step()
+    assert isinstance(opt_r.state[r]["RMS"], float)
+    assert math.isfinite(opt_r.state[r]["RMS"])
+    assert math.isfinite(opt_r.param_groups[0]["rms_max"].item())
+
+
+@pytest.mark.parametrize("shape", [(2, 3), (2, 3, 4)])
+@pytest.mark.parametrize("beta1", [None, 0.9])
+def test_factored_step_stays_finite(shape, beta1):
+    p = torch.nn.Parameter(torch.randn(*shape))
+    opt = Adafactor(
+        [p],
+        lr=1e-2,
+        relative_step=False,
+        scale_parameter=False,
+        warmup_init=False,
+        beta1=beta1,
+        weight_decay=0.0,
+        factored=True,
+        stochastic_accumulation=False,
+    )
+    p.grad = torch.randn_like(p)
+    opt.step()
+    assert torch.isfinite(p).all()
+    if beta1:
+        assert torch.isfinite(opt.state[p]["exp_avg"]).all()
+    assert torch.isfinite(opt.state[p]["exp_avg_sq_row"]).all()
+    assert torch.isfinite(opt.state[p]["exp_avg_sq_col"]).all()
+
+
+def test_relative_step_with_scale_parameter_steps():
+    p = torch.nn.Parameter(torch.randn(4, 4))
+    opt = Adafactor(
+        [p],
+        lr=1e-3,
+        relative_step=True,
+        scale_parameter=True,
+        warmup_init=False,
+        beta1=None,
+        weight_decay=0.0,
+        factored=False,
+        stochastic_accumulation=False,
+    )
+    p.grad = torch.randn_like(p)
+    opt.step()
+    assert torch.isfinite(p).all()
+    assert math.isfinite(opt.param_groups[0]["rms_max"].item())
+    assert math.isfinite(opt.param_groups[0]["rms_min"].item())
+
+
+def test_parameter_swapping_skips_params_without_grad():
+    params = [torch.nn.Parameter(torch.ones(8)) for _ in range(4)]
+    opt = Adafactor(
+        params,
+        lr=1e-2,
+        relative_step=False,
+        scale_parameter=False,
+        warmup_init=False,
+        beta1=None,
+        weight_decay=0.0,
+        factored=False,
+        do_parameter_swapping=True,
+        parameter_swapping_factor=0.25,
+        stochastic_accumulation=False,
+    )
+    assert any(not p.requires_grad for p in params)
+    for p in params:
+        if p.requires_grad:
+            p.grad = torch.ones_like(p)
+    opt.step()
+    assert all(torch.isfinite(p).all() for p in params)
 
 
 def test_step_survives_factored_flag_flip_both_ways():
@@ -341,4 +472,163 @@ def test_bf16_cuda_stochastic_rounding_uses_copy_stochastic(monkeypatch):
     opt.step()
     assert calls["n"] == 1
     assert p.dtype == torch.bfloat16
+
+
+def _assert_fp32_copy_not_aliased(target, source, before):
+    """Write-back source is a distinct fp32 tensor; target is still pre-step."""
+    assert source.dtype == torch.float32
+    assert source.data_ptr() != target.data_ptr()
+    assert torch.equal(target.detach(), before)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_low_precision_cpu_writeback_uses_unaliased_fp32_copy(dtype, monkeypatch):
+    """CPU bf16/fp16 step must write back through update_parameter from a fresh fp32 copy."""
+    from toolkit.optimizers.optimizer_utils import update_parameter as orig_update
+
+    p = torch.nn.Parameter(torch.ones(4, dtype=dtype))
+    before = p.detach().clone()
+    calls = {"update": 0, "copy": 0}
+
+    def _update_spy(target, result_float):
+        calls["update"] += 1
+        _assert_fp32_copy_not_aliased(target, result_float, before)
+        orig_update(target, result_float)
+
+    def _copy_spy(target, source, eps=None):
+        calls["copy"] += 1
+
+    monkeypatch.setattr("toolkit.optimizers.adafactor.update_parameter", _update_spy)
+    monkeypatch.setattr("toolkit.optimizers.adafactor.copy_stochastic", _copy_spy)
+    opt = Adafactor(
+        [p],
+        stochastic_accumulation=False,
+        stochastic_rounding=True,
+        **_adafactor_kwargs(),
+    )
+    grad = torch.ones_like(p)
+    p.grad = grad
+    grad_before = grad.detach().clone()
+    grad_ptr = grad.data_ptr()
+    opt.step()
+    assert calls == {"update": 1, "copy": 0}
+    assert p.dtype == dtype
+    assert not torch.equal(p.detach(), before)
+    assert p.grad.data_ptr() == grad_ptr
+    assert torch.equal(p.grad, grad_before)
+
+
+def test_fp32_param_updates_in_place_without_writeback(monkeypatch):
+    """fp32 parameters are updated directly; neither write-back helper runs."""
+    p = torch.nn.Parameter(torch.ones(4, dtype=torch.float32))
+    before = p.detach().clone()
+    calls = {"update": 0, "copy": 0}
+
+    def _update_spy(target, result_float):
+        calls["update"] += 1
+
+    def _copy_spy(target, source, eps=None):
+        calls["copy"] += 1
+
+    monkeypatch.setattr("toolkit.optimizers.adafactor.update_parameter", _update_spy)
+    monkeypatch.setattr("toolkit.optimizers.adafactor.copy_stochastic", _copy_spy)
+    opt = Adafactor(
+        [p],
+        stochastic_accumulation=False,
+        stochastic_rounding=True,
+        **_adafactor_kwargs(),
+    )
+    grad = torch.ones_like(p)
+    p.grad = grad
+    grad_before = grad.detach().clone()
+    grad_ptr = grad.data_ptr()
+    opt.step()
+    assert calls == {"update": 0, "copy": 0}
+    assert p.dtype == torch.float32
+    assert not torch.equal(p.detach(), before)
+    assert p.grad.data_ptr() == grad_ptr
+    assert torch.equal(p.grad, grad_before)
+
+
+def test_quantized_param_writeback_uses_unaliased_fp32_copy(monkeypatch):
+    """QBytesTensor is updated from a dequantized fp32 copy, not in place."""
+    pytest.importorskip("optimum.quanto")
+    from optimum.quanto import QBytesTensor, qint8, quantize_weight
+    from toolkit.optimizers.optimizer_utils import update_parameter as orig_update
+
+    weight = torch.tensor(
+        [[1.0, -2.0, 0.5, 3.0], [0.25, -0.5, 1.5, -1.0]],
+        dtype=torch.float32,
+    )
+    scale = (weight.abs().amax(dim=1) / 127.0).reshape(-1, 1)
+    p = quantize_weight(weight, qint8, axis=0, scale=scale, optimized=False)
+    assert isinstance(p, QBytesTensor)
+    p.requires_grad_(True)
+    before = p.dequantize().detach().clone()
+    calls = {"update": 0, "copy": 0}
+
+    def _update_spy(target, result_float):
+        calls["update"] += 1
+        assert isinstance(target, QBytesTensor)
+        assert result_float.dtype == torch.float32
+        assert result_float.data_ptr() != target.data_ptr()
+        assert result_float.data_ptr() != target._data.data_ptr()
+        assert torch.equal(target.dequantize().detach(), before)
+        orig_update(target, result_float)
+
+    def _copy_spy(target, source, eps=None):
+        calls["copy"] += 1
+
+    monkeypatch.setattr("toolkit.optimizers.adafactor.update_parameter", _update_spy)
+    monkeypatch.setattr("toolkit.optimizers.adafactor.copy_stochastic", _copy_spy)
+    opt = Adafactor(
+        [p],
+        lr=1.0,
+        stochastic_accumulation=False,
+        stochastic_rounding=False,
+        relative_step=False,
+        scale_parameter=False,
+        beta1=None,
+        weight_decay=0.0,
+        factored=False,
+    )
+    p.grad = torch.ones_like(before)
+    opt.step()
+    assert calls == {"update": 1, "copy": 0}
+    assert isinstance(p, QBytesTensor)
+    assert not torch.equal(p.dequantize().detach(), before)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_low_precision_cuda_writeback_uses_unaliased_fp32_copy(dtype, monkeypatch):
+    """CUDA bf16/fp16 step must write back through copy_stochastic from a fresh fp32 copy."""
+    from toolkit.optimizers.optimizer_utils import copy_stochastic as orig_copy
+
+    device = torch.device("cuda")
+    p = torch.nn.Parameter(torch.ones(4, device=device, dtype=dtype))
+    before = p.detach().clone()
+    calls = {"update": 0, "copy": 0}
+
+    def _copy_spy(target, source, eps=None):
+        calls["copy"] += 1
+        _assert_fp32_copy_not_aliased(target, source, before)
+        orig_copy(target, source, eps)
+
+    def _update_spy(target, result_float):
+        calls["update"] += 1
+
+    monkeypatch.setattr("toolkit.optimizers.adafactor.copy_stochastic", _copy_spy)
+    monkeypatch.setattr("toolkit.optimizers.adafactor.update_parameter", _update_spy)
+    opt = Adafactor(
+        [p],
+        stochastic_accumulation=False,
+        stochastic_rounding=True,
+        **_adafactor_kwargs(),
+    )
+    p.grad = torch.ones_like(p)
+    opt.step()
+    assert calls == {"update": 0, "copy": 1}
+    assert p.dtype == dtype
+    assert not torch.equal(p.detach(), before)
 

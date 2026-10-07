@@ -44,6 +44,61 @@ def test_finite_or_eps_unsigned_uses_positive_eps():
     assert out[1].item() == pytest.approx(eps)
 
 
+def _same_with_nonfinite(a: torch.Tensor, b: torch.Tensor) -> bool:
+    if a.shape != b.shape or a.dtype != b.dtype:
+        return False
+    nonfinite = ~torch.isfinite(a)
+    if not torch.equal(nonfinite, ~torch.isfinite(b)):
+        return False
+    if nonfinite.any() and not torch.equal(torch.isnan(a), torch.isnan(b)):
+        return False
+    if nonfinite.any() and not torch.equal(torch.isinf(a), torch.isinf(b)):
+        return False
+    finite = ~nonfinite
+    return torch.equal(a[finite], b[finite])
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("unsigned", [False, True])
+def test_finite_or_eps_inplace_matches_out_of_place(dtype, unsigned):
+    """In-place and out-of-place guards agree; finite values stay bit-identical."""
+    eps = 1e-3
+    src = torch.tensor(
+        [float("nan"), float("inf"), float("-inf"), 2.0, -4.0, 0.0, 100.0],
+        dtype=dtype,
+    )
+    snapshot = src.clone()
+    out = Adafactor._finite_or_eps(src, eps, unsigned=unsigned)
+    assert _same_with_nonfinite(src, snapshot)
+    assert out.dtype == dtype
+    assert torch.isfinite(out).all()
+
+    inplace = src.clone()
+    Adafactor._maybe_finite_or_eps_inplace(inplace, eps, unsigned=unsigned)
+    assert inplace.dtype == dtype
+    assert torch.equal(out, inplace)
+
+    finite = torch.isfinite(snapshot)
+    assert torch.equal(out[finite], snapshot[finite])
+    assert out[0] > 0
+    assert out[1] > 0
+    if unsigned:
+        assert out[2] > 0
+    else:
+        assert out[2] < 0
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
+def test_finite_or_eps_leaves_finite_values_bit_identical(dtype):
+    src = torch.tensor([0.0, -1.5, 2.0, 100.0], dtype=dtype)
+    out = Adafactor._finite_or_eps(src, 1e-3)
+    assert out.dtype == dtype
+    assert torch.equal(out, src)
+    inplace = src.clone()
+    Adafactor._maybe_finite_or_eps_inplace(inplace, 1e-3)
+    assert torch.equal(inplace, src)
+
+
 def test_nan_grad_sanitized_params_remain_finite():
     opt, param = _make_opt()
     param.grad = torch.tensor([float("nan"), 1.0, -1.0, 0.5])
@@ -138,3 +193,39 @@ def test_clamp_effective_wd_tensor_and_scalar():
     assert Adafactor._clamp_effective_wd(2.0) == pytest.approx(1.0 - 1e-6)
     clamped = Adafactor._clamp_effective_wd(torch.tensor(0.5))
     assert clamped.item() == pytest.approx(0.5)
+
+
+def test_all_nan_bf16_grad_keeps_param_finite_and_does_not_mutate_grad():
+    param = torch.nn.Parameter(torch.ones(4, dtype=torch.bfloat16))
+    opt = Adafactor(
+        [param],
+        lr=1e-2,
+        relative_step=False,
+        scale_parameter=False,
+        warmup_init=False,
+        beta1=None,
+        weight_decay=0.0,
+        factored=False,
+        stochastic_accumulation=False,
+        stochastic_rounding=False,
+    )
+    param.grad = torch.full_like(param, float("nan"))
+    grad_ptr = param.grad.data_ptr()
+    opt.step()
+    assert param.dtype == torch.bfloat16
+    assert torch.isfinite(param.float()).all()
+    assert param.grad.data_ptr() == grad_ptr
+    assert torch.isnan(param.grad).all()
+
+
+@pytest.mark.parametrize(
+    "weight_decay_mode",
+    ["absolute", "constant", "param_rms", "update_rms"],
+)
+def test_nan_weights_stay_finite_for_each_weight_decay_mode(weight_decay_mode):
+    opt, param = _make_opt(weight_decay=0.1, weight_decay_mode=weight_decay_mode, lr=0.1)
+    with torch.no_grad():
+        param.copy_(torch.tensor([float("nan"), 1.0, 2.0, 3.0]))
+    param.grad = torch.ones_like(param)
+    opt.step()
+    assert torch.isfinite(param).all()

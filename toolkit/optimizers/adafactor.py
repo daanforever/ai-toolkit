@@ -18,15 +18,15 @@ class Adafactor(torch.optim.Optimizer):
     https://github.com/pytorch/fairseq/blob/master/fairseq/optim/adafactor.py
 
     Paper: *Adafactor: Adaptive Learning Rates with Sublinear Memory Cost* https://arxiv.org/abs/1804.04235 Note that
-    this optimizer internally adjusts the learning rate depending on the `scale_parameter`, `relative_step` and
-    `warmup_init` options. To use a manual (external) learning rate schedule you should set `scale_parameter=False` and
-    `relative_step=False`.
+    this optimizer internally adjusts the learning rate depending on the `scale_parameter` and
+    `warmup_init` options. `relative_step` does not change the learning rate. To use a manual
+    (external) learning rate schedule you should set `scale_parameter=False`.
 
     Arguments:
         params (`Iterable[nn.parameter.Parameter]`):
             Iterable of parameters to optimize or dictionaries defining parameter groups.
         lr (`float`, *optional*, defaults to `1e-4`):
-            Base learning rate (`base_lr`). Effective LR is ``base_lr * scale * relative``
+            Base learning rate (`base_lr`). Effective LR is ``base_lr * scale``
             (see `_get_lr`). If `lr=None`, `_get_lr` treats `base_lr` as `1.0` (footgun for the
             raw API; toolkit `get_optimizer` always passes a float).
         eps (`Tuple[float, float]`, *optional*, defaults to `(1e-30, 1e-3)`):
@@ -49,9 +49,9 @@ class Adafactor(torch.optim.Optimizer):
             from ``decay_rate``.
         rms_max_decay_rate (`float`, *optional*, defaults to `0.97`):
             Must satisfy ``0 < rms_max_decay_rate <= 1``.
-            When scale_parameter=True and relative_step=True, used for the group-level running max
-            of parameter RMS (``rms_max`` on each param group) and running min (``rms_min``), which normalizes each parameter's scale
-            to (0, 1] for LR (useful for mixed-scale groups e.g. LoRA). Adafactor-specific group metrics
+            Decays the group running max of parameter RMS (``rms_max``) and grows the running min
+            (``rms_min``) each step. Both are group metrics and do not change the learning rate.
+            Adafactor-specific group metrics
             (``rms_ema``, ``lr_mean``, ``effective_lr``, ``effective_wd``, ``precond_gain``,
             ``momentum_gain``, etc.) live on ``param_groups``. Generic param/grad/Δp
             RMS metrics are collected outside via ``OptimizerStepMetrics``.
@@ -71,8 +71,8 @@ class Adafactor(torch.optim.Optimizer):
             If True, learning rate is scaled by parameter RMS
             (``scale = max(eps1, param_rms)`` in `_get_lr`).
         relative_step (`bool`, *optional*, defaults to `False`):
-            If True, apply this fork's adaptive relative LR path (parameter RMS ratio vs group
-            ``rms_max``) on top of `base_lr * scale`. Not Hugging Face's time/step-decay schedule.
+            Accepted and stored on the param group. It does not change the learning rate.
+            Not Hugging Face's time/step-decay schedule.
         warmup_init (`bool`, *optional*, defaults to `False`):
             When True, the group learning rate `lr` is approached smoothly: one interpolation segment per change of
             `lr`, progress tracked once per group per step (see `_global_lr`). Works with both `relative_step=True` and
@@ -979,13 +979,9 @@ class Adafactor(torch.optim.Optimizer):
         """
         Compute per-parameter learning rate.
 
-        Manual mode (relative_step=False):
-          Group lr before scale/relative may be warmup_lr when warmup_init=True; see _global_lr.
-          If scale_parameter=True, multiplies by max(eps1, param_rms).
-
-        Adaptive mode (relative_step=True):
-          Same group-lr handling; computes parameter RMS ratio vs group ``rms_max``
-          (relative factor is currently 1.0; not a HF time-based schedule).
+        Group lr may be warmup_lr when warmup_init=True; see _global_lr.
+        If scale_parameter=True, multiplies by max(eps1, param_rms).
+        ``relative_step`` does not change the returned learning rate.
 
         When ``apply_index_scale`` is False, returns the corresponding LR before Gaussian
         index weighting (used by absolute weight decay). Zero Gaussian weights are handled
@@ -1014,37 +1010,23 @@ class Adafactor(torch.optim.Optimizer):
         else:
             base_lr = param_group["lr"]
             if base_lr is None:
-                # Allow relative-step mode with lr=None.
+                # lr=None is treated as base_lr=1.0.
                 base_lr = 1.0
             if apply_index_scale:
                 base_lr = self._to_effective_lr(base_lr, param_group)
 
-        eps0       = param_group["eps"][0]          # Small constant for numerical stability (division guard)
-        eps1       = param_group["eps"][1]          # Parameter scale regularization constant
-        param_rms  = param_state["RMS"].item()      # Current parameter RMS magnitude
+        eps1 = param_group["eps"][1]
+        # 0-dim tensor (legacy checkpoints) or a Python float stored by step().
+        param_rms = float(param_state["RMS"])
         if not math.isfinite(param_rms):
             param_rms = eps1
-        scale      = 1.0                            # Default scale for LR
-        relative   = 1.0                            # Default relative for LR
+        scale = 1.0
 
         if param_group["scale_parameter"]:
             # Scale LR by parameter magnitude for better adaptation to parameter scale
             scale = max(eps1, param_rms)
 
-        if param_group["relative_step"]:
-            # Adaptive LR mode: RMS ratio vs group running max (infrastructure for relative_step).
-            group_param_rms_max = param_group.get("rms_max", torch.tensor(eps1)).item()
-            if not math.isfinite(group_param_rms_max):
-                group_param_rms_max = eps1
-
-            # Ratio of parameter RMS to group RMS max (kept for relative_step path).
-            ratio = max(
-                eps0,
-                (group_param_rms_max - param_rms) / (group_param_rms_max + eps0),
-            )
-            relative = 1.0  # was (1 + min_lr * ratio) * brakes * saddle
-
-        return base_lr * scale * relative
+        return base_lr * scale
 
     def _update_beta1_from_dynamic_gain(self, group, global_mean_dynamic_gain: Optional[float]) -> None:
         """
@@ -1080,76 +1062,30 @@ class Adafactor(torch.optim.Optimizer):
     @staticmethod
     def _finite_or_eps(tensor: torch.Tensor, eps: float, *, unsigned: bool = False) -> torch.Tensor:
         """Replace non-finite values with ±eps (or +eps if unsigned). Never writes 0."""
-        if torch.isfinite(tensor).all():
-            return tensor
-        eps_t = float(eps)
-        if unsigned:
-            return torch.nan_to_num(tensor, nan=eps_t, posinf=eps_t, neginf=eps_t)
-        out = tensor.clone()
-        mask = ~torch.isfinite(out)
-        signs = torch.sign(out)
-        # NaN sign is NaN; treat NaN/0 as +1
-        signs = torch.where(
-            torch.isfinite(signs) & (signs != 0),
-            signs,
-            torch.ones_like(signs),
-        )
-        posinf = torch.isposinf(out)
-        neginf = torch.isneginf(out)
-        fill = signs * eps_t
-        fill = torch.where(posinf, torch.full_like(fill, eps_t), fill)
-        fill = torch.where(neginf, torch.full_like(fill, -eps_t), fill)
-        return torch.where(mask, fill, out)
+        eps = float(eps)
+        return tensor.nan_to_num(nan=eps, posinf=eps, neginf=eps if unsigned else -eps)
 
     @staticmethod
     def _maybe_finite_or_eps_inplace(
         tensor: torch.Tensor, eps: float, *, unsigned: bool = False
     ) -> None:
-        """In-place version of ``_finite_or_eps``."""
-        if torch.isfinite(tensor).all():
-            return
-        eps_t = float(eps)
-        if unsigned:
-            tensor.nan_to_num_(nan=eps_t, posinf=eps_t, neginf=eps_t)
-            return
-        mask = ~torch.isfinite(tensor)
-        signs = torch.sign(tensor)
-        signs = torch.where(
-            torch.isfinite(signs) & (signs != 0),
-            signs,
-            torch.ones_like(signs),
-        )
-        posinf = torch.isposinf(tensor)
-        neginf = torch.isneginf(tensor)
-        fill = signs * eps_t
-        fill = torch.where(posinf, torch.full_like(fill, eps_t), fill)
-        fill = torch.where(neginf, torch.full_like(fill, -eps_t), fill)
-        tensor[mask] = fill[mask]
+        """In-place ``_finite_or_eps``."""
+        eps = float(eps)
+        tensor.nan_to_num_(nan=eps, posinf=eps, neginf=eps if unsigned else -eps)
 
     @staticmethod
     def _clamp_effective_wd(effective_wd):
         max_wd = 1.0 - 1e-6
         if isinstance(effective_wd, torch.Tensor):
-            if not torch.isfinite(effective_wd).all():
-                return 0.0
-            return torch.clamp(effective_wd, min=0.0, max=max_wd)
+            clamped = effective_wd.clamp(min=0.0, max=max_wd)
+            return torch.where(
+                torch.isfinite(effective_wd),
+                clamped,
+                torch.zeros_like(effective_wd),
+            )
         if not math.isfinite(effective_wd):
             return 0.0
         return max(0.0, min(float(effective_wd), max_wd))
-
-    @staticmethod
-    def _maybe_group_running_max_update(group, key: str, candidate: torch.Tensor) -> None:
-        c = candidate.detach().item()
-        if not math.isfinite(c):
-            return
-        Adafactor._group_running_max_update(group, key, candidate)
-
-    @staticmethod
-    def _maybe_group_running_min_update(group, key: str, candidate: torch.Tensor) -> None:
-        c = candidate.detach().item()
-        if not math.isfinite(c):
-            return
-        Adafactor._group_running_min_update(group, key, candidate)
 
     def _get_group_scalars(
         self,
@@ -1414,16 +1350,18 @@ class Adafactor(torch.optim.Optimizer):
                 if is_quantized:
                     p_data_fp32 = p_data_fp32.dequantize()
                 if p.dtype != torch.float32:
-                    p_data_fp32 = p_data_fp32.clone().float()
+                    p_data_fp32 = p_data_fp32.float()
 
-                state["RMS"] = self._rms(p_data_fp32)
-                rms_t = state["RMS"]
-                if not math.isfinite(rms_t.item()):
+                rms_t = self._rms(p_data_fp32)
+                rms_val = rms_t.item()
+                if not math.isfinite(rms_val):
                     self._maybe_finite_or_eps_inplace(p_data_fp32, eps1)
-                    state["RMS"] = self._rms(p_data_fp32)
-                    rms_t = state["RMS"]
-                self._maybe_group_running_max_update(group, "rms_max", rms_t)
-                self._maybe_group_running_min_update(group, "rms_min", rms_t)
+                    rms_t = self._rms(p_data_fp32)
+                    rms_val = rms_t.item()
+                state["RMS"] = rms_val
+                if math.isfinite(rms_val):
+                    self._group_running_max_update(group, "rms_max", rms_t)
+                    self._group_running_min_update(group, "rms_min", rms_t)
 
                 state["grad_rms"] = self._rms(grad)
                 gr = state["grad_rms"]
@@ -1454,7 +1392,7 @@ class Adafactor(torch.optim.Optimizer):
                 # Preconditioned + clipped direction (before LR) for metrics
                 update_hat = update.div_(
                     (self._rms(update) / group["clip_threshold"]).clamp_(min=1.0))
-                update_hat = self._finite_or_eps(update_hat, eps0)
+                self._maybe_finite_or_eps_inplace(update_hat, eps0)
 
                 if (
                     "beta2_direction_ema" not in state
@@ -1499,9 +1437,8 @@ class Adafactor(torch.optim.Optimizer):
                     update = exp_avg
 
                 else:
+                    self._maybe_finite_or_eps_inplace(scaled_update, eps0)
                     update = scaled_update
-
-                update = self._finite_or_eps(update, eps0)
 
                 update_rms = self._rms(update)
 
@@ -1532,7 +1469,7 @@ class Adafactor(torch.optim.Optimizer):
                     elif weight_decay_mode == "param_rms":
                         # Intentionally no `lr` here: this mode is RMS-conditioned shrinkage by design.
                         # For param_rms mode under the same defaults and RMS~1, (1 - wd * rms) ~= 0.9999 (>0).
-                        effective_wd = self._clamp_effective_wd(wd * rms_t)
+                        effective_wd = self._clamp_effective_wd(wd * rms_val)
                         p_data_fp32.mul_(1.0 - effective_wd)
                     elif weight_decay_mode == "constant":
                         effective_wd = self._clamp_effective_wd(wd)
