@@ -19,13 +19,6 @@ def _max_norm_truncated_pdf_weights(ntt: int, mean: float, std: float) -> torch.
     return phi / phi.max()
 
 
-def _state_with_rms(opt, group_idx=0, param_idx=0, rms=1.0):
-    p = opt.param_groups[group_idx]["params"][param_idx]
-    state = opt.state[p]
-    state["RMS"] = torch.tensor(rms)
-    return state
-
-
 def _make_gaussian_opt(
     groups,
     *,
@@ -77,8 +70,7 @@ def test_gaussian_lr_lookup_matches_max_norm_pdf():
     lr = 1e-3
     eps0 = 1e-30
     for idx in range(ntt):
-        state = _state_with_rms(opt, group_idx=idx)
-        got = opt._get_lr(opt.param_groups[idx], state)
+        got = opt._get_lr(opt.param_groups[idx])
         expected = lr * float(ref[idx].item()) + eps0
         assert got == pytest.approx(expected)
 
@@ -113,8 +105,7 @@ def test_gaussian_narrow_tail_much_smaller_than_peak():
         )
         lookup = z_opt._scale_lr_lookup
         w0 = float(lookup[0].item())
-        state0 = _state_with_rms(z_opt, group_idx=0)
-        lr0 = z_opt._get_lr(z_opt.param_groups[0], state0)
+        lr0 = z_opt._get_lr(z_opt.param_groups[0])
         assert w0 > 0.0, f"mean={mean}: lookup[0]={w0}"
         assert lr0 > 1e-30, f"mean={mean}: lr[0]={lr0} weight={w0}"
         if mean == 15.0:
@@ -141,18 +132,15 @@ def test_scale_lr_by_index_skips_unindexed_with_valid_max():
     )
     assert opt._max_index == 2
 
-    state0 = _state_with_rms(opt, 0)
     w0 = float(opt._scale_lr_lookup[0].item())
-    assert opt._get_lr(opt.param_groups[0], state0) == pytest.approx(
+    assert opt._get_lr(opt.param_groups[0]) == pytest.approx(
         lr * w0 + eps[0]
     )
 
-    state1 = _state_with_rms(opt, 1)
-    assert opt._get_lr(opt.param_groups[1], state1) == pytest.approx(lr)
+    assert opt._get_lr(opt.param_groups[1]) == pytest.approx(lr)
 
-    state2 = _state_with_rms(opt, 2)
     w2 = float(opt._scale_lr_lookup[2].item())
-    assert opt._get_lr(opt.param_groups[2], state2) == pytest.approx(
+    assert opt._get_lr(opt.param_groups[2]) == pytest.approx(
         lr * w2 + eps[0]
     )
 
@@ -191,8 +179,7 @@ def test_scale_lr_by_index_disabled_by_default():
     assert opt._max_index is None
     assert opt.scale_lr_mean is None
     assert opt.scale_lr_std is None
-    state = _state_with_rms(opt, 1)
-    assert opt._get_lr(opt.param_groups[1], state) == pytest.approx(lr)
+    assert opt._get_lr(opt.param_groups[1]) == pytest.approx(lr)
 
 
 def test_validation_requires_mean_std_when_enabled():
@@ -294,14 +281,12 @@ def test_set_lr_still_scaled_dynamically():
         std=0.5,
     )
     opt.set_lr(2e-3)
-    state0 = _state_with_rms(opt, 0)
-    state1 = _state_with_rms(opt, 1)
     w0 = float(opt._scale_lr_lookup[0].item())
     w1 = float(opt._scale_lr_lookup[1].item())
-    assert opt._get_lr(opt.param_groups[0], state0) == pytest.approx(
+    assert opt._get_lr(opt.param_groups[0]) == pytest.approx(
         2e-3 * w0 + eps[0]
     )
-    assert opt._get_lr(opt.param_groups[1], state1) == pytest.approx(
+    assert opt._get_lr(opt.param_groups[1]) == pytest.approx(
         2e-3 * w1 + eps[0]
     )
 
@@ -315,9 +300,8 @@ def test_mask_none_and_empty_apply_to_all_indexed():
         opt = _make_gaussian_opt(groups, mean=0.0, std=0.5, mask=mask)
         assert opt._scale_lr_applies(opt.param_groups[0])
         assert opt._scale_lr_applies(opt.param_groups[1])
-        state = _state_with_rms(opt, 1)
         w1 = float(opt._scale_lr_lookup[1].item())
-        assert opt._get_lr(opt.param_groups[1], state) == pytest.approx(
+        assert opt._get_lr(opt.param_groups[1]) == pytest.approx(
             1e-3 * w1 + 1e-30
         )
 
@@ -350,12 +334,10 @@ def test_mask_or_match_case_sensitive():
 
     lr = 1e-3
     eps0 = 1e-30
-    state2 = _state_with_rms(opt, 2)
-    assert opt._get_lr(opt.param_groups[2], state2) == pytest.approx(lr)
+    assert opt._get_lr(opt.param_groups[2]) == pytest.approx(lr)
 
-    state0 = _state_with_rms(opt, 0)
     w0 = float(opt._scale_lr_lookup[0].item())
-    assert opt._get_lr(opt.param_groups[0], state0) == pytest.approx(
+    assert opt._get_lr(opt.param_groups[0]) == pytest.approx(
         lr * w0 + eps0
     )
 
@@ -376,8 +358,7 @@ def test_mask_no_match_keeps_original_lr():
     opt = _make_gaussian_opt(groups, mean=0.0, std=0.5, mask=["layers"])
     assert opt._max_index == 1
     for idx in (0, 1):
-        state = _state_with_rms(opt, idx)
-        assert opt._get_lr(opt.param_groups[idx], state) == pytest.approx(1e-3)
+        assert opt._get_lr(opt.param_groups[idx]) == pytest.approx(1e-3)
 
 
 def test_max_index_uses_all_indexed_before_mask():
@@ -437,9 +418,8 @@ def test_set_scale_lr_by_index_enables_after_init_false():
     lr = 1e-3
     eps0 = 1e-30
     for idx in (0, 1, 2):
-        state = _state_with_rms(opt, group_idx=idx)
         w = float(opt._scale_lr_lookup[idx].item())
-        assert opt._get_lr(opt.param_groups[idx], state) == pytest.approx(
+        assert opt._get_lr(opt.param_groups[idx]) == pytest.approx(
             lr * w + eps0
         )
 
@@ -454,8 +434,7 @@ def test_set_scale_lr_by_index_disables():
     assert opt.scale_lr_by_index is False
     assert opt._max_index is None
     assert opt._scale_lr_lookup is None
-    state = _state_with_rms(opt, 1)
-    assert opt._get_lr(opt.param_groups[1], state) == pytest.approx(1e-3)
+    assert opt._get_lr(opt.param_groups[1]) == pytest.approx(1e-3)
 
 
 def test_set_scale_lr_by_index_errors_without_mean_std():
@@ -575,8 +554,7 @@ def test_weight_decay_absolute_equal_across_gaussian_weights():
 
     lrs = []
     for idx in range(5):
-        state = _state_with_rms(opt, group_idx=idx)
-        lrs.append(opt._get_lr(opt.param_groups[idx], state))
+        lrs.append(opt._get_lr(opt.param_groups[idx]))
     assert lrs[0] > lrs[2] > lrs[-1]
 
 

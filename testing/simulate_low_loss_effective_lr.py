@@ -213,9 +213,7 @@ def old_activity_formula():
 
     print("\n=== old activity=grad_rms/grad_rms_max (removed from _get_lr) ===")
     print("grad_rms   old_lr      current_lr")
-    scale = max(eps1, param_rms)
-    ratio = max(eps0, (group_rms_max - param_rms) / (group_rms_max + eps0))
-    current = cap * scale * (1 + 1e-6 * ratio)
+    current = cap
     for gr in [1e-2, 1e-4, 1e-6, 1e-8]:
         weight = max(eps1, (group_rms_max - param_rms) / (group_rms_max + eps0))
         activity = gr / (grad_rms_max + eps0)

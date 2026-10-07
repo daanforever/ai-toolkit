@@ -4,7 +4,7 @@ Diagnose per-param effective LR drop when grad shrinks (low loss).
 User regime:
   lr=1e-4, beta1=0.9, beta2=0.99, weight_decay=0
   grad_rms ~ 1e-9 .. 1e-7
-  update_rms ~ 1e-6 .. 1e-5
+  scale_parameter caps applied update RMS at 0.1 * max(eps[1], param_rms)
 
 Effective LR proxies (per param):
   eff_explicit = _get_lr output
@@ -22,7 +22,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "testing"))
 sys.path.insert(0, str(ROOT))
 
-from simulate_adafactor_effective_lr import approx_sq_grad, get_lr, rms
+from simulate_adafactor_effective_lr import (
+    approx_sq_grad,
+    cap_relative_update,
+    get_lr,
+    rms,
+)
 from toolkit.optimizers.adafactor import Adafactor
 
 
@@ -77,6 +82,7 @@ def step_and_decompose(grad, state, group):
     b1 = beta1 if beta1 is not None else 0.9
     exp_avg.mul_(b1).add_(scaled, alpha=1 - b1)
     final = exp_avg.clone() if beta1 is not None else scaled
+    final = cap_relative_update(final, param_rms, group)
     p.add_(-final)
 
     return {
@@ -228,7 +234,7 @@ def plateau_vs_decay():
     d = torch.randn(shape)
     d = d / d.norm()
     group = dict(USER)
-    param_rms = 0.01  # lr_explicit = 1e-6
+    param_rms = 0.01  # lr stays 1e-4; the cap is 0.1 * param_rms
 
     state = make_state(shape, param_rms)
     for _ in range(300):

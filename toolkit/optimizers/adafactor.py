@@ -18,17 +18,19 @@ class Adafactor(torch.optim.Optimizer):
     https://github.com/pytorch/fairseq/blob/master/fairseq/optim/adafactor.py
 
     Paper: *Adafactor: Adaptive Learning Rates with Sublinear Memory Cost* https://arxiv.org/abs/1804.04235 Note that
-    this optimizer internally adjusts the learning rate depending on the `scale_parameter` and
-    `warmup_init` options. `relative_step` does not change the learning rate. To use a manual
-    (external) learning rate schedule you should set `scale_parameter=False`.
+    `warmup_init` interpolates the group learning rate. `relative_step` does not change the learning rate.
+    When `scale_parameter=True`, the applied update is capped so its RMS stays within
+    `max_relative_update` of ``max(eps[1], param_rms)``. The learning rate itself stays absolute.
 
     Arguments:
         params (`Iterable[nn.parameter.Parameter]`):
             Iterable of parameters to optimize or dictionaries defining parameter groups.
         lr (`float`, *optional*, defaults to `1e-4`):
-            Base learning rate (`base_lr`). Effective LR is ``base_lr * scale``
-            (see `_get_lr`). If `lr=None`, `_get_lr` treats `base_lr` as `1.0` (footgun for the
+            Learning rate applied to the clipped update (see `_get_lr`).
+            Warmup and index scaling may change the value used for the step.
+            If `lr=None`, `_get_lr` treats it as `1.0` (footgun for the
             raw API; toolkit `get_optimizer` always passes a float).
+            Parameter RMS does not scale this value.
         eps (`Tuple[float, float]`, *optional*, defaults to `(1e-30, 1e-3)`):
             Regularization constants for square gradient and parameter scale respectively
         clip_threshold (`float`, *optional*, defaults to 1.0):
@@ -68,8 +70,16 @@ class Adafactor(torch.optim.Optimizer):
             Note: `"update_rms"` and `"param_rms"` intentionally do not multiply by `lr` because
             they are designed as RMS-conditioned shrinkage modes with their own scale semantics.
         scale_parameter (`bool`, *optional*, defaults to `False`):
-            If True, learning rate is scaled by parameter RMS
-            (``scale = max(eps1, param_rms)`` in `_get_lr`).
+            If True, the update applied to the parameter is capped:
+            ``update_rms <= max_relative_update * max(eps[1], param_rms)``,
+            using the parameter RMS from before the step. The learning rate
+            is not multiplied by parameter RMS. Weight decay is independent
+            of this cap. Absolute weight decay uses the learning rate from
+            `_get_lr` (without index scaling), not parameter RMS.
+        max_relative_update (`float`, *optional*, defaults to `0.1`):
+            Must be finite and ``> 0``. When `scale_parameter=True`, maximum
+            applied update RMS as a fraction of ``max(eps[1], param_rms)``.
+            Ignored when `scale_parameter=False`.
         relative_step (`bool`, *optional*, defaults to `False`):
             Accepted and stored on the param group. It does not change the learning rate.
             Not Hugging Face's time/step-decay schedule.
@@ -129,7 +139,7 @@ class Adafactor(torch.optim.Optimizer):
            - use scheduled LR warm-up to fixed LR
            - use clip_threshold=1.0 (https://arxiv.org/abs/1804.04235)
         - Disable relative updates
-        - Use scale_parameter=False
+        - `scale_parameter` caps the applied update; it does not scale the learning rate
         - Additional optimizer operations like gradient clipping should not be used alongside Adafactor
 
     Example:
@@ -177,6 +187,7 @@ class Adafactor(torch.optim.Optimizer):
         weight_decay_increment=0.0,
         weight_decay_mode: str = "absolute",
         scale_parameter=False,
+        max_relative_update: float = 0.1,
         relative_step=False,
         warmup_init=False,
         warmup_steps: int = 100,
@@ -204,6 +215,12 @@ class Adafactor(torch.optim.Optimizer):
             raise ValueError(
                 f"warmup_boost must be > 0, got warmup_boost={warmup_boost}"
             )
+        max_relative_update = float(max_relative_update)
+        if not (math.isfinite(max_relative_update) and max_relative_update > 0.0):
+            raise ValueError(
+                f"max_relative_update must be finite and > 0, "
+                f"got max_relative_update={max_relative_update}"
+            )
         defaults = {
             "lr": lr,
             "eps": eps,
@@ -216,6 +233,7 @@ class Adafactor(torch.optim.Optimizer):
             "weight_decay_increment": weight_decay_increment,
             "weight_decay_mode": weight_decay_mode,
             "scale_parameter": scale_parameter,
+            "max_relative_update": max_relative_update,
             "relative_step": relative_step,
             "warmup_init": warmup_init,
             "warmup_steps": warmup_steps,
@@ -244,6 +262,7 @@ class Adafactor(torch.optim.Optimizer):
         self._weight_decay_increment = weight_decay_increment
         self._weight_decay_mode = weight_decay_mode
         self._scale_parameter = scale_parameter
+        self._max_relative_update = max_relative_update
         self._relative_step = relative_step
         self._warmup_init = warmup_init
         self._warmup_steps = warmup_steps
@@ -610,6 +629,7 @@ class Adafactor(torch.optim.Optimizer):
             "weight_decay_increment",
             "weight_decay_mode",
             "scale_parameter",
+            "max_relative_update",
             "relative_step",
             "warmup_init",
             "warmup_steps",
@@ -975,13 +995,12 @@ class Adafactor(torch.optim.Optimizer):
         if "warmup_lr" in group:
             group["warmup_lr_previous"] = group["warmup_lr"]
 
-    def _get_lr(self, param_group, param_state, *, apply_index_scale: bool = True):
+    def _get_lr(self, param_group, *, apply_index_scale: bool = True):
         """
-        Compute per-parameter learning rate.
+        Compute the learning rate for this parameter group.
 
         Group lr may be warmup_lr when warmup_init=True; see _global_lr.
-        If scale_parameter=True, multiplies by max(eps1, param_rms).
-        ``relative_step`` does not change the returned learning rate.
+        The returned value is absolute. ``relative_step`` does not change it.
 
         When ``apply_index_scale`` is False, returns the corresponding LR before Gaussian
         index weighting (used by absolute weight decay). Zero Gaussian weights are handled
@@ -1015,18 +1034,31 @@ class Adafactor(torch.optim.Optimizer):
             if apply_index_scale:
                 base_lr = self._to_effective_lr(base_lr, param_group)
 
-        eps1 = param_group["eps"][1]
-        # 0-dim tensor (legacy checkpoints) or a Python float stored by step().
-        param_rms = float(param_state["RMS"])
+        return base_lr
+
+    def _cap_relative_update(self, update, update_rms, param_rms, group):
+        """Bound applied update RMS when parameter scaling is enabled.
+
+        ``update_rms <= max_relative_update * max(eps[1], param_rms)``.
+        The returned update is a new tensor when the cap binds, so a momentum
+        buffer aliased by ``update`` is not rescaled in place. Weight decay is
+        applied by the caller to the returned RMS.
+        """
+        if not group["scale_parameter"]:
+            return update, update_rms
+
+        eps1 = float(group["eps"][1])
+        param_rms = float(param_rms)
         if not math.isfinite(param_rms):
             param_rms = eps1
-        scale = 1.0
+        cap = float(group["max_relative_update"]) * max(eps1, param_rms)
 
-        if param_group["scale_parameter"]:
-            # Scale LR by parameter magnitude for better adaptation to parameter scale
-            scale = max(eps1, param_rms)
+        rms = float(update_rms)
+        if not math.isfinite(rms) or rms <= cap:
+            return update, update_rms
 
-        return base_lr * scale
+        scale = cap / rms
+        return update * scale, update_rms * scale
 
     def _update_beta1_from_dynamic_gain(self, group, global_mean_dynamic_gain: Optional[float]) -> None:
         """
@@ -1409,7 +1441,7 @@ class Adafactor(torch.optim.Optimizer):
                 )
                 beta2_direction_ema.mul_(beta2t).add_(update_hat, alpha=(1.0 - beta2t))
 
-                lr = self._get_lr(group, state)
+                lr = self._get_lr(group)
                 scaled_update = update_hat.mul(lr)
                 current_update_sq = scaled_update.pow(2).mean()
                 if "beta2_update_sq_ema" in state:
@@ -1441,6 +1473,9 @@ class Adafactor(torch.optim.Optimizer):
                     update = scaled_update
 
                 update_rms = self._rms(update)
+                update, update_rms = self._cap_relative_update(
+                    update, update_rms, rms_val, group
+                )
 
                 gr_val = gr.detach().item()
                 if gr_val >= eps0:
@@ -1477,9 +1512,8 @@ class Adafactor(torch.optim.Optimizer):
                     else:
                         # Absolute WD uses pre-Gaussian LR so index weighting affects
                         # updates only, not weight decay (equal WD across indexes).
-                        wd_lr = self._get_lr(
-                            group, state, apply_index_scale=False
-                        )
+                        # Parameter RMS does not scale this learning rate.
+                        wd_lr = self._get_lr(group, apply_index_scale=False)
                         effective_wd = self._clamp_effective_wd(wd * wd_lr)
                         p_data_fp32.mul_(1.0 - effective_wd)
                     if isinstance(effective_wd, torch.Tensor):

@@ -148,6 +148,7 @@ def decompose_one_step(group, grad_scale, state):
     lr = get_lr(param_rms, grad_rms, group, dir_consistency)
     scaled = update_hat * lr
 
+    exp_avg_before = state["exp_avg_before"]
     exp_avg_after = exp_avg_before.clone()
     exp_avg_after.mul_(beta1).add_(scaled, alpha=1 - beta1)
     final = exp_avg_after

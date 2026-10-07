@@ -10,11 +10,14 @@ from toolkit.optimizers.adafactor import Adafactor
 
 def _make_opt(beta1=0.9, **kwargs):
     p = nn.Parameter(torch.full((8, 16), 0.01))
+    # scale_parameter caps the applied update. These checks use the pre-cap
+    # beta2 metrics (effective_lr = precond_gain * lr), which do not depend on it.
     defaults = dict(
         lr=1e-4,
         beta1=beta1,
         beta2=0.99,
         scale_parameter=True,
+        max_relative_update=1.0,
         relative_step=True,
         weight_decay=0.0,
     )

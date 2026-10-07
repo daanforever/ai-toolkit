@@ -22,21 +22,31 @@ def approx_sq_grad(exp_avg_sq_row, exp_avg_sq_col):
 
 
 def get_lr(param_rms, grad_rms, group, dir_consistency=None):
-    """Mirror adafactor._get_lr (relative_step + scale_parameter path)."""
+    """Mirror adafactor._get_lr. Parameter RMS does not scale the learning rate.
+
+    ``scale_parameter`` caps the applied update in ``adafactor_step``.
+    ``relative_step`` does not change the learning rate. The unused arguments
+    keep the historical call signature.
+    """
+    del param_rms, grad_rms, dir_consistency
     base_lr = group["lr"]
-    eps0, eps1 = group["eps"]
-    scale = 1.0
-    relative = 1.0
+    if base_lr is None:
+        base_lr = 1.0
+    return float(base_lr)
 
-    if group["scale_parameter"]:
-        scale = max(eps1, param_rms)
 
-    if group["relative_step"]:
-        group_param_rms_max = group.get("rms_max", eps1)
-        ratio = max(eps0, (group_param_rms_max - param_rms) / (group_param_rms_max + eps0))
-        relative = 1.0  # was (1 + min_lr * ratio) * brakes * saddle
-
-    return base_lr * scale * relative
+def cap_relative_update(update, param_rms, group):
+    """Mirror Adafactor._cap_relative_update."""
+    if not group.get("scale_parameter"):
+        return update
+    eps1 = group["eps"][1]
+    if not math.isfinite(param_rms):
+        param_rms = eps1
+    cap = float(group.get("max_relative_update", 0.1)) * max(eps1, param_rms)
+    update_rms = rms(update)
+    if not math.isfinite(update_rms) or update_rms <= cap:
+        return update
+    return update * (cap / update_rms)
 
 
 def adafactor_step(grad, state, group):
@@ -83,6 +93,7 @@ def adafactor_step(grad, state, group):
     else:
         final = scaled
 
+    final = cap_relative_update(final, param_rms, group)
     p.add_(-final)
     return {
         "lr": lr,
@@ -250,9 +261,8 @@ def simulate_old_vs_new_lr():
     print("grad_rms   old_lr      current_lr   activity")
     for g in [1e-2, 1e-3, 1e-4, 1e-5, 1e-6]:
         old = old_activity_lr(g, grad_rms_max, param_rms, group_rms_max, cap_lr, eps0, eps1)
-        # current: scale * relative (=1.0), no grad_rms / min_lr
-        scale = max(eps1, param_rms)
-        current = cap_lr * scale
+        # current _get_lr is absolute; the relative cap is applied to the update
+        current = cap_lr
         act = g / (grad_rms_max + eps0)
         print(f"{g:.1e}  {old:.2e}  {current:.2e}  {act:.4f}")
 

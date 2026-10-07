@@ -151,27 +151,36 @@ def test_get_lr_none_uses_base_lr_one():
         beta1=None,
         weight_decay=0.0,
     )
-    state = {"RMS": torch.tensor(1.0)}
     opt.param_groups[0]["rms_max"] = torch.tensor(1.0)
-    # relative = 1.0; scale=1 → new_lr ≈ 1.0
-    assert opt._get_lr(opt.param_groups[0], state) == pytest.approx(1.0)
+    # relative_step does not change LR; parameter RMS does not scale it.
+    assert opt._get_lr(opt.param_groups[0]) == pytest.approx(1.0)
 
 
-def test_get_lr_accepts_float_and_tensor_rms():
-    p = torch.nn.Parameter(torch.ones(2, 2))
+def test_get_lr_ignores_parameter_rms_when_scale_parameter():
+    """scale_parameter caps the applied step; it does not multiply LR by RMS."""
+    torch.manual_seed(0)
+    p = torch.nn.Parameter(torch.randn(16, 16))
     opt = Adafactor(
         [p],
-        lr=1e-3,
+        lr=1.0,
         relative_step=False,
         scale_parameter=True,
         warmup_init=False,
         beta1=None,
         weight_decay=0.0,
+        factored=False,
+        stochastic_accumulation=False,
+        stochastic_rounding=False,
     )
-    group = opt.param_groups[0]
-    from_tensor = opt._get_lr(group, {"RMS": torch.tensor(0.5)})
-    from_float = opt._get_lr(group, {"RMS": 0.5})
-    assert from_tensor == pytest.approx(from_float)
+    assert opt._get_lr(opt.param_groups[0]) == pytest.approx(1.0)
+    before = p.detach().clone()
+    param_rms = before.pow(2).mean().sqrt().item()
+    p.grad = torch.randn_like(p)
+    opt.step()
+    delta_rms = (before - p.detach()).pow(2).mean().sqrt().item()
+    eps1 = opt.param_groups[0]["eps"][1]
+    cap = opt.param_groups[0]["max_relative_update"] * max(eps1, param_rms)
+    assert delta_rms == pytest.approx(cap, rel=1e-5)
 
 
 def _plain_opt(param):
@@ -244,10 +253,11 @@ def test_factored_step_stays_finite(shape, beta1):
 
 
 def test_relative_step_with_scale_parameter_steps():
+    torch.manual_seed(0)
     p = torch.nn.Parameter(torch.randn(4, 4))
     opt = Adafactor(
         [p],
-        lr=1e-3,
+        lr=1.0,
         relative_step=True,
         scale_parameter=True,
         warmup_init=False,
@@ -255,10 +265,17 @@ def test_relative_step_with_scale_parameter_steps():
         weight_decay=0.0,
         factored=False,
         stochastic_accumulation=False,
+        stochastic_rounding=False,
     )
+    before = p.detach().clone()
+    param_rms = before.pow(2).mean().sqrt().item()
     p.grad = torch.randn_like(p)
     opt.step()
+    delta_rms = (before - p.detach()).pow(2).mean().sqrt().item()
+    eps1 = opt.param_groups[0]["eps"][1]
+    cap = opt.param_groups[0]["max_relative_update"] * max(eps1, param_rms)
     assert torch.isfinite(p).all()
+    assert delta_rms == pytest.approx(cap, rel=1e-5)
     assert math.isfinite(opt.param_groups[0]["rms_max"].item())
     assert math.isfinite(opt.param_groups[0]["rms_min"].item())
 

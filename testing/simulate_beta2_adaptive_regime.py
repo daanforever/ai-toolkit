@@ -94,17 +94,16 @@ def _run_scenario(name, **opt_kwargs):
 
 def main():
     baseline = _run_scenario("static beta2=0.999", beta2=0.999)
+    # beta2_adaptive is not an Adafactor argument; this run is the static optimizer.
     adaptive = _run_scenario(
-        "adaptive beta2 (0.999 -> 0.9 on low activity)",
+        "scale_parameter cap, static beta2=0.999",
         beta2=0.999,
-        beta2_adaptive=True,
-        beta2_min=0.9,
     )
     lower_static = _run_scenario("static beta2=0.95", beta2=0.95)
 
     print("\n=== comparison (late phase) ===")
     print(f"baseline detail/comp ratio : {baseline['ratio']:.2f}")
-    print(f"adaptive detail/comp ratio : {adaptive['ratio']:.2f}")
+    print(f"capped static detail/comp ratio : {adaptive['ratio']:.2f}")
     print(f"static 0.95 detail/comp    : {lower_static['ratio']:.2f}")
 
 

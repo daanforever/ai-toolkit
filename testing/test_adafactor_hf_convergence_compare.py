@@ -167,7 +167,7 @@ class _Quadratic(nn.Module):
         self.x = nn.Parameter(torch.ones(n))
         c = torch.logspace(0, math.log10(cond), n)
         self.register_buffer("c", c)
-        # target_scale=0 → optimum at 0 (scale_parameter collapses LR as ||θ||→0)
+        # target_scale=0 → optimum at 0
         self.register_buffer("x_star", target_scale * torch.linspace(-1.0, 1.0, n))
 
     def forward(self) -> torch.Tensor:
@@ -489,9 +489,10 @@ def test_scenario_b_hf_relative_beats_badly_tuned_fixed_lr():
 
 def test_scenario_c_relative_runs_stay_finite():
     """
-    For a few hundred steps HF relative_step is capped at 1e-2, so it matches
-    local ``base_lr * scale``. Final losses can land together. Bitwise equality
-    with HF is not required (local finite-guards and clamp before rsqrt).
+    Local ``relative_step`` does not schedule the learning rate, and
+    ``scale_parameter`` caps the applied update. Final losses only need to
+    stay finite. Bitwise equality with HF is not required (local finite-guards
+    and clamp before rsqrt).
     """
     results = run_scenario_c_relative_semantics(seed=0, steps=300)["matrix_factor"]
     by = {r.name: r for r in results}
