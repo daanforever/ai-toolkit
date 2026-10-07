@@ -296,6 +296,7 @@ async function* readChatStream(
 export async function streamChatCompletion(
   messages: ChatMessage[],
   signal: AbortSignal,
+  reasoning = true,
 ): Promise<AsyncIterable<ChatStreamEvent>> {
   const apiUrl = await requireBaseUrl();
   const model = await resolveModel(signal);
@@ -307,7 +308,17 @@ export async function streamChatCompletion(
     const response = await fetch(`${apiUrl}/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, messages, stream: true }),
+      body: JSON.stringify({
+        model,
+        messages,
+        stream: true,
+        ...(reasoning
+          ? {}
+          : {
+            chat_template_kwargs: { enable_thinking: false },
+            reasoning_effort: 'none',
+          }),
+      }),
       signal: AbortSignal.any([signal, idle.signal]),
     });
     if (!response.ok) {

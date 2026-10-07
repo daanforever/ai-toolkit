@@ -11,6 +11,7 @@ export interface AgentChatRequest {
   messages: AgentChatTurn[];
   imgPath?: string;
   caption?: string;
+  reasoning?: boolean;
 }
 
 export type AgentChatStreamEvent =

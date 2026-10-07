@@ -29,6 +29,7 @@ export interface ParsedAgentChatRequest {
   messages: AgentChatTurn[];
   imgPath?: string;
   caption?: string;
+  reasoning?: boolean;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -73,16 +74,21 @@ export function parseAgentChatRequest(value: unknown): ParsedAgentChatRequest | 
   if ('caption' in value && value.caption !== undefined && typeof value.caption !== 'string') {
     throw new AgentChatRequestError(400, 'Invalid caption');
   }
+  if ('reasoning' in value && value.reasoning !== undefined && typeof value.reasoning !== 'boolean') {
+    throw new AgentChatRequestError(400, 'Invalid reasoning');
+  }
 
   const messages = parseMessages(value.messages);
   if (!messages) return null;
 
   const imgPath = typeof value.imgPath === 'string' ? value.imgPath.trim() : '';
   const caption = typeof value.caption === 'string' ? value.caption : undefined;
+  const reasoning = typeof value.reasoning === 'boolean' ? value.reasoning : undefined;
   return {
     messages,
     ...(imgPath ? { imgPath } : {}),
     ...(caption !== undefined ? { caption } : {}),
+    ...(reasoning !== undefined ? { reasoning } : {}),
   };
 }
 

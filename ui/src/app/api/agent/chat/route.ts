@@ -84,7 +84,7 @@ export async function POST(request: NextRequest) {
     if (!parsed) {
       return NextResponse.json({ error: 'Invalid messages' }, { status: 400 });
     }
-    const events = await streamChatCompletion(await buildChatMessages(parsed), signal);
+    const events = await streamChatCompletion(await buildChatMessages(parsed), signal, parsed.reasoning ?? true);
     return streamNdjson(events, signal, () => cancelUpstream.abort());
   } catch (error) {
     if (error instanceof OpenAIRequestAborted) {

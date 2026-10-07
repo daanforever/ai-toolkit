@@ -4,6 +4,7 @@ import { FormEvent, KeyboardEvent, MouseEvent, useEffect, useRef, useState } fro
 import { Send, Square } from 'lucide-react';
 import { authHeaders, clearUnauthorized } from '@/utils/api';
 import { AgentChatDisplayTurn, AgentChatRequest, AgentChatStreamEvent } from '@/types/agentChat';
+import { Checkbox } from '@/components/formInputs';
 import MarkdownText from '@/components/MarkdownText';
 
 interface Props {
@@ -170,6 +171,7 @@ function ThinkingBlock({ reasoning, expanded = false }: { reasoning: string; exp
 
 export default function AgentChatPanel({ imgPath, caption }: Props) {
   const [draft, setDraft] = useState('');
+  const [reasoning, setReasoning] = useState(true);
   const [turns, setTurns] = useState<AgentChatDisplayTurn[]>([]);
   const [streaming, setStreaming] = useState<StreamPartial | null>(null);
   const [attachment, setAttachment] = useState<AttachmentSnapshot | null>(null);
@@ -260,6 +262,7 @@ export default function AgentChatPanel({ imgPath, caption }: Props) {
     try {
       const body: AgentChatRequest = {
         messages: nextTurns.map(({ role, content: turnContent }) => ({ role, content: turnContent })),
+        reasoning,
       };
       if (snapshot.imgPath) body.imgPath = snapshot.imgPath;
       if (snapshot.caption) body.caption = snapshot.caption;
@@ -367,7 +370,7 @@ export default function AgentChatPanel({ imgPath, caption }: Props) {
         {error && <p className="whitespace-pre-wrap break-words text-red-400">{error}</p>}
       </div>
       <form className="shrink-0 border-t border-gray-700 p-3" onSubmit={onSubmit}>
-        <div className="relative">
+        <div className="rounded-lg border border-gray-700 bg-gray-900 focus-within:ring-2 focus-within:ring-gray-600">
           <textarea
             aria-label="Message"
             rows={3}
@@ -375,17 +378,20 @@ export default function AgentChatPanel({ imgPath, caption }: Props) {
             value={draft}
             onChange={event => setDraft(event.target.value)}
             onKeyDown={onKeyDown}
-            className="w-full resize-none rounded-lg border border-gray-700 bg-gray-900 py-2 pl-3 pr-10 text-sm text-gray-200 outline-none focus:ring-2 focus:ring-gray-600"
+            className="w-full resize-none bg-transparent px-3 pt-2 text-sm text-gray-200 outline-none"
           />
-          <button
-            type="button"
-            disabled={!isSending && !canSend}
-            aria-label={isSending ? 'Cancel' : 'Send'}
-            onClick={onButtonClick}
-            className="absolute bottom-2 right-2 rounded-md p-1 text-gray-400 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {isSending ? <Square className="h-4 w-4" /> : <Send className="h-4 w-4" />}
-          </button>
+          <div className="flex items-center justify-between px-2 pb-1">
+            <Checkbox label="Reasoning" checked={reasoning} onChange={setReasoning} />
+            <button
+              type="button"
+              disabled={!isSending && !canSend}
+              aria-label={isSending ? 'Cancel' : 'Send'}
+              onClick={onButtonClick}
+              className="rounded-md p-1 text-gray-400 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {isSending ? <Square className="h-4 w-4" /> : <Send className="h-4 w-4" />}
+            </button>
+          </div>
         </div>
       </form>
     </aside>
