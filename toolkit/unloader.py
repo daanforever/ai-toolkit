@@ -780,8 +780,50 @@ def _prefer_turbo_restore(model: Any) -> bool:
     return bool(getattr(model, "_train_on_turbo", False))
 
 
+def _flush_after_dit_park(model: Any) -> None:
+    """Release the parked DiT's CUDA blocks before the active DiT is hosted."""
+    flusher = getattr(model, "_flush_cuda", None)
+    if callable(flusher):
+        flusher()
+    else:
+        flush()
+
+
+def _park_sampling_transformer_off_cuda(model: Any) -> None:
+    """Sampling DiT to CPU before a base host-to-device. Flush only if weights moved.
+
+    Does not force ``_sampling_network`` to CPU — it may share LoRA/PEFT Parameter
+    identity with the active main network.
+    """
+    sampling = getattr(model, "_sampling_transformer", None)
+    if not isinstance(sampling, torch.nn.Module):
+        return
+    cpu = torch.device("cpu")
+    parked = False
+    if hasattr(model, "_move_sampling_transformer"):
+        source = _module_source_device(sampling)
+        try:
+            parked = model._move_sampling_transformer(cpu) is True
+        except Exception as exc:
+            raise RuntimeError(
+                f"text-cache residency: failed moving component '_sampling_transformer' "
+                f"from {source} to cpu: {exc}"
+            ) from exc
+        if _module_needs_device_move(sampling, cpu):
+            _move_owner_to_device("_sampling_transformer", sampling, cpu)
+            parked = True
+    elif _module_needs_device_move(sampling, cpu):
+        _move_owner_to_device("_sampling_transformer", sampling, cpu)
+        parked = True
+    if parked:
+        _flush_after_dit_park(model)
+
+
 def _restore_normal_train_layout(model: Any, device: Union[torch.device, str]) -> None:
     target = torch.device(device)
+    # Sampling leaves CUDA before the base is hosted. A later park cannot
+    # undo a co-resident host-to-device.
+    _park_sampling_transformer_off_cuda(model)
     if hasattr(model, "_move_main_network"):
         # Capture before hook — model may already have owners on mixed devices.
         source = _network_source_device(getattr(model, "network", model.unet)) if isinstance(
@@ -805,24 +847,6 @@ def _restore_normal_train_layout(model: Any, device: Union[torch.device, str]) -
         network = getattr(model, "network", None)
         if isinstance(network, torch.nn.Module):
             _move_network_owner_to_device("network", network, target, model=model)
-
-    # Normal layout: sampling transformer on CPU. Do not force sampling_network to
-    # CPU — it may share LoRA/PEFT Parameter identity with the active main network.
-    sampling = getattr(model, "_sampling_transformer", None)
-    if isinstance(sampling, torch.nn.Module):
-        if hasattr(model, "_move_sampling_transformer"):
-            source = _module_source_device(sampling)
-            try:
-                model._move_sampling_transformer(torch.device("cpu"))
-            except Exception as exc:
-                raise RuntimeError(
-                    f"text-cache residency: failed moving component '_sampling_transformer' "
-                    f"from {source} to cpu: {exc}"
-                ) from exc
-            if _module_needs_device_move(sampling, torch.device("cpu")):
-                _move_owner_to_device("_sampling_transformer", sampling, "cpu")
-        else:
-            _move_owner_to_device("_sampling_transformer", sampling, "cpu")
 
 
 def _restore_turbo_train_layout(model: Any) -> None:

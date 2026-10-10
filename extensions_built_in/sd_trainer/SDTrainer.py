@@ -507,6 +507,10 @@ class SDTrainer(BaseSDTrainProcess):
                 pass
         except Exception as err:
             if caching:
+                print_acc(
+                    "text-cache residency: aborting after error: "
+                    f"{type(err).__name__}: {err}"
+                )
                 try:
                     abort_text_cache_residency(self.sd)
                 except Exception as cleanup_err:

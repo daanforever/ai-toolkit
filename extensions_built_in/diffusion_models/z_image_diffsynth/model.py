@@ -247,6 +247,22 @@ class ZImageDiffSynthModel(BaseModel):
                 return p
         return None
 
+    @staticmethod
+    def _sampling_device_param(module):
+        """Base weight used to decide whether the sampling DiT must move.
+
+        Frozen weights are the normal case. Before the trainer freeze, base
+        weights still require grad; that is not a missing device, so the same
+        non-LoRA weight is used. Only a module with no base weight returns None.
+        """
+        frozen = ZImageDiffSynthModel._first_frozen_base_param(module)
+        if frozen is not None:
+            return frozen
+        for name, p in module.named_parameters():
+            if "lora" not in name.lower():
+                return p
+        return None
+
     def _move_sampling_transformer(self, device):
         """Move _sampling_transformer (sampling DiT base). Do not force_to _sampling_network.
 
@@ -258,7 +274,7 @@ class ZImageDiffSynthModel(BaseModel):
         if st is None:
             return False
         target = device if isinstance(device, torch.device) else torch.device(device)
-        base_p = self._first_frozen_base_param(st)
+        base_p = self._sampling_device_param(st)
         need_move = base_p is None or not devices_equal(base_p.device, target)
         if not need_move and base_p is not None:
             payload = quantized_payload_device(base_p)
@@ -271,6 +287,9 @@ class ZImageDiffSynthModel(BaseModel):
                 self.print_and_status_update(
                     f"\n[zimage_diffsynth] moving sampling transformer to {device}"
                 )
+            # gc.collect() is not part of the caching allocator's cudaMalloc retry.
+            if target.type == "cuda":
+                self._flush_cuda()
             # Wrapper.to unwraps compiled blocks; plain Module uses nn.Module.to.
             # Do not swallow failures: a silent CUDA leave leaves both DiTs resident.
             try:
@@ -279,7 +298,7 @@ class ZImageDiffSynthModel(BaseModel):
                 raise RuntimeError(
                     f"[zimage_diffsynth] failed moving sampling transformer to {device}: {e}"
                 ) from e
-            base_p = self._first_frozen_base_param(st)
+            base_p = self._sampling_device_param(st)
             if base_p is not None and not devices_equal(base_p.device, target):
                 raise RuntimeError(
                     f"[zimage_diffsynth] sampling transformer still on {base_p.device} "
@@ -312,10 +331,7 @@ class ZImageDiffSynthModel(BaseModel):
         if p is not None and devices_equal(p.device, target):
             return
         dtype = p.dtype if p is not None else self.torch_dtype
-        try:
-            net.force_to(target, dtype)
-        except Exception:
-            pass
+        net.force_to(target, dtype)
 
     def _park_base_dit_and_lora(self) -> bool:
         """Park base DiT on CPU. Do not move train LoRA: it shares parameters with sampling LoRA."""
@@ -400,31 +416,60 @@ class ZImageDiffSynthModel(BaseModel):
         finally:
             unet.to = orig_to  # type: ignore[method-assign]
 
+    def _base_state_targets_cuda(self, state) -> bool:
+        if not isinstance(state, dict):
+            return False
+        device = (state.get("unet") or {}).get("device")
+        if device is None:
+            return False
+        return torch.device(device).type == "cuda"
+
     def set_device_state(self, state):
-        """Presets move ``unet`` (base DiT) to CUDA and would co-reside with Turbo.
+        """Presets move ``unet`` (base DiT) to CUDA and would co-reside with sampling.
 
         Keep base on CPU when training on Turbo **or** during batch
         ``generate_images`` (``_sampling_in_batch_generate``): the generate
         preset would otherwise remount main DiT while sampling DiT is on CUDA.
+        When the base is the active DiT and the preset targets CUDA, park
+        sampling (flush only if that park moved weights) before ``unet.to``.
         After the preset (``set_device_state`` runs after ``hook_before_train_loop``).
-        Skip remount while text-cache residency is active so TE-only encode never
-        co-resides with sampling DiT.
+        Skip turbo remount while text-cache residency is active so TE-only encode
+        never co-resides with sampling DiT.
         """
         import copy
 
-        if isinstance(state, dict) and (
+        pin_base_cpu = bool(
             getattr(self, "_train_on_turbo", False)
             or getattr(self, "_sampling_in_batch_generate", False)
-        ):
+        )
+        if isinstance(state, dict) and pin_base_cpu:
             state = copy.deepcopy(state)
             unet_state = dict(state.get("unet") or {})
             unet_state["device"] = torch.device("cpu")
             state["unet"] = unet_state
+        elif self._base_state_targets_cuda(state):
+            parked = self._park_sampling_dit_and_lora()
+            if parked:
+                self._flush_cuda()
         super().set_device_state(state)
         if getattr(self, "_train_on_turbo", False) and not getattr(
             self, "_text_cache_residency_active", False
         ):
             self.apply_turbo_teacher_mode(True)
+
+    def _host_sampling_dit(self) -> None:
+        """Park the base DiT, then host the sampling DiT. Flush only if the park moved weights."""
+        target = getattr(self, "device_torch", None)
+        sampling = getattr(self, "_sampling_transformer", None)
+        if (
+            sampling is not None
+            and isinstance(target, torch.device)
+            and target.type == "cuda"
+        ):
+            parked = self._park_base_dit_and_lora()
+            if parked:
+                self._flush_cuda()
+        self._move_sampling_transformer(target)
 
     def _dit_for_train_forward(self):
         """Return (dit, is_diffusers) for the active train forward path."""
@@ -897,9 +942,9 @@ class ZImageDiffSynthModel(BaseModel):
                     uncond = [uncond[i][uncond_mask[i].bool()] for i in range(uncond.shape[0])]
                 else:
                     uncond = [uncond[i] for i in range(uncond.shape[0])]
-            # Restore Turbo for denoise if it was parked on CPU after the previous decode.
-            # No flush on restore. No-op when already on device_torch or st is None.
-            self._move_sampling_transformer(self.device_torch)
+            # Park the base before hosting sampling. A no-op park (base already
+            # on CPU) does not flush; the sampling move flushes only on CPU→CUDA.
+            self._host_sampling_dit()
             call_kw = dict(extra)
             call_kw["output_type"] = "latent"
             out = pipeline(
@@ -948,20 +993,17 @@ class ZImageDiffSynthModel(BaseModel):
         )
         if not use_sampling:
             return _run()
-        # Batch path: BaseModel pins base CPU / Turbo GPU once at enter.
-        # Per-prompt moves in _run() are decode-park only, not standalone enter/exit.
+        # Batch path: set_device_state keeps the base on CPU. _run parks it
+        # again (no-op if already parked) before hosting the sampling DiT.
         if self._sampling_in_batch_generate:
             return _run()
-        # Standalone path (e.g. smoke test): move sampling to GPU, main to CPU, then restore after.
+        # Standalone path (e.g. smoke test): _run parks the base, then hosts sampling.
         try:
             if is_debug_enabled():
                 self.print_and_status_update(
                     "\n[zimage_diffsynth] standalone sampling: moving main transformer to "
                     "CPU and sampling transformer to GPU"
                 )
-            self.model.to("cpu", dtype=self.torch_dtype)
-            self._flush_cuda()
-            self._move_sampling_transformer(self.device_torch)
             return _run()
         finally:
             if is_debug_enabled():

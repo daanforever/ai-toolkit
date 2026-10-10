@@ -828,7 +828,7 @@ def test_deferred_prepare_zero_before_exit_once_after_finalize_noop(monkeypatch)
     assert t._prepare_calls == before
 
 
-def test_encode_error_aborts_without_partial_train_restore(monkeypatch):
+def test_encode_error_aborts_without_partial_train_restore(monkeypatch, capsys):
     train = _CUDA or _CPU
     t = _build_sdtrainer_stub(
         caching=True, latents_cached=False, train_device=train
@@ -850,6 +850,13 @@ def test_encode_error_aborts_without_partial_train_restore(monkeypatch):
 
     with pytest.raises(RuntimeError, match="encode/cache failed"):
         t.hook_before_train_loop()
+
+    logged = [
+        line
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith("text-cache residency: aborting after error:")
+    ]
+    assert logged == ["text-cache residency: aborting after error: RuntimeError: encode/cache failed"]
 
     # No TE + backbone co-residency; no partial train remount of unet to train device
     te = t.sd.text_encoder
@@ -1259,3 +1266,152 @@ def test_concept_slider_encode_failure_aborts_before_parent():
     assert _all_params_on(sd._sampling_transformer, _CPU)
     # Cleanup chained when abort itself fails is covered elsewhere; here abort succeeds.
     assert ei.value.__cause__ is None or "concept encode boom" in str(ei.value)
+
+
+def _bind_prepare(process):
+    process._apply_accelerator_prepare = (
+        BaseSDTrainProcess._apply_accelerator_prepare.__get__(
+            process, BaseSDTrainProcess
+        )
+    )
+    process._prepare_base_unet = BaseSDTrainProcess._prepare_base_unet.__get__(
+        process, BaseSDTrainProcess
+    )
+    process._park_sampling_dit_before_base_prepare = (
+        BaseSDTrainProcess._park_sampling_dit_before_base_prepare.__get__(
+            process, BaseSDTrainProcess
+        )
+    )
+
+
+def _prepare_harness(
+    *,
+    train_on_turbo: bool,
+    park_result: bool,
+    place_sampling_on_cuda: bool,
+):
+    """Spy ``accelerator.prepare`` and record whether sampling was parked first."""
+    unet = nn.Linear(2, 2, bias=False)
+    for param in unet.parameters():
+        param.requires_grad_(False)
+    sampling = nn.Linear(2, 2, bias=False)
+    for param in sampling.parameters():
+        param.requires_grad_(False)
+    if place_sampling_on_cuda:
+        sampling = sampling.to("cuda")
+    network = nn.Linear(2, 2, bias=False)
+    vae = nn.Linear(2, 2, bias=False)
+    order: List[str] = []
+
+    def mover(dev):
+        order.append("park")
+        sampling.to(dev)
+        return park_result
+
+    def flusher():
+        order.append("flush")
+
+    sd = SimpleNamespace(
+        vae=vae,
+        unet=unet,
+        text_encoder=None,
+        refiner_unet=None,
+        network=network,
+        _sampling_transformer=sampling,
+        _move_sampling_transformer=mover,
+        _flush_cuda=flusher,
+        _train_on_turbo=train_on_turbo,
+    )
+    prepare_calls: List[Any] = []
+
+    class _Accel:
+        def prepare(self, obj, device_placement=None):
+            if obj is unet:
+                assert next(sampling.parameters()).device.type == "cpu"
+                order.append("prepare_unet")
+                if _HAS_CUDA and _CUDA is not None and not train_on_turbo:
+                    obj.to(_CUDA)
+                    assert next(sampling.parameters()).device.type == "cpu"
+            prepare_calls.append(obj)
+            return obj
+
+    process = SimpleNamespace(
+        sd=sd,
+        modules_being_trained=[],
+        accelerator=_Accel(),
+        adapter=None,
+        optimizer=torch.optim.SGD(network.parameters(), lr=1e-3),
+        lr_scheduler=SimpleNamespace(name="sched"),
+        train_config=SimpleNamespace(train_text_encoder=False, train_refiner=False),
+        _accelerator_prepare_done=False,
+    )
+    _bind_prepare(process)
+    return process, order, prepare_calls, unet, sampling
+
+
+def test_prepare_false_parks_sampling_before_unet():
+    """Non-turbo prepare hosts unet once, only after sampling is on CPU."""
+    place_cuda = bool(_HAS_CUDA)
+    process, order, calls, unet, sampling = _prepare_harness(
+        train_on_turbo=False,
+        park_result=True,
+        place_sampling_on_cuda=place_cuda,
+    )
+    process._apply_accelerator_prepare()
+    assert calls.count(unet) == 1
+    assert order.index("park") < order.index("flush") < order.index("prepare_unet")
+    assert next(sampling.parameters()).device.type == "cpu"
+    if _HAS_CUDA and _CUDA is not None:
+        assert devices_equal(next(unet.parameters()).device, _CUDA)
+        assert not (
+            next(unet.parameters()).device.type == "cuda"
+            and next(sampling.parameters()).device.type == "cuda"
+        )
+    assert calls.count(process.sd.vae) == 1
+    assert calls.count(process.sd.network) == 1
+    assert calls.count(process.optimizer) == 1
+    assert calls.count(process.lr_scheduler) == 1
+
+
+def test_prepare_false_noop_park_skips_flush():
+    process, order, calls, unet, _sampling = _prepare_harness(
+        train_on_turbo=False,
+        park_result=False,
+        place_sampling_on_cuda=False,
+    )
+    process._apply_accelerator_prepare()
+    assert calls.count(unet) == 1
+    assert "flush" not in order
+    assert order.index("park") < order.index("prepare_unet")
+
+
+def test_prepare_true_skips_unet_and_leaves_base_on_cpu():
+    """Turbo prepare must not host the frozen base beside the sampling DiT."""
+    place_cuda = bool(_HAS_CUDA)
+    process, order, calls, unet, sampling = _prepare_harness(
+        train_on_turbo=True,
+        park_result=True,
+        place_sampling_on_cuda=place_cuda,
+    )
+    unet_to = []
+    orig_to = unet.to
+
+    def spy_to(*args, **kwargs):
+        target = args[0] if args else kwargs.get("device")
+        if target is not None and torch.device(target).type == "cuda":
+            unet_to.append(str(torch.device(target)))
+        return orig_to(*args, **kwargs)
+
+    unet.to = spy_to
+    process._apply_accelerator_prepare()
+    assert unet not in calls
+    assert "prepare_unet" not in order
+    assert "park" not in order
+    assert unet_to == []
+    assert next(unet.parameters()).device.type == "cpu"
+    if place_cuda:
+        assert next(sampling.parameters()).device.type == "cuda"
+    assert calls.count(process.sd.network) == 1
+    assert calls.count(process.optimizer) == 1
+    assert calls.count(process.lr_scheduler) == 1
+    assert unet not in process.modules_being_trained

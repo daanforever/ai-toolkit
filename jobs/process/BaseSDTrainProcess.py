@@ -778,6 +778,38 @@ class BaseSDTrainProcess(BaseTrainProcess):
             return
         self._apply_accelerator_prepare()
 
+    def _park_sampling_dit_before_base_prepare(self) -> None:
+        """Sampling DiT must leave CUDA before ``prepare`` hosts the base DiT."""
+        sd = self.sd
+        sampling = getattr(sd, "_sampling_transformer", None)
+        mover = getattr(sd, "_move_sampling_transformer", None)
+        if not isinstance(sampling, torch.nn.Module) or not callable(mover):
+            return
+        parked = mover(torch.device("cpu"))
+        if parked is not True:
+            return
+        flusher = getattr(sd, "_flush_cuda", None)
+        if callable(flusher):
+            flusher()
+        else:
+            flush()
+
+    def _prepare_base_unet(self) -> None:
+        """Prepare the base DiT only when it is the train DiT, after sampling is parked.
+
+        ``_train_on_turbo`` leaves the frozen base on CPU. ``accelerator.prepare``
+        would move it onto CUDA beside the sampling DiT.
+        """
+        unet = getattr(self.sd, "unet", None)
+        if unet is None:
+            return
+        if bool(getattr(self.sd, "_train_on_turbo", False)):
+            return
+        self._park_sampling_dit_before_base_prepare()
+        self.sd.unet = self.accelerator.prepare(unet)
+        if self.sd.unet not in self.modules_being_trained:
+            self.modules_being_trained.append(self.sd.unet)
+
     def _apply_accelerator_prepare(self):
         """Single-shot Accelerate prepare for train components. Idempotent."""
         if getattr(self, "_accelerator_prepare_done", False):
@@ -785,11 +817,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
         # # prepare all the models stuff for accelerator (hopefully we dont miss any)
         self.sd.vae = self.accelerator.prepare(self.sd.vae)
-        if self.sd.unet is not None:
-            self.sd.unet = self.accelerator.prepare(self.sd.unet)
-            # todo always tdo it?
-            if self.sd.unet not in self.modules_being_trained:
-                self.modules_being_trained.append(self.sd.unet)
+        self._prepare_base_unet()
         if self.sd.text_encoder is not None and self.train_config.train_text_encoder:
             if isinstance(self.sd.text_encoder, list):
                 self.sd.text_encoder = [
@@ -1451,6 +1479,12 @@ class BaseSDTrainProcess(BaseTrainProcess):
             unet.to(self.device_torch, dtype=dtype)
         unet.requires_grad_(False)
         unet.eval()
+        # Sampling DiT is frozen the same way as the main DiT. Only the LoRA
+        # network is trainable; its parameters are not children of this module.
+        sampling = getattr(self.sd, "_sampling_transformer", None)
+        if isinstance(sampling, torch.nn.Module):
+            sampling.requires_grad_(False)
+            sampling.eval()
         vae = vae.to(torch.device('cpu'), dtype=dtype)
         vae.requires_grad_(False)
         vae.eval()

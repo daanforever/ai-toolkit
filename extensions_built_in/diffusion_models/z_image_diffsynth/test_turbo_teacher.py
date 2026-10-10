@@ -1044,10 +1044,36 @@ def test_move_sampling_transformer_to_on_device_change_then_noop(_debug_enabled_
         assert not any("moving sampling transformer" in s for s in statuses)
     finally:
         restore_to()
-        try:
-            ZImageDiffSynthModel._move_sampling_transformer(model, "cpu")
-        except Exception:
-            pass
+        ZImageDiffSynthModel._move_sampling_transformer(model, "cpu")
+
+
+def test_move_sampling_transformer_unfrozen_same_device_is_noop(_debug_enabled_restored):
+    """Base weights still requiring grad are a device anchor, not a forced move."""
+    from extensions_built_in.diffusion_models.z_image_diffsynth.model import (
+        ZImageDiffSynthModel,
+        _DiTUnetWrapper,
+    )
+
+    class _InnerDit(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.base = nn.Linear(4, 4, bias=False)
+            self.lora_linear = nn.Linear(4, 4, bias=False)
+            self.base.weight.requires_grad_(True)
+            self.lora_linear.weight.requires_grad_(True)
+
+    inner = _InnerDit()
+    wrapper = _DiTUnetWrapper(inner)
+    statuses = []
+    model = _model_for_move_sampling(wrapper, statuses)
+    to_calls, restore_to = _spy_wrapper_to(wrapper)
+
+    try:
+        moved = ZImageDiffSynthModel._move_sampling_transformer(model, "cpu")
+        assert moved is False
+        assert to_calls == []
+    finally:
+        restore_to()
 
 
 def test_move_sampling_transformer_noop_no_debug_label(_debug_enabled_restored):
@@ -1071,6 +1097,55 @@ def test_move_sampling_transformer_noop_no_debug_label(_debug_enabled_restored):
         assert not any("[DEBUG Move sampling transformer]" in s for s in statuses)
     finally:
         restore_to()
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA required for cpu→cuda sampling move",
+)
+def test_move_sampling_transformer_flushes_only_on_cpu_to_cuda(_debug_enabled_restored):
+    """Real CPU→CUDA flushes before st.to; no-op and CUDA→CPU do not."""
+    from extensions_built_in.diffusion_models.z_image_diffsynth.model import (
+        ZImageDiffSynthModel,
+        _DiTUnetWrapper,
+    )
+
+    inner = _frozen_sampling_inner()
+    inner.frozen_linear.to("cpu")
+    wrapper = _DiTUnetWrapper(inner)
+    statuses = []
+    model = _model_for_move_sampling(wrapper, statuses)
+    model.device_torch = torch.device("cuda")
+    events = []
+    model._flush_cuda = lambda: events.append("flush")
+    to_calls, restore_to = _spy_wrapper_to(wrapper)
+    orig_to = wrapper.to
+
+    def _spy(*args, **kwargs):
+        events.append("to")
+        to_calls.append(args[0] if args else kwargs.get("device"))
+        return orig_to(*args, **kwargs)
+
+    wrapper.to = _spy
+    try:
+        events.clear()
+        to_calls.clear()
+        ZImageDiffSynthModel._move_sampling_transformer(model, "cuda")
+        assert events == ["flush", "to"]
+
+        events.clear()
+        to_calls.clear()
+        ZImageDiffSynthModel._move_sampling_transformer(model, "cuda")
+        assert events == []
+
+        events.clear()
+        to_calls.clear()
+        ZImageDiffSynthModel._move_sampling_transformer(model, "cpu")
+        assert events == ["to"]
+    finally:
+        restore_to()
+        if next(inner.parameters()).device.type == "cuda":
+            orig_to("cpu")
 
 
 def test_get_noise_prediction_repeats_do_not_call_sampling_to():
@@ -1460,4 +1535,297 @@ def test_get_generation_pipeline_does_not_from_pretrained(monkeypatch):
     assert pipe is not None
     assert captured["transformer"] is inner
     assert captured["text_encoder"] is te
+
+
+def _frozen_linear() -> nn.Linear:
+    module = nn.Linear(4, 4, bias=False)
+    for param in module.parameters():
+        param.requires_grad_(False)
+    return module
+
+
+def _on_cuda(module: nn.Module) -> bool:
+    return next(module.parameters()).device.type == "cuda"
+
+
+def test_restore_false_parks_sampling_before_base_h2d():
+    """Normal restore hosts the base only after sampling is on CPU."""
+    from toolkit.unloader import _restore_normal_train_layout
+
+    if not torch.cuda.is_available():
+        order = []
+        sampling_on_cuda = {"v": True}
+        sampling = _frozen_linear()
+        network = nn.Linear(2, 2)
+
+        def move_sampling(dev):
+            order.append(("sampling", torch.device(dev).type))
+            if torch.device(dev).type == "cpu":
+                sampling_on_cuda["v"] = False
+            return True
+
+        def move_main(dev):
+            assert not sampling_on_cuda["v"]
+            order.append(("main", torch.device(dev).type))
+
+        model = SimpleNamespace(
+            unet=_frozen_linear(),
+            network=network,
+            _sampling_transformer=sampling,
+            _move_sampling_transformer=move_sampling,
+            _move_main_network=move_main,
+            _flush_cuda=lambda: order.append("flush"),
+        )
+        _restore_normal_train_layout(model, "cuda")
+        assert order == [("sampling", "cpu"), "flush", ("main", "cuda")]
+        return
+
+    from extensions_built_in.diffusion_models.z_image_diffsynth.model import (
+        ZImageDiffSynthModel,
+    )
+
+    base = _frozen_linear()
+    sampling = _frozen_linear().to("cuda")
+    model = ZImageDiffSynthModel.__new__(ZImageDiffSynthModel)
+    model.device_torch = torch.device("cuda")
+    model.torch_dtype = torch.float32
+    model._raw_dit = base
+    model.model = base
+    model.network = None
+    model._sampling_transformer = sampling
+    model._sampling_network = None
+    model.print_and_status_update = lambda *a, **k: None
+    order = []
+    real_main = ZImageDiffSynthModel._move_main_network
+    real_flush = ZImageDiffSynthModel._flush_cuda
+
+    def wrapped_flush():
+        assert not _on_cuda(sampling)
+        assert not _on_cuda(base)
+        order.append("flush")
+        return real_flush(model)
+
+    def wrapped_main(device):
+        assert order == ["flush"]
+        assert not _on_cuda(sampling)
+        order.append("main")
+        return real_main(model, device)
+
+    model._flush_cuda = wrapped_flush
+    model._move_main_network = wrapped_main
+    _restore_normal_train_layout(model, "cuda")
+    assert order == ["flush", "main"]
+    assert _on_cuda(base)
+    assert not _on_cuda(sampling)
+
+
+def test_restore_noop_park_skips_flush():
+    """Sampling already on CPU: normal restore must not flush before the base move."""
+    from toolkit.unloader import _restore_normal_train_layout
+
+    order = []
+    model = SimpleNamespace(
+        unet=_frozen_linear(),
+        network=nn.Linear(2, 2),
+        _sampling_transformer=_frozen_linear(),
+        _move_sampling_transformer=lambda dev: order.append("sampling") or False,
+        _move_main_network=lambda dev: order.append("main"),
+        _flush_cuda=lambda: order.append("flush"),
+    )
+    _restore_normal_train_layout(model, "cuda")
+    assert order == ["sampling", "main"]
+
+
+def test_set_device_state_false_parks_sampling_before_unet_cuda(monkeypatch):
+    """False preset must park sampling before unet lands on CUDA."""
+    from toolkit.models.base_model import BaseModel
+    from extensions_built_in.diffusion_models.z_image_diffsynth.model import (
+        ZImageDiffSynthModel,
+    )
+
+    if not torch.cuda.is_available():
+        order = []
+        sampling_on_cuda = {"v": True}
+
+        def fake_super(self, state):
+            assert not sampling_on_cuda["v"]
+            order.append("unet_to")
+
+        monkeypatch.setattr(BaseModel, "set_device_state", fake_super)
+        model = object.__new__(ZImageDiffSynthModel)
+        model._train_on_turbo = False
+        model._sampling_in_batch_generate = False
+        model._text_cache_residency_active = False
+
+        def park():
+            order.append("park")
+            sampling_on_cuda["v"] = False
+            return True
+
+        model._park_sampling_dit_and_lora = park
+        model._flush_cuda = lambda: order.append("flush")
+        ZImageDiffSynthModel.set_device_state(
+            model,
+            {"unet": {"device": "cuda", "training": False, "requires_grad": False}},
+        )
+        assert order == ["park", "flush", "unet_to"]
+        return
+
+    base = _frozen_linear()
+    sampling = _frozen_linear().to("cuda")
+    vae = nn.Linear(2, 2)
+    text_encoder = nn.Linear(2, 2)
+    model = ZImageDiffSynthModel.__new__(ZImageDiffSynthModel)
+    model.device_torch = torch.device("cuda")
+    model.torch_dtype = torch.float32
+    model._raw_dit = base
+    model.model = base
+    model._sampling_transformer = sampling
+    model._sampling_network = None
+    model.network = None
+    model.vae = vae
+    model.text_encoder = text_encoder
+    model.adapter = None
+    model.refiner_unet = None
+    model._train_on_turbo = False
+    model._sampling_in_batch_generate = False
+    model._text_cache_residency_active = False
+    model.print_and_status_update = lambda *a, **k: None
+    orig_to = base.to
+    saw_base_h2d = {"v": False}
+
+    def wrapped_to(*args, **kwargs):
+        target = args[0] if args else kwargs.get("device")
+        if target is not None and torch.device(target).type == "cuda":
+            assert not _on_cuda(sampling)
+            saw_base_h2d["v"] = True
+        return orig_to(*args, **kwargs)
+
+    base.to = wrapped_to
+    ZImageDiffSynthModel.set_device_state(
+        model,
+        {
+            "vae": {"training": False, "device": "cpu"},
+            "unet": {"training": False, "requires_grad": False, "device": "cuda"},
+            "text_encoder": {
+                "training": False,
+                "requires_grad": False,
+                "device": "cpu",
+            },
+        },
+    )
+    assert saw_base_h2d["v"]
+    assert _on_cuda(base)
+    assert not _on_cuda(sampling)
+
+
+@pytest.mark.parametrize("train_on_turbo", [False, True])
+def test_generate_run_parks_base_before_sampling_h2d(train_on_turbo):
+    """Sample host-to-device of sampling waits until the base DiT is on CPU."""
+    from toolkit.config_modules import GenerateImageConfig
+    from toolkit.prompt_utils import PromptEmbeds
+    from extensions_built_in.diffusion_models.z_image_diffsynth.model import (
+        ZImageDiffSynthModel,
+    )
+
+    class _Pipe:
+        image_processor = None
+
+        def __call__(self, **kwargs):
+            return SimpleNamespace(images=torch.zeros(1, 4, 2, 2))
+
+        def decode_latents_to_pil(self, latents):
+            return ["ok"]
+
+    if not torch.cuda.is_available():
+        order = []
+        base_on_cuda = {"v": True}
+        model = ZImageDiffSynthModel.__new__(ZImageDiffSynthModel)
+        model.device_torch = torch.device("cuda")
+        model._sampling_transformer = object()
+        model._sampling_in_batch_generate = False
+        model._train_on_turbo = train_on_turbo
+        model.apply_turbo_teacher_mode = lambda enabled: order.append("apply")
+
+        def park():
+            order.append("park_base")
+            base_on_cuda["v"] = False
+            return True
+
+        def move_sampling(device):
+            if torch.device(device).type == "cuda":
+                assert not base_on_cuda["v"]
+                order.append("sampling_h2d")
+            else:
+                order.append("sampling_cpu")
+            return torch.device(device).type == "cpu"
+
+        model._park_base_dit_and_lora = park
+        model._flush_cuda = lambda: order.append("flush")
+        model._move_sampling_transformer = move_sampling
+        ZImageDiffSynthModel.generate_single_image(
+            model,
+            _Pipe(),
+            GenerateImageConfig(
+                prompt="x",
+                width=64,
+                height=64,
+                num_inference_steps=1,
+                output_path="unused.png",
+            ),
+            PromptEmbeds(torch.zeros(2, 4)),
+            PromptEmbeds(torch.zeros(2, 4)),
+            torch.Generator(),
+            {},
+        )
+        assert order[:4] == ["park_base", "flush", "sampling_h2d", "sampling_cpu"]
+        return
+
+    base = _frozen_linear().to("cuda")
+    sampling = _frozen_linear()
+    model = ZImageDiffSynthModel.__new__(ZImageDiffSynthModel)
+    model.device_torch = torch.device("cuda")
+    model.torch_dtype = torch.float32
+    model._raw_dit = base
+    model.model = base
+    model.network = None
+    model._sampling_network = None
+    model._saved_train_network = None
+    model._sampling_transformer = sampling
+    model._sampling_in_batch_generate = False
+    model._train_on_turbo = train_on_turbo
+    model.gradient_checkpointing = False
+    model.print_and_status_update = lambda *a, **k: None
+    model.apply_turbo_teacher_mode = lambda enabled: None
+    h2d_base = []
+    real_move = ZImageDiffSynthModel._move_sampling_transformer
+
+    def wrapped_move(device):
+        target = torch.device(device)
+        if target.type == "cuda":
+            assert not _on_cuda(base)
+            h2d_base.append(next(base.parameters()).device.type)
+        result = real_move(model, device)
+        assert not (_on_cuda(base) and _on_cuda(sampling))
+        return result
+
+    model._move_sampling_transformer = wrapped_move
+    ZImageDiffSynthModel.generate_single_image(
+        model,
+        _Pipe(),
+        GenerateImageConfig(
+            prompt="x",
+            width=64,
+            height=64,
+            num_inference_steps=1,
+            output_path="unused.png",
+        ),
+        PromptEmbeds(torch.zeros(2, 4)),
+        PromptEmbeds(torch.zeros(2, 4)),
+        torch.Generator(),
+        {},
+    )
+    assert h2d_base == ["cpu"]
+    assert not _on_cuda(base)
+    assert not _on_cuda(sampling)
 
