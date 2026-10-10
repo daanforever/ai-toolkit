@@ -47,6 +47,19 @@ Follow these rules for codebase exploration and any interactions with testing:
 - Implement proper logging. 
 - Use PyTorch's built-in debugging tools like autograd.detect_anomaly() when necessary.
 
+### STRICT PROHIBITION: Exception Swallowing
+- **NEVER** add exception suppression to complete a task, fix an error, or make a test/run pass. Forbidden patterns include:
+  ```python
+  try:
+      ...
+  except Exception:
+      pass
+  ```
+  Also forbidden: bare `except:`, `except ...: continue`/`return None`/`return default` without handling, `contextlib.suppress(...)`, and `except` blocks that only log and continue when failure invalidates the result.
+- Allowed only: catching a specific expected exception type with real handling (recovery, re-raise with context, or explicit documented fallback) and logging.
+- **If such code is found** (existing or newly written, in your changes or in code you read/run): **IMMEDIATELY FIX it** by replacing the suppression with correct handling (catch only the specific expected exception type with real recovery, re-raise with context, or let it propagate). Do not leave it in place.
+- Fix the root cause of the exception instead of silencing it.
+
 ### Performance Optimization: 
 - Profile code to identify and optimize bottlenecks, especially in data loading and preprocessing.
 
