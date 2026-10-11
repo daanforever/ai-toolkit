@@ -14,11 +14,11 @@ config:
       performance_log_every: 10
       network:
         pretrained_lora_path: ""
-        dtype: "bf16"
+        dtype: "fp32"
         rank_dropout: 0.01
         type: "lora"
-        linear: 4
-        linear_alpha: 4
+        linear: 32
+        linear_alpha: 32
         conv: 0
         conv_alpha: 0
         lokr_full_rank: false
@@ -39,7 +39,7 @@ config:
         turbo_prior_steps: 8
         turbo_t_jitter: 0.5
         turbo_t_jitter_end: 0
-        turbo_teacher_weight: true
+        turbo_teacher_weight: false
         lr: 0.0001
         noise_offset: 0.1
         min_snr_gamma: 0
@@ -48,10 +48,10 @@ config:
         gradient_accumulation: 1
         noise_scheduler: "flowmatch"
         prediction_type: "flowmatch"
-        timestep_type: "turbo_prior"
+        timestep_type: "linear"
         content_or_style: "balanced"
         bypass_guidance_embedding: false
-        steps: 1
+        steps: 12
         train_unet: true
         train_text_encoder: false
         gradient_checkpointing: true
@@ -73,7 +73,7 @@ config:
         skip_first_sample: false
         force_first_sample: false
         disable_sampling: false
-        dtype: "bf16"
+        dtype: "fp32"
         diff_output_preservation: false
         diff_output_preservation_multiplier: 1
         diff_output_preservation_class: "person"
@@ -121,7 +121,7 @@ config:
           is_reg: false
           network_weight: 1
           resolution:
-            - 256
+            - 1024
           controls: []
           shrink_video_to_frames: true
           num_frames: 1
@@ -131,7 +131,7 @@ config:
       sample:
         sample_noised: false
         sampler: "flowmatch"
-        sample_every: 1
+        sample_every: 10
         width: 256
         height: 256
         samples:
@@ -145,4 +145,5 @@ config:
         fps: 1
       sim:
         profile: false
+        vram_debug: true
         finite_probe: false

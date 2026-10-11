@@ -3,8 +3,9 @@ Debug utilities. memory_debug context manager measures GPU/RAM around a block;
 enabled via set_debug_config(config) with config.debug.
 """
 import contextlib
+import gc
 import sys
-from typing import Callable
+from typing import Callable, Dict, Iterator, List, Optional, Tuple
 
 import torch
 
@@ -111,12 +112,153 @@ def _format_ram_diff(label: str, before_mb: float, after_mb: float) -> str:
     return f"[DEBUG {label}] RAM RSS: {before_mb:.1f} MB -> {after_mb:.1f} MB {delta_str}"
 
 
+_GIB = 1024**3
+# Payload attribute names of quantized tensor subclasses without __tensor_flatten__ (quanto).
+_QUANTO_PAYLOAD_ATTRS = ("_data", "_scale")
+
+
+def _cuda_storages(t: torch.Tensor) -> Iterator[Tuple[int, int]]:
+    """Yield (data_ptr, nbytes) of every CUDA storage behind ``t``.
+
+    Tensor subclasses (torchao ``__tensor_flatten__``, quanto ``_data``/``_scale``)
+    are unwrapped to their payload tensors.
+    """
+    if hasattr(t, "__tensor_flatten__"):
+        names, _ = t.__tensor_flatten__()
+        inner = [getattr(t, n) for n in names]
+    elif isinstance(getattr(t, "_data", None), torch.Tensor):
+        inner = [getattr(t, a) for a in _QUANTO_PAYLOAD_ATTRS]
+    else:
+        inner = None
+    if inner is not None:
+        for x in inner:
+            if isinstance(x, torch.Tensor):
+                yield from _cuda_storages(x)
+        return
+    if t.is_cuda:
+        st = t.untyped_storage()
+        yield st.data_ptr(), st.nbytes()
+
+
+def optimizer_state_tensors(optimizer) -> List[torch.Tensor]:
+    """All tensors held in ``optimizer.state`` (nested dicts/lists/tuples)."""
+    out: List[torch.Tensor] = []
+
+    def walk(o) -> None:
+        if isinstance(o, torch.Tensor):
+            out.append(o)
+        elif isinstance(o, dict):
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, (list, tuple)):
+            for v in o:
+                walk(v)
+
+    walk(optimizer.state)
+    return out
+
+
+class CudaMemoryLayout:
+    """Attribute allocated CUDA memory to named owners and log step-over-step deltas.
+
+    ``owners_fn`` returns ordered ``(label, tensors)``; the first owner of a
+    storage claims it (so list LoRA params before the base model that may
+    contain them). Remaining live tensors reachable from Python are grouped by
+    (dtype, shape, requires_grad); ``untracked`` is allocated memory not
+    reachable from Python (autograd saved tensors, C++-held buffers).
+    Deltas are relative to the previous ``log(update_prev=True)`` call.
+    """
+
+    def __init__(self, owners_fn: Callable[[], List[Tuple[str, List[torch.Tensor]]]]):
+        self._owners_fn = owners_fn
+        self._prev: Optional[dict] = None
+
+    def _census(self) -> dict:
+        claimed: set = set()
+        cats: Dict[str, List[int]] = {}
+        for label, tensors in self._owners_fn():
+            count = nbytes = 0
+            for t in tensors:
+                for ptr, nb in _cuda_storages(t):
+                    if ptr not in claimed:
+                        claimed.add(ptr)
+                        count += 1
+                        nbytes += nb
+            cats[label] = [count, nbytes]
+        others: Dict[tuple, List[int]] = {}
+        for obj in gc.get_objects():
+            if not isinstance(obj, torch.Tensor):
+                continue
+            for ptr, nb in _cuda_storages(obj):
+                if ptr in claimed:
+                    continue
+                claimed.add(ptr)
+                group = others.setdefault(
+                    (str(obj.dtype), tuple(obj.shape), bool(obj.requires_grad)), [0, 0]
+                )
+                group[0] += 1
+                group[1] += nb
+        tracked = sum(b for _, b in cats.values()) + sum(g[1] for g in others.values())
+        return {
+            "cats": cats,
+            "others": others,
+            "untracked": int(torch.cuda.memory_allocated()) - tracked,
+        }
+
+    def log(self, print_fn: Callable[[str], None], label: str, *, update_prev: bool = True) -> None:
+        census = self._census()
+        prev = self._prev
+        print_fn(f"[DEBUG {label}] CUDA layout" + (" (Δ vs previous layout):" if prev else ":"))
+
+        def row(name: str, count: int, nbytes: int, prev_bytes: Optional[int]) -> None:
+            delta = "" if prev_bytes is None else f"  Δ{(nbytes - prev_bytes) / _GIB:+.3f}"
+            print_fn(f"    {name:<26} n={count:<5} {nbytes / _GIB:8.3f} GiB{delta}")
+
+        for name, (count, nbytes) in census["cats"].items():
+            row(name, count, nbytes, prev["cats"][name][1] if prev else None)
+        others = census["others"]
+        prev_others = prev["others"] if prev else {}
+        row(
+            "other_live_tensors",
+            sum(g[0] for g in others.values()),
+            sum(g[1] for g in others.values()),
+            sum(g[1] for g in prev_others.values()) if prev else None,
+        )
+        row("untracked(autograd/C++)", 0, census["untracked"], prev["untracked"] if prev else None)
+        cache_free = torch.cuda.memory_reserved() - torch.cuda.memory_allocated()
+        print_fn(f"    {'cache_free(reserved-alloc)':<26} {'':8} {cache_free / _GIB:8.3f} GiB")
+
+        def group_line(key: tuple, count: int, nbytes: int, delta: Optional[int]) -> str:
+            dtype, shape, requires_grad = key
+            extra = "" if delta is None else f" Δ{delta / _GIB:+.3f} GiB"
+            return (
+                f"      {dtype} {list(shape)} grad={requires_grad} "
+                f"n={count} {nbytes / _GIB:.3f} GiB{extra}"
+            )
+
+        print_fn("    other_live_tensors top by size:")
+        for key, (count, nbytes) in sorted(others.items(), key=lambda kv: -kv[1][1])[:6]:
+            delta = nbytes - prev_others.get(key, [0, 0])[1] if prev else None
+            print_fn(group_line(key, count, nbytes, delta))
+        if prev:
+            grown = sorted(
+                ((k, g, g[1] - prev_others.get(k, [0, 0])[1]) for k, g in others.items()),
+                key=lambda x: -x[2],
+            )
+            print_fn("    other_live_tensors top growth vs previous layout:")
+            for key, (count, nbytes), delta in [x for x in grown if x[2] > 0][:6]:
+                print_fn(group_line(key, count, nbytes, delta))
+        if update_prev:
+            self._prev = census
+
+
 @contextlib.contextmanager
 def memory_debug(
     print_fn: Callable[[str], None],
     label: str,
     kind: str = "all",
     verbose: bool = False,
+    layout: Optional[CudaMemoryLayout] = None,
 ):
     """
     Context manager: measure memory around the block and log if debug is enabled.
@@ -125,6 +267,7 @@ def memory_debug(
     kind="ram": process RSS (Windows only; on other platforms logs "not supported").
     kind="all": both CUDA (if available) and RAM.
     verbose: if True, also print torch.cuda.memory_summary() after measurements.
+    layout: if given (and CUDA is measured), also log the per-owner CUDA layout.
     """
     if kind == "cuda":
         if not _is_enabled_for_cuda():
@@ -156,6 +299,8 @@ def memory_debug(
             after_cuda = _cuda_snapshot_mb()
             for line in _format_cuda_diff(label, before_cuda, after_cuda):
                 print_fn(line)
+            if layout is not None:
+                layout.log(print_fn, label)
             if verbose:
                 print_fn(f"[DEBUG {label}] Memory summary:")
                 print_fn(torch.cuda.memory_summary(abbreviated=True))

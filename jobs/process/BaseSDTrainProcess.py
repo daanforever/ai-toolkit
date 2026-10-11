@@ -73,7 +73,13 @@ import diffusers
 import hashlib
 
 from toolkit.util.blended_blur_noise import get_blended_blur_noise
-from toolkit.util.debug import memory_debug, set_debug_config, is_debug_enabled
+from toolkit.util.debug import (
+    CudaMemoryLayout,
+    is_debug_enabled,
+    memory_debug,
+    optimizer_state_tensors,
+    set_debug_config,
+)
 from toolkit.util.get_model import get_model_class
 from toolkit.timestep_sampler import TimestepSampler, TimestepSamplerResult
 from toolkit.timestep_debug import TimestepDistributionLogger
@@ -102,6 +108,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
         self.custom_pipeline = custom_pipeline
         self.step_num = 0
+        self.memory_layout = CudaMemoryLayout(self.memory_layout_owners)
         self.start_step = 0
         self.epoch_num = 0
         self.last_save_step = 0
@@ -942,6 +949,36 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
     def before_dataset_load(self):
         pass
+
+    def memory_layout_owners(self):
+        """Ordered (label, tensors) owners for CudaMemoryLayout (first owner claims a storage)."""
+        def module_tensors(module):
+            if not isinstance(module, torch.nn.Module):
+                return []
+            return list(module.parameters()) + list(module.buffers())
+
+        lora_params = list(self.network.parameters()) if self.network is not None else []
+        base = self.sd.unet
+        base_params = list(base.parameters()) if base is not None else []
+        text_encoders = self.sd.text_encoder
+        if not isinstance(text_encoders, list):
+            text_encoders = [text_encoders]
+        return [
+            ("lora.params", lora_params),
+            ("lora.grads", [p.grad for p in lora_params if p.grad is not None]),
+            ("optimizer.state", optimizer_state_tensors(self.optimizer)),
+            ("base.params", base_params),
+            ("base.buffers", list(base.buffers()) if base is not None else []),
+            ("base.grads", [p.grad for p in base_params if p.grad is not None]),
+            ("vae", module_tensors(self.sd.vae)),
+            ("text_encoder", [t for m in text_encoders for t in module_tensors(m)]),
+        ]
+
+    def log_oom_layout(self, step: int):
+        """Log the CUDA layout at OOM time. Call inside the ``except`` so the
+        traceback still keeps the failed step's tensors alive."""
+        if is_debug_enabled() and torch.cuda.is_available():
+            self.memory_layout.log(print_acc, f"OOM at train step {step}", update_prev=False)
 
     def get_params(self):
         # you can extend this in subclass to get params
@@ -2102,17 +2139,18 @@ class BaseSDTrainProcess(BaseTrainProcess):
             did_oom = False
             loss_dict = None
             
-            # Wrap first training step with memory debug
-            train_step_context = memory_debug(print_acc, "After 10 training steps", kind="cuda") if step == (start_step_num + 10) else contextlib.nullcontext()
-            with train_step_context:
+            # Per-step CUDA memory + per-owner layout (debug only), to spot growth between steps
+            with memory_debug(print_acc, f"Train step {step}", kind="cuda", layout=self.memory_layout):
                 try:
                     with self.accelerator.accumulate(self.modules_being_trained):
                         loss_dict = self.hook_train_loop(batch_list)
                 except torch.cuda.OutOfMemoryError:
                     did_oom = True
+                    self.log_oom_layout(step)
                 except RuntimeError as e:
                     if "CUDA out of memory" in str(e):
                         did_oom = True
+                        self.log_oom_layout(step)
                     else:
                         raise  # not an OOM; surface real errors
             if did_oom:

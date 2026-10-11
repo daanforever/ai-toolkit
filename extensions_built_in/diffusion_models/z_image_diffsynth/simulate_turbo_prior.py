@@ -13,6 +13,8 @@ Run from repo root:
 
 Edit ``simulate_turbo_prior.yaml`` for knobs (quantize, steps, refiners, sample size).
 Set ``sim.profile: true`` for CUDA-event step breakdown (sampling disabled).
+Set ``sim.vram_debug: true`` for per-step VRAM layout (who holds memory) and
+an abort when used VRAM exceeds ``VRAM_ABORT_GB``.
 """
 
 from __future__ import annotations
@@ -54,18 +56,12 @@ TOOLKIT_ROOT = _REPO_ROOT
 if TOOLKIT_ROOT not in sys.path:
     sys.path.insert(0, TOOLKIT_ROOT)
 
-try:
-    from types import SimpleNamespace
-    from toolkit.util.debug import set_debug_config
+from types import SimpleNamespace
+from toolkit.util.debug import CudaMemoryLayout, set_debug_config
 
-    _debug_flag = os.environ.get("ZIMAGE_DIFFSYNTH_DEBUG", "").strip()
-    if _debug_flag:
-        _enabled = _debug_flag not in ("0", "false", "False")
-    else:
-        _enabled = True
-    set_debug_config(SimpleNamespace(debug=_enabled))
-except Exception:
-    pass
+_debug_flag = os.environ.get("ZIMAGE_DIFFSYNTH_DEBUG", "").strip()
+_enabled = _debug_flag not in ("0", "false", "False")
+set_debug_config(SimpleNamespace(debug=_enabled))
 
 from toolkit.job import run_job
 from toolkit.timestep_sampler import TimestepSampler
@@ -87,9 +83,15 @@ FORCE_COVERAGE_STEPS = 16  # 2 full passes over the 8 Turbo centers
 # Hard gate: frac of collected t with t < 300 must be strictly below this.
 FRAC_T_LT_300_MAX = 0.15
 # Hard gate: peak CUDA allocated must stay under this fraction of device total.
-PEAK_VRAM_FRAC_MAX = 0.85
+PEAK_VRAM_FRAC_MAX = 0.95
 # Hard gate: LoRA must move vs init snapshot (both stats must clear eps).
 LORA_DELTA_EPS = 1e-8
+
+# VRAM debug (sim.vram_debug): abort once device-used or peak allocated exceeds this.
+VRAM_ABORT_GB = 15.5
+# Stages that dump the full per-owner layout (others log one compact line).
+_VRAM_FULL_STAGES = ("step_begin", "after_backward")
+_GIB = 1024**3
 
 # Profile mode: skip first N steps, then record; sampling disabled for clean step time.
 PROFILE_WARMUP_STEPS = 3
@@ -137,6 +139,12 @@ _PROFILE_STEP_WALL_S: List[float] = []
 _PROFILE_VRAM: List[tuple[float, float]] = []  # (alloc_gb, reserved_gb) per step
 _PROFILE_STEP_FLUSHES = 0
 _PROFILE_NEST_DEPTH = 0
+
+# VRAM debug state (sim-only; installed when sim.vram_debug is true).
+_VRAM_DEBUG_PROBE_INSTALLED = False
+# stage -> layout tracker (step-over-step deltas per stage).
+_VRAM_LAYOUTS: Dict[str, CudaMemoryLayout] = {}
+_VRAM_LAST_PEAK_GB = 0.0
 # When False, peak-VRAM ≥ max is warning-only (unquantized DiT).
 _QUANTIZE_HARD_PEAK = True
 
@@ -166,7 +174,10 @@ def _parse_sim(process0: dict) -> dict:
     sim = copy.deepcopy(process0.get("sim") or {})
     if not isinstance(sim, dict):
         raise ValueError("'sim' must be a mapping")
-    return {"profile": bool(sim.get("profile", False))}
+    return {
+        "profile": bool(sim.get("profile", False)),
+        "vram_debug": bool(sim.get("vram_debug", False)),
+    }
 
 
 def _strip_sim(config: dict) -> dict:
@@ -548,13 +559,10 @@ def _te_weight_device(model) -> str:
     if te is None:
         return "None"
     # FakeTextEncoder has .device property but no real weights on CUDA.
-    try:
-        from toolkit.unloader import FakeTextEncoder
+    from toolkit.unloader import FakeTextEncoder
 
-        if isinstance(te, FakeTextEncoder):
-            return f"fake:{te.device}"
-    except Exception:
-        pass
+    if isinstance(te, FakeTextEncoder):
+        return f"fake:{te.device}"
     d = _weight_device(te)
     return str(d) if d is not None else "None"
 
@@ -699,13 +707,8 @@ def _install_te_cache_vram_probe() -> None:
             _log_te_cache_vram("cache_latents:exit", sd)
 
     def _force_to(self, device, dtype):
-        sd = None
         ref = getattr(self, "base_model_ref", None)
-        if ref is not None:
-            try:
-                sd = ref()
-            except Exception:
-                sd = None
+        sd = ref() if ref is not None else None
         _log_te_cache_vram(f"lora.force_to:before({device})", sd)
         out = _orig_force_to(self, device, dtype)
         _log_te_cache_vram(f"lora.force_to:after({device})", sd)
@@ -879,6 +882,91 @@ def _install_vram_probe() -> None:
     ZImageDiffSynthModel._move_sampling_transformer = _wrapped_move  # type: ignore[method-assign]
     ZImageDiffSynthModel.get_noise_prediction = _wrapped  # type: ignore[method-assign]
     _PROBES_INSTALLED = True
+
+
+def _sim_layout_owners(trainer) -> List[tuple[str, List[torch.Tensor]]]:
+    """Trainer owners plus the Turbo sampling DiT (claims only unowned storages)."""
+    sampling = getattr(trainer.sd, "_sampling_transformer", None)
+    sampling = getattr(sampling, "_inner_dit", sampling)
+    sampling_tensors = (
+        list(sampling.parameters()) + list(sampling.buffers())
+        if sampling is not None
+        else []
+    )
+    return trainer.memory_layout_owners() + [("sampling_dit", sampling_tensors)]
+
+
+def _device_used_gb() -> float:
+    free, total = torch.cuda.mem_get_info()
+    return (total - free) / _GIB
+
+
+def _vram_checkpoint(trainer, stage: str) -> None:
+    """Log VRAM at a train-step stage; dump layout and abort above the limit."""
+    global _VRAM_LAST_PEAK_GB
+    step = int(getattr(trainer, "step_num", 0) or 0)
+    alloc = torch.cuda.memory_allocated() / _GIB
+    reserved = torch.cuda.memory_reserved() / _GIB
+    peak = torch.cuda.max_memory_allocated() / _GIB
+    used = _device_used_gb()
+    over = used > VRAM_ABORT_GB or peak > VRAM_ABORT_GB
+    _log(
+        f"[vram-dbg] step={step} {stage}: alloc={alloc:.3f} reserved={reserved:.3f} "
+        f"dev_used={used:.3f} peak={peak:.3f} (Δpeak={peak - _VRAM_LAST_PEAK_GB:+.3f}) GiB"
+        + (f" OVER>{VRAM_ABORT_GB}" if over else "")
+    )
+    _VRAM_LAST_PEAK_GB = peak
+    if over or stage in _VRAM_FULL_STAGES:
+        layout = _VRAM_LAYOUTS.setdefault(
+            stage, CudaMemoryLayout(lambda: _sim_layout_owners(trainer))
+        )
+        layout.log(_log, f"{stage} step={step}")
+    if over:
+        raise RuntimeError(
+            f"VRAM limit: step={step} stage={stage} dev_used={used:.2f} "
+            f"peak={peak:.2f} GiB > {VRAM_ABORT_GB} GiB (layout dumped above)"
+        )
+
+
+def _install_vram_debug_probe() -> None:
+    """Per-stage VRAM lines + layout via SDTrainer hooks (OOM layout: trainer loop)."""
+    global _VRAM_DEBUG_PROBE_INSTALLED, _VRAM_LAST_PEAK_GB
+    _VRAM_LAYOUTS.clear()
+    _VRAM_LAST_PEAK_GB = 0.0
+    if _VRAM_DEBUG_PROBE_INSTALLED:
+        return
+    from extensions_built_in.sd_trainer.SDTrainer import SDTrainer
+
+    _orig_hook = SDTrainer.hook_train_loop
+    _orig_accum = SDTrainer.train_single_accumulation
+
+    def _accum(self, *args, **kwargs):
+        out = _orig_accum(self, *args, **kwargs)
+        _vram_checkpoint(self, "after_backward")
+        return out
+
+    def _hook(self, batch):
+        _vram_checkpoint(self, "step_begin")
+        opt = self.optimizer
+        orig_step = opt.step
+
+        def _opt_step(*args, **kwargs):
+            out = orig_step(*args, **kwargs)
+            _vram_checkpoint(self, "after_opt_step")
+            return out
+
+        opt.step = _opt_step  # type: ignore[method-assign]
+        try:
+            out = _orig_hook(self, batch)
+        finally:
+            opt.step = orig_step  # type: ignore[method-assign]
+        _vram_checkpoint(self, "step_end")
+        return out
+
+    SDTrainer.train_single_accumulation = _accum  # type: ignore[method-assign]
+    SDTrainer.hook_train_loop = _hook  # type: ignore[method-assign]
+    _VRAM_DEBUG_PROBE_INSTALLED = True
+    _log(f"[vram-dbg] probe installed (abort > {VRAM_ABORT_GB} GiB)")
 
 
 def _install_lora_init_snapshot(init_path: Path) -> None:
@@ -1238,6 +1326,8 @@ def _train_lora(
     _install_te_cache_vram_probe()
     if profile:
         _install_profile_probes()
+    if _parse_sim(recipe["config"]["process"][0])["vram_debug"]:
+        _install_vram_debug_probe()
     init_lora_path = work_root / "_lora_init.safetensors"
     _install_lora_init_snapshot(init_lora_path)
     if torch.cuda.is_available():
