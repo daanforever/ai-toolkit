@@ -60,10 +60,7 @@ def _device_is_cpu(device: Union[torch.device, str, int, None]) -> bool:
 
 
 def _module_params_on_cpu(module: nn.Module) -> bool:
-    try:
-        p = next(module.parameters(), None)
-    except Exception:
-        return False
+    p = next(module.parameters(), None)
     return p is None or p.device.type == "cpu"
 
 
@@ -142,6 +139,11 @@ def move_dit_with_compiled_blocks(
             log(f"[compile] unwrapped {unwrapped} block(s) for device move")
 
     # Device only — do not cast QBytesTensor scale dtype via torch_dtype.
+    # One CUDA allocation per block instead of one rounded-up segment per weight.
+    if torch.device(target).type == "cuda":
+        for name in block_names:
+            for block in getattr(dit, name):
+                safe_module_to_device(block, torch.device(target), dtype=None, pack=True)
     safe_module_to_device(dit, torch.device(target), dtype=None)
 
     need_recompile = getattr(dit, "_zimage_blocks_need_recompile", False)

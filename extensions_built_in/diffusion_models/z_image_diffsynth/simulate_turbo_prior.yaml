@@ -17,8 +17,8 @@ config:
         dtype: "fp32"
         rank_dropout: 0.01
         type: "lora"
-        linear: 32
-        linear_alpha: 32
+        linear: 8
+        linear_alpha: 8
         conv: 0
         conv_alpha: 0
         lokr_full_rank: false
@@ -51,7 +51,7 @@ config:
         timestep_type: "linear"
         content_or_style: "balanced"
         bypass_guidance_embedding: false
-        steps: 12
+        steps: 40
         train_unet: true
         train_text_encoder: false
         gradient_checkpointing: true
@@ -73,7 +73,7 @@ config:
         skip_first_sample: false
         force_first_sample: false
         disable_sampling: false
-        cuda_memory_fraction: 0.88
+        cuda_memory_fraction: 0.9
         dtype: "fp32"
         diff_output_preservation: false
         diff_output_preservation_multiplier: 1
@@ -146,5 +146,6 @@ config:
         fps: 1
       sim:
         profile: false
-        vram_debug: true
+        vram_debug: false
+        dataset_dir: "temp/sim_varied_dataset"
         finite_probe: false

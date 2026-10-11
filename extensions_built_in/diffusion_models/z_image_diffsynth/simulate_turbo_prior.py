@@ -13,6 +13,9 @@ Run from repo root:
 
 Edit ``simulate_turbo_prior.yaml`` for knobs (quantize, steps, refiners, sample size).
 Set ``sim.profile: true`` for CUDA-event step breakdown (sampling disabled).
+Set ``sim.dataset_dir`` to a folder of ``.jpg`` + ``.txt`` pairs (copied, not
+modified) to train on it instead of the test_train cache, e.g. mixed aspect
+ratios to exercise resolution buckets.
 Set ``sim.vram_debug: true`` for per-step VRAM layout (who holds memory) and
 an abort when used VRAM exceeds ``VRAM_ABORT_GB``.
 """
@@ -177,6 +180,7 @@ def _parse_sim(process0: dict) -> dict:
     return {
         "profile": bool(sim.get("profile", False)),
         "vram_debug": bool(sim.get("vram_debug", False)),
+        "dataset_dir": sim.get("dataset_dir") or None,
     }
 
 
@@ -1363,11 +1367,14 @@ def _train_lora(
         else 0
     )
     slot_counts, frac_lt_300 = _print_t_histogram()
-    # Short / profile runs may miss full 8-slot coverage; keep VRAM/residency.
-    if profile or n_steps < FORCE_COVERAGE_STEPS:
+    # Short / profile runs may miss full 8-slot coverage; non-turbo_prior timesteps
+    # never reach the collector. VRAM/residency gates still run.
+    turbo_prior_timesteps = train.get("timestep_type") == "turbo_prior"
+    if profile or n_steps < FORCE_COVERAGE_STEPS or not turbo_prior_timesteps:
         _log(
             "[sim] skipping full t-slot acceptance "
-            f"(force_coverage={force_coverage}, steps={n_steps})"
+            f"(force_coverage={force_coverage}, steps={n_steps}, "
+            f"timestep_type={train.get('timestep_type')})"
         )
     else:
         _assert_t_acceptance(slot_counts, frac_lt_300)
@@ -1507,24 +1514,29 @@ def main() -> None:
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA not available; GPU required for this sim.")
 
-    prompt = os.environ.get("ZIMAGE_TEST_TRAIN_PROMPT", "dog")
-    seeds = [42 + i for i in range(NUM_SOURCE_IMAGES)]
-    image_cache = TEST_TRAIN_IMAGE_CACHE
-
-    if not _is_image_cache_valid(image_cache, prompt, seeds):
-        raise RuntimeError(
-            f"Dataset cache invalid at {image_cache}. "
-            "Populate via test_train (or set ZIMAGE_TEST_TRAIN_FORCE_REGEN=1 there). "
-            "This sim does not download or regenerate a dataset."
-        )
-
     base_work = Path(tempfile.gettempdir()) / "zimage_diffsynth_sim_turbo_prior"
     if base_work.exists():
         shutil.rmtree(base_work, ignore_errors=True)
     dataset_dir = base_work / "datasets" / "1"
-    dataset_dir.mkdir(parents=True, exist_ok=True)
-    _populate_dataset_from_cache(image_cache, dataset_dir)
-    _log(f"1) Dataset from cache {image_cache} -> {dataset_dir} (prompt={prompt!r})")
+    if sim["dataset_dir"]:
+        source_dir = Path(sim["dataset_dir"])
+        if not any(source_dir.glob("*.jpg")):
+            raise RuntimeError(f"sim.dataset_dir has no .jpg images: {source_dir}")
+        shutil.copytree(source_dir, dataset_dir)
+        _log(f"1) Dataset from sim.dataset_dir {source_dir} -> {dataset_dir}")
+    else:
+        prompt = os.environ.get("ZIMAGE_TEST_TRAIN_PROMPT", "dog")
+        seeds = [42 + i for i in range(NUM_SOURCE_IMAGES)]
+        image_cache = TEST_TRAIN_IMAGE_CACHE
+        if not _is_image_cache_valid(image_cache, prompt, seeds):
+            raise RuntimeError(
+                f"Dataset cache invalid at {image_cache}. "
+                "Populate via test_train (or set ZIMAGE_TEST_TRAIN_FORCE_REGEN=1 there). "
+                "This sim does not download or regenerate a dataset."
+            )
+        dataset_dir.mkdir(parents=True, exist_ok=True)
+        _populate_dataset_from_cache(image_cache, dataset_dir)
+        _log(f"1) Dataset from cache {image_cache} -> {dataset_dir} (prompt={prompt!r})")
 
     _log(
         "[sim] use_diffsynth_prompt_encoding omitted → true "

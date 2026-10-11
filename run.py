@@ -14,6 +14,16 @@ sys.path.insert(0, os.getcwd())
 # turn off diffusers telemetry until I can figure out how to make it opt-in
 os.environ['DISABLE_TELEMETRY'] = 'YES'
 
+# Windows has no expandable_segments: with varying batch shapes, long-lived activations
+# split cached segments of short-lived ones and pin the remainders until a step OOMs at
+# the train.cuda_memory_fraction cap. Blocks >= max_split_size_mb are never split, so they
+# stay whole and releasable. Must stay above the allocator's 20 MiB small-request segments.
+_alloc_conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
+if os.name == "nt" and "max_split_size_mb" not in _alloc_conf:
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = ",".join(
+        filter(None, [_alloc_conf, "max_split_size_mb:24"])
+    )
+
 # check if we have DEBUG_TOOLKIT in env
 if os.environ.get("DEBUG_TOOLKIT", "0") == "1":
     # set torch to trace mode

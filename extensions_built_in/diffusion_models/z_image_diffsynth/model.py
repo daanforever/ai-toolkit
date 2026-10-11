@@ -496,14 +496,13 @@ class ZImageDiffSynthModel(BaseModel):
         def _device_str(obj):
             if obj is None:
                 return "None"
-            try:
-                p = next(obj.parameters(), None)
-                return str(p.device) if p is not None else "no_params"
-            except Exception:
-                try:
-                    return str(getattr(obj, "device", "?"))
-                except Exception:
-                    return "?"
+            parameters = getattr(obj, "parameters", None)
+            if callable(parameters):
+                p = next(parameters(), None)
+                if p is not None:
+                    return str(p.device)
+            device = getattr(obj, "device", None)
+            return str(device) if device is not None else "no_params"
 
         te = self.text_encoder
         if isinstance(te, list):
@@ -580,11 +579,8 @@ class ZImageDiffSynthModel(BaseModel):
                 ("context_refiner", self._disable_context_refiner),
             ):
                 if _do_disable and hasattr(self._raw_dit, _ref_name):
-                    try:
-                        setattr(self._raw_dit, _ref_name, torch.nn.ModuleList([]))
-                        self.print_and_status_update(f"Disabled DiT module: {_ref_name}")
-                    except Exception:
-                        pass
+                    setattr(self._raw_dit, _ref_name, torch.nn.ModuleList([]))
+                    self.print_and_status_update(f"Disabled DiT module: {_ref_name}")
         self.model = _DiTUnetWrapper(self._raw_dit, fallback_dtype=self.torch_dtype)
         self.vae = components["vae_wrapper"]
         # When caching text embeddings, keep VAE on CPU until latent-cache preset /
@@ -593,10 +589,7 @@ class ZImageDiffSynthModel(BaseModel):
             # For zimage_diffsynth VAE is needed on GPU during both training and sampling.
             # Move it to the target VAE device immediately so save_device_state() records
             # GPU as the baseline device and restore_device_state() keeps it there.
-            try:
-                self.vae.to(self.vae_device_torch)
-            except Exception:
-                pass
+            self.vae.to(self.vae_device_torch)
         self.text_encoder = [components["text_encoder"]]
         self.tokenizer = [components["tokenizer"]]
         self._sampling_is_diffusers = components.get("sampling_is_diffusers", False)
@@ -608,10 +601,8 @@ class ZImageDiffSynthModel(BaseModel):
                 ("context_refiner", self._disable_context_refiner),
             ):
                 if _do_disable and hasattr(sampling_dit, _ref_name):
-                    try:
-                        setattr(sampling_dit, _ref_name, torch.nn.ModuleList([]))
-                    except Exception:
-                        pass
+                    setattr(sampling_dit, _ref_name, torch.nn.ModuleList([]))
+                    self.print_and_status_update(f"Disabled sampling DiT module: {_ref_name}")
         # Always wrap sampling DiT in _DiTUnetWrapper so LoRA module names match the main model
         # (main uses _DiTUnetWrapper → lora_unet__inner_dit_*). For diffusers sampling we unwrap
         # when building ZImagePipeline in get_generation_pipeline.
@@ -623,16 +614,9 @@ class ZImageDiffSynthModel(BaseModel):
         # Decide whether to use the original DiffSynth training loop behaviour.
         # Flag lives in model_kwargs for this model; default is True so that
         # existing configs (without the flag) keep DiffSynth-compatible behaviour.
-        use_diffsynth = True
-        use_dynamic_shifting = False
-        try:
-            model_kwargs = getattr(self.model_config, "model_kwargs", {}) or {}
-            use_diffsynth = model_kwargs.get("use_diffsynth_training_loop", True)
-            use_dynamic_shifting = _resolve_use_dynamic_shifting(model_kwargs)
-        except Exception:
-            # On any unexpected shape, keep defaults.
-            use_diffsynth = True
-            use_dynamic_shifting = False
+        model_kwargs = getattr(self.model_config, "model_kwargs", {}) or {}
+        use_diffsynth = model_kwargs.get("use_diffsynth_training_loop", True)
+        use_dynamic_shifting = _resolve_use_dynamic_shifting(model_kwargs)
 
         self.noise_scheduler = ZImageDiffSynthModel.get_train_scheduler(
             use_diffsynth_loop=use_diffsynth,
@@ -845,22 +829,16 @@ class ZImageDiffSynthModel(BaseModel):
         return noise_pred
 
     def get_prompt_embeds(self, prompt: str) -> PromptEmbeds:
+        from toolkit.util.device import devices_equal, safe_module_to_device
+
         te = self.text_encoder[0]
         tok = self.tokenizer[0]
-        if next(te.parameters()).device != self.device_torch:
-            try:
-                te.to(self.device_torch)
-            except RuntimeError as e:
-                if "Couldn't swap" in str(e) or "swap_tensors" in str(e):
-                    # Quantized TE: .to() can fail when already on device or shared storage
-                    pass
-                else:
-                    raise
-        try:
-            mk = getattr(self.model_config, "model_kwargs", {}) or {}
-            use_diffsynth_prompt_encoding = _resolve_use_diffsynth_prompt_encoding(mk)
-        except Exception:
-            use_diffsynth_prompt_encoding = True
+        te_param = next(te.parameters(), None)
+        if te_param is not None and not devices_equal(te_param.device, self.device_torch):
+            # Module.to() uses swap_tensors, which fails on quantized text-encoder weights.
+            safe_module_to_device(te, self.device_torch)
+        mk = getattr(self.model_config, "model_kwargs", {}) or {}
+        use_diffsynth_prompt_encoding = _resolve_use_diffsynth_prompt_encoding(mk)
         encode_dtype = getattr(self, "train_torch_dtype", None) or self.torch_dtype
         if use_diffsynth_prompt_encoding:
             return diffsynth_training_mod.encode_prompt_diffsynth_literal_t2i(

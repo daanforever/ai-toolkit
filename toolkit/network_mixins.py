@@ -289,9 +289,11 @@ class ToolkitModuleMixin:
 
         if isinstance(x, QTensor):
             x = x.dequantize()
-        # always cast to float32
-        lora_input = x.to(self.lora_down.weight.dtype)
-        lora_output = self._call_forward(lora_input)
+        # autocast recasts the LoRA layer inputs to its own dtype, so casting here would only
+        # add a full-size copy of x (plus the autocast copy saved for backward) per call
+        if not torch.is_autocast_enabled(x.device.type):
+            x = x.to(self.lora_down.weight.dtype)
+        lora_output = self._call_forward(x)
         # Match PEFT: multiplier is a plain tensor and can lag force_to / shared remount.
         multiplier = self.network_ref().torch_multiplier.to(
             device=lora_output.device, dtype=lora_output.dtype
@@ -304,8 +306,9 @@ class ToolkitModuleMixin:
             # todo check if this is correct, do we just concat when doing cfg?
             multiplier = multiplier.repeat_interleave(num_interleaves)
 
-        scaled_lora_output = broadcast_and_multiply(lora_output, multiplier)
-        scaled_lora_output = scaled_lora_output.to(org_forwarded.dtype)
+        scaled_lora_output = broadcast_and_multiply(lora_output, multiplier).to(org_forwarded.dtype)
+        # free the unscaled output before the residual add allocates another output-sized tensor
+        del lora_output
 
         if self.__class__.__name__ == "DoRAModule":
             lora_weight = self.lora_up.weight @ self.lora_down.weight

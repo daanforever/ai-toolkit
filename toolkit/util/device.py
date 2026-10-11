@@ -40,10 +40,45 @@ def quantized_payload_device(param: torch.Tensor) -> Optional[torch.device]:
     return None
 
 
+_PACK_ALIGNMENT = 512  # bytes; same alignment the CUDA caching allocator gives each block
+
+
+def _pack_frozen_params(
+    module: torch.nn.Module,
+    device: torch.device,
+    dtype: Optional[torch.dtype],
+) -> None:
+    """Move the subtree's frozen plain params into one allocation on ``device`` (as views)."""
+    params = [
+        p
+        for p in module.parameters()
+        if not p.requires_grad
+        and not _is_quantized_param(p)
+        and p.is_contiguous()
+        and (not devices_equal(p.device, device) or (dtype is not None and p.dtype != dtype))
+    ]
+    if not params:
+        return
+    offsets = []
+    total = 0
+    for p in params:
+        total = -(-total // _PACK_ALIGNMENT) * _PACK_ALIGNMENT
+        offsets.append(total)
+        total += p.numel() * (dtype or p.dtype).itemsize
+    storage = torch.empty(total, dtype=torch.uint8, device=device)
+    for p, offset in zip(params, offsets):
+        target_dtype = dtype or p.dtype
+        packed = storage[offset:offset + p.numel() * target_dtype.itemsize]
+        packed = packed.view(target_dtype).view(p.shape)
+        packed.copy_(p.data)
+        p.data = packed
+
+
 def safe_module_to_device(
     module: torch.nn.Module,
     device: torch.device,
     dtype: Optional[torch.dtype] = None,
+    pack: bool = False,
 ) -> None:
     """
     Move module to device (and optionally dtype) without Module.to()/swap_tensors.
@@ -52,8 +87,14 @@ def safe_module_to_device(
       (``qdata``/``_data`` + scale) relocates; ``param.data = ...`` does not.
     - All other params (LoRA, plain bias): identity-preserving ``param.data =``
       so optimizer / PEFT caches keep valid Parameter refs.
+    - ``pack``: frozen plain params of the whole subtree share one allocation, so the
+      CUDA caching allocator does not round every large weight up to its own 2 MiB
+      segment. The allocation is freed only once every one of those params has moved
+      off ``device``; moving a single submodule away keeps it alive.
     """
     device = torch.device(device)
+    if pack:
+        _pack_frozen_params(module, device, dtype)
 
     for name, param in list(module.named_parameters(recurse=False)):
         need_device = not devices_equal(param.device, device)
