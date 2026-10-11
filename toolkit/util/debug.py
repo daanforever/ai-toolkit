@@ -76,6 +76,20 @@ def _format_cuda_diff(label: str, before: tuple, after: tuple) -> list:
     ]
 
 
+def _format_cuda_device_line(label: str) -> str:
+    """Device-level usage: PyTorch reserved vs everything else on the GPU, plus
+    allocator fragmentation (cached blocks split and not reusable as a whole)."""
+    free, total = torch.cuda.mem_get_info()
+    used = total - free
+    reserved = torch.cuda.memory_reserved()
+    inactive_split = torch.cuda.memory_stats()["inactive_split_bytes.all.current"]
+    return (
+        f"[DEBUG {label}] CUDA device: used {used / _GIB:.2f} / {total / _GIB:.2f} GiB | "
+        f"non-PyTorch {(used - reserved) / _GIB:.2f} GiB | "
+        f"inactive_split {inactive_split / _GIB:.2f} GiB"
+    )
+
+
 def _ram_snapshot_mb() -> float | None:
     """
     Return current process RSS (Working Set) in MB, or None if unavailable.
@@ -299,6 +313,7 @@ def memory_debug(
             after_cuda = _cuda_snapshot_mb()
             for line in _format_cuda_diff(label, before_cuda, after_cuda):
                 print_fn(line)
+            print_fn(_format_cuda_device_line(label))
             if layout is not None:
                 layout.log(print_fn, label)
             if verbose:

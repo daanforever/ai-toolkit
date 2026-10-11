@@ -1356,6 +1356,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
         BaseTrainProcess.run(self)
         params = []
 
+        if self.train_config.cuda_memory_fraction is not None:
+            # current CUDA device: accelerator.device can be an unindexed "cuda"
+            torch.cuda.set_per_process_memory_fraction(self.train_config.cuda_memory_fraction)
+            print_acc(f"CUDA memory fraction capped at {self.train_config.cuda_memory_fraction}")
+
         ### HOOK ###
         self.hook_before_model_load()
         model_config_to_load = copy.deepcopy(self.model_config)

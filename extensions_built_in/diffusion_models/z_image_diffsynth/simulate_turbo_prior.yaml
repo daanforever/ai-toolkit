@@ -73,6 +73,7 @@ config:
         skip_first_sample: false
         force_first_sample: false
         disable_sampling: false
+        cuda_memory_fraction: 0.88
         dtype: "fp32"
         diff_output_preservation: false
         diff_output_preservation_multiplier: 1

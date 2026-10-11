@@ -565,6 +565,10 @@ class TrainConfig:
         self.linear_timesteps = kwargs.get('linear_timesteps', False)
         self.linear_timesteps2 = kwargs.get('linear_timesteps2', False)
         self.disable_sampling = kwargs.get('disable_sampling', False)
+        # cap on PyTorch's share of total VRAM (0-1]. At the cap the allocator frees its
+        # cached blocks and retries before raising OOM, which keeps reserved memory from
+        # spilling into shared system VRAM on Windows. None = no cap.
+        self.cuda_memory_fraction: Optional[float] = kwargs.get('cuda_memory_fraction', 0.9)
 
         # will cache a blank prompt or the trigger word, and unload the text encoder to cpu
         # will make training faster and use less vram
