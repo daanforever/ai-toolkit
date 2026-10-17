@@ -17,6 +17,10 @@ class OptimizerStepMetrics:
     local Adafactor and HFAdafactor.
     """
 
+    _RUNNING_SENTINEL_KEYS = frozenset(
+        {"rms_max", "rms_min", "update_rms_max", "grad_rms_max"}
+    )
+
     def __init__(self, rms_max_decay_rate: float = 0.97, eps: float = 1e-30):
         rms_max_decay_rate = float(rms_max_decay_rate)
         if not (0.0 < rms_max_decay_rate <= 1.0):
@@ -35,11 +39,32 @@ class OptimizerStepMetrics:
         return tensor.norm(2) / (tensor.numel() ** 0.5)
 
     @staticmethod
-    def _scalar_item(store: dict, key: str, default: float = 0.0) -> float:
+    def _stored_float(store: dict, key: str) -> Optional[float]:
         t = store.get(key)
         if t is None:
-            return default
+            return None
         return t.item() if isinstance(t, torch.Tensor) else float(t)
+
+    @staticmethod
+    def _scalar_item(store: dict, key: str, default: float = 0.0) -> float:
+        value = OptimizerStepMetrics._stored_float(store, key)
+        if value is None:
+            return default
+        if (
+            key in OptimizerStepMetrics._RUNNING_SENTINEL_KEYS
+            and not math.isfinite(value)
+        ):
+            return default
+        return value
+
+    @staticmethod
+    def _mask_nonfinite(candidate: torch.Tensor, fill: float) -> torch.Tensor:
+        candidate = candidate.detach()
+        return torch.where(
+            torch.isfinite(candidate),
+            candidate,
+            candidate.new_full((), fill),
+        )
 
     @staticmethod
     def _running_max_update(store: dict, key: str, candidate: torch.Tensor) -> None:
@@ -67,23 +92,19 @@ class OptimizerStepMetrics:
 
     @staticmethod
     def _maybe_running_max(store: dict, key: str, candidate: torch.Tensor) -> None:
-        c = candidate.detach().item()
-        if not math.isfinite(c):
-            return
-        OptimizerStepMetrics._running_max_update(store, key, candidate)
+        masked = OptimizerStepMetrics._mask_nonfinite(candidate, float("-inf"))
+        OptimizerStepMetrics._running_max_update(store, key, masked.amax())
 
     @staticmethod
     def _maybe_running_min(store: dict, key: str, candidate: torch.Tensor) -> None:
-        c = candidate.detach().item()
-        if not math.isfinite(c):
-            return
-        OptimizerStepMetrics._running_min_update(store, key, candidate)
+        masked = OptimizerStepMetrics._mask_nonfinite(candidate, float("inf"))
+        OptimizerStepMetrics._running_min_update(store, key, masked.amin())
 
     @staticmethod
     def _mean_per_group(per_group: List[float]) -> float:
         if len(per_group) == 0:
             return 0.0
-        return torch.tensor(per_group, dtype=torch.float64).mean().item()
+        return sum(per_group) / len(per_group)
 
     def _ensure_groups(self, optimizer: torch.optim.Optimizer) -> None:
         n = len(optimizer.param_groups)
@@ -123,10 +144,6 @@ class OptimizerStepMetrics:
                 grad = p.grad
                 grad_rms = self._rms(grad)
 
-                self._maybe_running_max(gs, "rms_max", param_rms)
-                self._maybe_running_min(gs, "rms_min", param_rms)
-                self._maybe_running_max(gs, "grad_rms_max", grad_rms)
-
                 self._before_rows[gi].append(
                     (p, param_rms.detach(), grad_rms.detach(), p.numel())
                 )
@@ -150,6 +167,9 @@ class OptimizerStepMetrics:
         w = torch.tensor(weights, device=ref_device, dtype=ref_dtype)
         pr = torch.stack(pr_values)
         gr = torch.stack(gr_values)
+        self._maybe_running_max(gs, "rms_max", pr)
+        self._maybe_running_min(gs, "rms_min", pr)
+        self._maybe_running_max(gs, "grad_rms_max", gr)
         avg_rms = (torch.sum(pr * w) / (torch.sum(w) + 1e-12)).item()
         avg_gr = (torch.sum(gr * w) / (torch.sum(w) + 1e-12)).item()
         gs["param_rms"] = torch.tensor(avg_rms, dtype=ref_dtype, device=ref_device)
@@ -193,7 +213,6 @@ class OptimizerStepMetrics:
                 if snap.dtype != p_after.dtype:
                     snap = snap.to(dtype=p_after.dtype)
                 update_rms = self._rms(snap - p_after)
-                self._maybe_running_max(gs, "update_rms_max", update_rms)
                 ur_values.append(
                     torch.as_tensor(update_rms, device=ref_device, dtype=ref_dtype).reshape(())
                 )
@@ -203,6 +222,7 @@ class OptimizerStepMetrics:
                 continue
 
             ur = torch.stack(ur_values)
+            self._maybe_running_max(gs, "update_rms_max", ur)
             w = torch.tensor(ur_weights, device=ref_device, dtype=ref_dtype)
             avg_ur = (torch.sum(ur * w) / (torch.sum(w) + 1e-12)).item()
             gs["update_rms"] = torch.tensor(avg_ur, dtype=ref_dtype, device=ref_device)
@@ -249,18 +269,24 @@ class OptimizerStepMetrics:
             name = gs.get("name")
             if name is None or "rms_max" not in gs:
                 continue
-            out[name] = self._scalar_item(gs, "rms_max", 0.0)
+            value = self._stored_float(gs, "rms_max")
+            if value is None or not math.isfinite(value):
+                continue
+            out[name] = value
         return out
 
     def get_min_rms(self) -> float:
-        per_group = [
-            self._scalar_item(gs, "rms_min", 0.0)
-            for gs in self._groups
-            if "rms_min" in gs
-        ]
+        per_group = []
+        for gs in self._groups:
+            if "rms_min" not in gs:
+                continue
+            value = self._stored_float(gs, "rms_min")
+            if value is None or not math.isfinite(value):
+                continue
+            per_group.append(value)
         if len(per_group) == 0:
             return 0.0
-        return torch.tensor(per_group, dtype=torch.float64).min().item()
+        return min(per_group)
 
     def get_mean_update_rms(self) -> float:
         return self._mean_per_group(self.get_update_rms())

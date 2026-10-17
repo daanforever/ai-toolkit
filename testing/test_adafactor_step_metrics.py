@@ -191,11 +191,10 @@ def _count_step_syncs(
 
 
 def test_step_host_syncs_are_four_items_per_parameter():
-    """Exactly four per-parameter host syncs, all Tensor.item, and no tensor __bool__.
+    """No per-parameter Tensor.item or tensor __bool__ inside the step.
 
-    Remaining .item() calls inside the parameter loop:
-    parameter RMS, gradient RMS, preconditioned update RMS, beta2 signal RMS.
-    Group reductions are removed by subtracting the 1-parameter count from the
+    Metric scalars are read once per group after the parameter loop. Group
+    reductions are removed by subtracting the 1-parameter count from the
     4-parameter count. The bound is the measured count with no slack.
     """
     configs = (
@@ -209,7 +208,7 @@ def test_step_host_syncs_are_four_items_per_parameter():
         four = _count_step_syncs(4, **cfg)
         per_item = (four[0] - one[0]) / 3
         per_bool = (four[1] - one[1]) / 3
-        assert per_item == 4
+        assert per_item == 0
         assert per_bool == 0
 
 
@@ -223,18 +222,14 @@ def test_step_host_syncs_by_relative_step_and_weight_decay_mode(
 ):
     """Per-parameter host syncs for relative_step and every weight-decay mode.
 
-    Remaining .item() calls inside the parameter loop: parameter RMS, gradient
-    RMS, preconditioned update RMS, beta2 signal RMS, and effective_wd when
-    weight_decay_mode is update_rms. relative_step adds none. No tensor __bool__.
-
-    Baseline before this change (weight_decay=0.1): relative_step=False was
-    4 items (5 items and 1 bool for update_rms); relative_step=True was 5 items
-    (6 for absolute and for update_rms, and update_rms also had 1 bool).
+    The parameter loop does not call Tensor.item. Tensor effective_wd
+    (param_rms and update_rms) is included in the same per-group host read.
+    relative_step adds none. No tensor __bool__.
 
     Group reductions are removed by subtracting the 1-parameter count from the
     4-parameter count. The bound is the measured count with no slack.
     """
-    expected_items = 5 if weight_decay_mode == "update_rms" else 4
+    expected_items = 0
     one = _count_step_syncs(
         1,
         weight_decay=0.1,

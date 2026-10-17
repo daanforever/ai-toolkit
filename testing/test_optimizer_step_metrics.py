@@ -87,3 +87,43 @@ def test_optimizer_step_metrics_running_max_decays():
     metrics.after_step(opt)
     # decayed previous max should dominate tiny new grad
     assert metrics.get_mean_grad_rms_max() == pytest.approx(first_grad_max * 0.5)
+
+
+def test_nonfinite_candidate_leaves_finite_running_extrema():
+    p = nn.Parameter(torch.ones(4, 4))
+    opt = torch.optim.SGD([{"params": [p], "name": "layer0"}], lr=0.1)
+    metrics = OptimizerStepMetrics(rms_max_decay_rate=0.5)
+    p.grad = torch.ones_like(p)
+    metrics.before_step(opt)
+    opt.step()
+    metrics.after_step(opt)
+    finite_grad_max = metrics.get_mean_grad_rms_max()
+    finite_min = metrics.get_min_rms()
+    finite_named_max = metrics.get_max_rms()["layer0"]
+    finite_update_max = metrics.get_mean_update_rms_max()
+
+    with torch.no_grad():
+        p.copy_(torch.full_like(p, float("nan")))
+    p.grad = torch.full_like(p, float("nan"))
+    metrics.before_step(opt)
+    opt.step()
+    metrics.after_step(opt)
+
+    assert metrics.get_mean_grad_rms_max() == pytest.approx(finite_grad_max * 0.5)
+    assert metrics.get_min_rms() == pytest.approx(finite_min / 0.5)
+    assert metrics.get_max_rms()["layer0"] == pytest.approx(finite_named_max * 0.5)
+    assert metrics.get_mean_update_rms_max() == pytest.approx(finite_update_max * 0.5)
+
+
+def test_first_nonfinite_candidate_reads_as_missing():
+    p = nn.Parameter(torch.full((4,), float("nan")))
+    opt = torch.optim.SGD([{"params": [p], "name": "bad"}], lr=0.0)
+    metrics = OptimizerStepMetrics()
+    p.grad = torch.full_like(p, float("inf"))
+    metrics.before_step(opt)
+    opt.step()
+    metrics.after_step(opt)
+    assert metrics.get_max_rms() == {}
+    assert metrics.get_min_rms() == 0.0
+    assert metrics.get_mean_grad_rms_max() == 0.0
+    assert metrics.get_mean_update_rms_max() == 0.0

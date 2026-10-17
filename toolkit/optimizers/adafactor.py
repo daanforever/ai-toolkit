@@ -1040,24 +1040,37 @@ class Adafactor(torch.optim.Optimizer):
         """Bound applied update RMS when parameter scaling is enabled.
 
         ``update_rms <= max_relative_update * max(eps[1], param_rms)``.
-        The returned update is a new tensor when the cap binds, so a momentum
-        buffer aliased by ``update`` is not rescaled in place. Weight decay is
-        applied by the caller to the returned RMS.
+        When ``scale_parameter`` is true the returned update is a new tensor,
+        so a momentum buffer aliased by ``update`` is not rescaled in place.
+        A non-finite parameter RMS falls back to ``eps[1]``. A non-finite
+        update RMS, a zero update RMS, or an update already within the cap
+        keeps scale 1. Weight decay is applied by the caller to the returned RMS.
         """
         if not group["scale_parameter"]:
             return update, update_rms
 
-        eps1 = float(group["eps"][1])
-        param_rms = float(param_rms)
-        if not math.isfinite(param_rms):
-            param_rms = eps1
-        cap = float(group["max_relative_update"]) * max(eps1, param_rms)
+        if not isinstance(update_rms, torch.Tensor):
+            update_rms = update.new_tensor(float(update_rms))
+        else:
+            update_rms = update_rms.detach().to(
+                device=update.device, dtype=update.dtype
+            ).reshape(())
+        if not isinstance(param_rms, torch.Tensor):
+            param_rms = update.new_tensor(float(param_rms))
+        else:
+            param_rms = param_rms.detach().to(
+                device=update.device, dtype=update.dtype
+            ).reshape(())
 
-        rms = float(update_rms)
-        if not math.isfinite(rms) or rms <= cap:
-            return update, update_rms
-
-        scale = cap / rms
+        eps1 = update.new_tensor(float(group["eps"][1]))
+        max_rel = float(group["max_relative_update"])
+        param_for_cap = torch.where(torch.isfinite(param_rms), param_rms, eps1)
+        cap = max_rel * torch.maximum(eps1, param_for_cap)
+        ones = torch.ones((), device=update.device, dtype=update.dtype)
+        safe_denom = torch.where(update_rms > 0, update_rms, ones)
+        raw_scale = cap / safe_denom
+        leave_unscaled = (~torch.isfinite(update_rms)) | (update_rms <= cap) | (update_rms == 0)
+        scale = torch.where(leave_unscaled, ones, raw_scale)
         return update * scale, update_rms * scale
 
     def _update_beta1_from_dynamic_gain(self, group, global_mean_dynamic_gain: Optional[float]) -> None:
@@ -1119,6 +1132,69 @@ class Adafactor(torch.optim.Optimizer):
             return 0.0
         return max(0.0, min(float(effective_wd), max_wd))
 
+    @staticmethod
+    def _reduce_python_scalars(values, weights, reduction, empty):
+        """Weighted mean or max of Python floats. ``empty`` is returned when ``values`` is empty."""
+        if not values:
+            return empty
+        if reduction == "max":
+            return max(values)
+        total = 0.0
+        weight_sum = 0
+        for value, weight in zip(values, weights):
+            total += value * weight
+            weight_sum += weight
+        return total / (weight_sum + 1e-12)
+
+    def _collect_keyed_state(self, params, state_key: str):
+        """Split state values into Python floats or tensors. Mixed types are an error."""
+        numbers = []
+        tensors = []
+        weights = []
+        device = None
+        saw_number = False
+        saw_tensor = False
+        for param in params:
+            if param not in self.state or state_key not in self.state[param]:
+                continue
+            value = self.state[param][state_key]
+            if isinstance(value, torch.Tensor):
+                if saw_number:
+                    raise TypeError(
+                        f"state[{state_key!r}] mixes Python floats and tensors"
+                    )
+                saw_tensor = True
+                value_tensor = torch.as_tensor(value, device=param.device, dtype=param.dtype)
+                if device is None:
+                    device = value_tensor.device
+                tensors.append(value_tensor.to(device))
+            elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                if saw_tensor:
+                    raise TypeError(
+                        f"state[{state_key!r}] mixes Python floats and tensors"
+                    )
+                saw_number = True
+                numbers.append(float(value))
+            else:
+                raise TypeError(
+                    f"state[{state_key!r}] has unsupported type {type(value).__name__}"
+                )
+            weights.append(param.numel())
+        return numbers, tensors, weights, device
+
+    def _reduce_collected_state(self, numbers, tensors, weights, device, reduction, empty):
+        if numbers:
+            return self._reduce_python_scalars(numbers, weights, reduction, empty)
+        if not tensors:
+            return empty
+        stacked = torch.stack(tensors)
+        if reduction == "max":
+            return stacked.max().item()
+        weight_tensor = torch.tensor(weights, device=device, dtype=stacked.dtype)
+        weighted_sum = torch.sum(stacked * weight_tensor)
+        total_weight = torch.sum(weight_tensor)
+        return (weighted_sum / (total_weight + 1e-12)).item()
+
     def _get_group_scalars(
         self,
         group,
@@ -1128,66 +1204,35 @@ class Adafactor(torch.optim.Optimizer):
         params: Optional[Iterable[torch.nn.Parameter]] = None,
     ):
         """
-        Collect per-parameter scalars from state for a group, reduce in tensor space, return float.
-        Used for unified metric aggregation so get_* use the same path.
+        Collect per-parameter scalars from state for a group and return a float.
+        Python floats are reduced on the host. Tensors keep the stacked device path.
         Only params that have state_key in state are included.
         If ``params`` is given, only those parameters are considered (same reduction pattern).
         Returns ``default`` when no parameters have ``state_key`` in state.
         """
-        values = []
-        weights = []
-        device = None
         param_iter = group["params"] if params is None else params
-        for p in param_iter:
-            if p not in self.state or state_key not in self.state[p]:
-                continue
-            val = self.state[p][state_key]
-            v_t = torch.as_tensor(val, device=p.device, dtype=p.dtype)
-            if device is None:
-                device = v_t.device
-            values.append(v_t.to(device))
-            weights.append(p.numel())
-        if not values:
-            return default
-        v_stacked = torch.stack(values)
-        w_stacked = torch.tensor(weights, device=device, dtype=values[0].dtype)
-        if reduction == 'max':
-            return v_stacked.max().item()
-        weighted_sum = torch.sum(v_stacked * w_stacked)
-        total_weight = torch.sum(w_stacked)
-        return (weighted_sum / (total_weight + 1e-12)).item()
+        numbers, tensors, weights, device = self._collect_keyed_state(param_iter, state_key)
+        return self._reduce_collected_state(
+            numbers, tensors, weights, device, reduction, default
+        )
 
     def _get_global_scalar(self, state_key: str) -> Optional[float]:
         """
         Weighted mean over all groups and parameters for a given scalar state_key.
         Weights are parameter sizes (p.numel()) to mirror _get_group_scalars behavior.
         """
-        values = []
-        weights = []
-        device = None
-        for group in self.param_groups:
-            for p in group["params"]:
-                if p not in self.state or state_key not in self.state[p]:
-                    continue
-                val = self.state[p][state_key]
-                v_t = torch.as_tensor(val, device=p.device, dtype=p.dtype)
-                if device is None:
-                    device = v_t.device
-                values.append(v_t.to(device))
-                weights.append(p.numel())
-        if not values:
-            return None
-        v_stacked = torch.stack(values)
-        w_stacked = torch.tensor(weights, device=device, dtype=values[0].dtype)
-        weighted_sum = torch.sum(v_stacked * w_stacked)
-        total_weight = torch.sum(w_stacked)
-        return (weighted_sum / (total_weight + 1e-12)).item()
+        params = [param for group in self.param_groups for param in group["params"]]
+        numbers, tensors, weights, device = self._collect_keyed_state(params, state_key)
+        reduced = self._reduce_collected_state(
+            numbers, tensors, weights, device, "mean", None
+        )
+        return reduced
 
     def _scalars_per_group_to_mean(self, per_group_list: List[float]) -> float:
-        """Arithmetic mean over groups for get_mean_*; uses torch.mean()."""
+        """Arithmetic mean over groups for get_mean_*."""
         if len(per_group_list) == 0:
             return 0.0
-        return torch.tensor(per_group_list, dtype=torch.float64).mean().item()
+        return sum(per_group_list) / len(per_group_list)
 
     @staticmethod
     def _group_scalar_item(group, key: str, default: float = 0.0) -> float:
@@ -1283,6 +1328,49 @@ class Adafactor(torch.optim.Optimizer):
                     param.grad = param._accum_grad
                     del param._accum_grad
 
+    def _commit_deferred_param_scalars(self, deferred: list) -> None:
+        """Write per-parameter metric floats from one stacked host read."""
+        if not deferred:
+            return
+        reference = deferred[0]["rms"]
+        rows = []
+        for row in deferred:
+            weight_decay = row["effective_wd"]
+            if weight_decay is None:
+                weight_decay = reference.new_zeros(())
+            rows.append(
+                torch.stack(
+                    (
+                        row["rms"].reshape(()).to(device=reference.device, dtype=torch.float32),
+                        row["grad_rms"].reshape(()).to(device=reference.device, dtype=torch.float32),
+                        row["hat_rms"].reshape(()).to(device=reference.device, dtype=torch.float32),
+                        row["signal_rms"].reshape(()).to(device=reference.device, dtype=torch.float32),
+                        weight_decay.reshape(()).to(device=reference.device, dtype=torch.float32),
+                    )
+                )
+            )
+        host_rows = torch.stack(rows).detach().cpu().tolist()
+        for row, values in zip(deferred, host_rows):
+            rms_val = float(values[0])
+            grad_rms = float(values[1])
+            hat_rms = float(values[2])
+            signal_rms = float(values[3])
+            state = row["state"]
+            eps0 = row["eps0"]
+            lr = row["lr"]
+            state["RMS"] = rms_val
+            if grad_rms >= eps0:
+                scaled_rms = hat_rms * lr
+                state["precond_gain"] = hat_rms / (grad_rms + eps0)
+                state["effective_lr"] = scaled_rms / (grad_rms + eps0)
+                state["momentum_gain"] = scaled_rms / (signal_rms + eps0)
+            else:
+                state.pop("effective_lr", None)
+                state.pop("precond_gain", None)
+                state.pop("momentum_gain", None)
+            if row["has_tensor_wd"]:
+                state["effective_wd"] = float(values[4])
+
     # adafactor manages its own lr
     def get_learning_rates(self):
         """
@@ -1319,6 +1407,7 @@ class Adafactor(torch.optim.Optimizer):
                 group["rms_min"] = group["rms_min"] / decay_rate
 
             metrics: List[Tuple[torch.nn.Parameter, torch.Tensor, float]] = []
+            deferred: list = []
 
             for p in group["params"]:
                 if p.grad is None or not p.requires_grad:
@@ -1384,16 +1473,10 @@ class Adafactor(torch.optim.Optimizer):
                 if p.dtype != torch.float32:
                     p_data_fp32 = p_data_fp32.float()
 
+                self._maybe_finite_or_eps_inplace(p_data_fp32, eps1)
                 rms_t = self._rms(p_data_fp32)
-                rms_val = rms_t.item()
-                if not math.isfinite(rms_val):
-                    self._maybe_finite_or_eps_inplace(p_data_fp32, eps1)
-                    rms_t = self._rms(p_data_fp32)
-                    rms_val = rms_t.item()
-                state["RMS"] = rms_val
-                if math.isfinite(rms_val):
-                    self._group_running_max_update(group, "rms_max", rms_t)
-                    self._group_running_min_update(group, "rms_min", rms_t)
+                self._group_running_max_update(group, "rms_max", rms_t)
+                self._group_running_min_update(group, "rms_min", rms_t)
 
                 state["grad_rms"] = self._rms(grad)
                 gr = state["grad_rms"]
@@ -1474,22 +1557,13 @@ class Adafactor(torch.optim.Optimizer):
 
                 update_rms = self._rms(update)
                 update, update_rms = self._cap_relative_update(
-                    update, update_rms, rms_val, group
+                    update, update_rms, rms_t, group
                 )
+                hat_rms_t = self._rms(update_hat).detach()
+                signal_rms_t = torch.sqrt(signal_sq.detach() + 1e-12)
 
-                gr_val = gr.detach().item()
-                if gr_val >= eps0:
-                    hat_rms = self._rms(update_hat).detach().item()
-                    scaled_rms = hat_rms * lr
-                    signal_rms = torch.sqrt(signal_sq + 1e-12).detach().item()
-                    state["precond_gain"] = hat_rms / (gr_val + eps0)
-                    state["effective_lr"] = scaled_rms / (gr_val + eps0)
-                    state["momentum_gain"] = scaled_rms / (signal_rms + eps0)
-                else:
-                    state.pop("effective_lr", None)
-                    state.pop("precond_gain", None)
-                    state.pop("momentum_gain", None)
-
+                has_tensor_wd = False
+                wd_tensor = None
                 if group["weight_decay"] != 0 and not group.get("is_magnitude", False):
                     wd = group["weight_decay"]
                     weight_decay_mode = self._validate_weight_decay_mode(
@@ -1504,7 +1578,7 @@ class Adafactor(torch.optim.Optimizer):
                     elif weight_decay_mode == "param_rms":
                         # Intentionally no `lr` here: this mode is RMS-conditioned shrinkage by design.
                         # For param_rms mode under the same defaults and RMS~1, (1 - wd * rms) ~= 0.9999 (>0).
-                        effective_wd = self._clamp_effective_wd(wd * rms_val)
+                        effective_wd = self._clamp_effective_wd(wd * rms_t)
                         p_data_fp32.mul_(1.0 - effective_wd)
                     elif weight_decay_mode == "constant":
                         effective_wd = self._clamp_effective_wd(wd)
@@ -1517,7 +1591,8 @@ class Adafactor(torch.optim.Optimizer):
                         effective_wd = self._clamp_effective_wd(wd * wd_lr)
                         p_data_fp32.mul_(1.0 - effective_wd)
                     if isinstance(effective_wd, torch.Tensor):
-                        state["effective_wd"] = effective_wd.detach().item()
+                        has_tensor_wd = True
+                        wd_tensor = effective_wd.detach()
                     else:
                         state["effective_wd"] = float(effective_wd)
                 else:
@@ -1543,7 +1618,21 @@ class Adafactor(torch.optim.Optimizer):
                         float(lr),
                     )
                 )
+                deferred.append(
+                    {
+                        "state": state,
+                        "rms": rms_t.detach(),
+                        "grad_rms": gr.detach(),
+                        "hat_rms": hat_rms_t,
+                        "signal_rms": signal_rms_t,
+                        "effective_wd": wd_tensor,
+                        "has_tensor_wd": has_tensor_wd,
+                        "eps0": float(eps0),
+                        "lr": float(lr),
+                    }
+                )
 
+            self._commit_deferred_param_scalars(deferred)
             group["weight_decay"] = max(
                 0.0,
                 min(1.0, group.get("weight_decay", 0.0) + group.get("weight_decay_increment", 0.0)),

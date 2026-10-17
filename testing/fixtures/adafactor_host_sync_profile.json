@@ -1,0 +1,56 @@
+{
+  "before": [
+    {
+      "device": "cpu",
+      "n_params": 32,
+      "step_seconds": [
+        0.013387875002081273,
+        0.013419581999187358,
+        0.0134748970012879
+      ],
+      "mean_step_seconds": 0.01342745133418551,
+      "python_item_calls_including_getters": 281,
+      "profiler_item_in_optimizer": null,
+      "profiler_scalar_htod_in_group_scalars": null
+    },
+    {
+      "device": "cuda",
+      "n_params": 64,
+      "step_seconds": [
+        0.10354102200290072,
+        0.10329832500065095,
+        0.10365884499697131
+      ],
+      "mean_step_seconds": 0.10349939733350766,
+      "python_item_calls_including_getters": 537,
+      "profiler_item_in_optimizer": 0,
+      "profiler_scalar_htod_in_group_scalars": 0
+    }
+  ],
+  "after": [
+    {
+      "device": "cpu",
+      "n_params": 32,
+      "step_seconds": [
+        0.012691418000031263,
+        0.01264881400129525,
+        0.012626045998331392
+      ],
+      "mean_step_seconds": 0.012655425999885969,
+      "python_item_calls_including_getters": 19,
+      "per_parameter_item_calls": 0.0
+    },
+    {
+      "device": "cuda",
+      "n_params": 64,
+      "step_seconds": [
+        0.0945863239976461,
+        0.09035331300037797,
+        0.08843337600046652
+      ],
+      "mean_step_seconds": 0.09112433766616353,
+      "python_item_calls_including_getters": 19,
+      "per_parameter_item_calls": 0.0
+    }
+  ]
+}
