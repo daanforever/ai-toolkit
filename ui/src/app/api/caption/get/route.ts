@@ -5,7 +5,7 @@ import path from 'path';
 import { getDatasetsRoot } from '@/server/settings';
 
 export async function POST(request: NextRequest) {
-  
+
   const body = await request.json();
   const { imgPath } = body;
   console.log('Received POST request for caption:', imgPath);
@@ -29,16 +29,18 @@ export async function POST(request: NextRequest) {
     }
 
     // Check if file exists
+    const textHeaders = { 'Content-Type': 'text/plain; charset=utf-8' };
+
     if (!fs.existsSync(captionPath)) {
       // send back blank string if caption file does not exist
-      return new NextResponse('');
+      return new NextResponse('', { headers: textHeaders });
     }
 
     // Read caption file
     const caption = fs.readFileSync(captionPath, 'utf-8');
 
     // Return caption
-    return new NextResponse(caption);
+    return new NextResponse(caption, { headers: textHeaders });
   } catch (error) {
     console.error('Error getting caption:', error);
     return new NextResponse('Error getting caption', { status: 500 });

@@ -2,7 +2,7 @@ import React, { useRef, useEffect, useState, ReactNode, KeyboardEvent, MouseEven
 import { FaTrashAlt, FaEye, FaEyeSlash } from 'react-icons/fa';
 import { openConfirm } from './ConfirmModal';
 import classNames from 'classnames';
-import { apiClient } from '@/utils/api';
+import { apiClient, fetchCaption as loadCaption } from '@/utils/api';
 import AudioPlayer from './AudioPlayer';
 import { isVideo, isAudio } from '@/utils/basic';
 
@@ -37,17 +37,11 @@ const DatasetImageCard: React.FC<DatasetImageCardProps> = ({
   const fetchCaption = async () => {
     if (isGettingCaption.current || isCaptionLoaded) return;
     isGettingCaption.current = true;
-    apiClient
-      .post(`/api/caption/get`, { imgPath: imageUrl })
-      .then(res => res.data)
-      .then(data => {
-        console.log('Caption fetched:', data);
-        if (data) {
-          // fix issue where caption could be non string
-          data = `${data}`;
-        }
-        setCaption(data || '');
-        setSavedCaption(data || '');
+    loadCaption(imageUrl)
+      .then(text => {
+        console.log('Caption fetched:', text);
+        setCaption(text);
+        setSavedCaption(text.trim());
         setIsCaptionLoaded(true);
       })
       .catch(error => {

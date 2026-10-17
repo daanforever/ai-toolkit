@@ -5,7 +5,7 @@ import { createPortal } from 'react-dom';
 import { Dialog, DialogBackdrop, DialogPanel } from '@headlessui/react';
 import { ChevronLeft, ChevronRight, X } from 'lucide-react';
 import classNames from 'classnames';
-import { apiClient } from '@/utils/api';
+import { apiClient, fetchCaption } from '@/utils/api';
 import { isAudio, isVideo } from '@/utils/basic';
 import AgentChatPanel from '@/components/AgentChatPanel';
 
@@ -80,14 +80,11 @@ export default function DatasetImageViewer({ imgPath, images, onChange, onCaptio
     if (!imgPath || isAudio(imgPath)) return;
 
     let cancelled = false;
-    apiClient
-      .post('/api/caption/get', { imgPath })
-      .then(res => res.data)
-      .then(data => {
+    fetchCaption(imgPath)
+      .then(text => {
         if (cancelled) return;
-        const text = data ? `${data}` : '';
         setCaption(text);
-        setSavedCaption(text);
+        setSavedCaption(text.trim());
         setIsCaptionLoaded(true);
       })
       .catch(error => {

@@ -19,6 +19,11 @@ export function clearUnauthorized(status: number | undefined): void {
 
 export const apiClient = axios.create();
 
+export async function fetchCaption(imgPath: string): Promise<string> {
+  const res = await apiClient.post<string>('/api/caption/get', { imgPath }, { responseType: 'text' });
+  return typeof res.data === 'string' ? res.data : '';
+}
+
 // Add a request interceptor to add token from localStorage
 apiClient.interceptors.request.use(config => {
   const headers = authHeaders();
