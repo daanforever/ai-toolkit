@@ -1,7 +1,7 @@
 'use client';
 
 import { FormEvent, KeyboardEvent, MouseEvent, useEffect, useRef, useState } from 'react';
-import { Send, Square } from 'lucide-react';
+import { Send, Square, Trash } from 'lucide-react';
 import { authHeaders, clearUnauthorized } from '@/utils/api';
 import { AgentChatDisplayTurn, AgentChatRequest, AgentChatStreamEvent } from '@/types/agentChat';
 import { Checkbox } from '@/components/formInputs';
@@ -9,6 +9,7 @@ import MarkdownText from '@/components/MarkdownText';
 import { usePersistedBoolean } from '@/hooks/usePersistedBoolean';
 
 const AGENT_REASONING_KEY = 'AI_TOOLKIT_AGENT_REASONING';
+const AGENT_CHAT_KEY_PREFIX = 'AI_TOOLKIT_AGENT_CHAT:';
 
 interface Props {
   imgPath: string | null;
@@ -155,6 +156,123 @@ function captionNotice(typed: string, reflected: string, loaded: string): string
   return `${notice}\n\n${typed}`;
 }
 
+interface StoredChat {
+  turns: AgentChatDisplayTurn[];
+  attachment: AttachmentSnapshot;
+  reflectedCaption: string;
+}
+
+interface InitialChat {
+  turns: AgentChatDisplayTurn[];
+  attachment: AttachmentSnapshot | null;
+  reflectedCaption: string | null;
+}
+
+function chatStorageKey(imgPath: string): string {
+  return `${AGENT_CHAT_KEY_PREFIX}${imgPath}`;
+}
+
+function emptyChat(): InitialChat {
+  return { turns: [], attachment: null, reflectedCaption: null };
+}
+
+function normalizeTurn(value: unknown, role: 'user' | 'assistant'): AgentChatDisplayTurn | null {
+  if (!isRecord(value) || value.role !== role || typeof value.content !== 'string' || value.content.trim() === '') {
+    return null;
+  }
+  const turn: AgentChatDisplayTurn = { role, content: value.content };
+  if (!('reasoning' in value)) return turn;
+  if (typeof value.reasoning !== 'string' || value.reasoning.trim() === '') return null;
+  turn.reasoning = value.reasoning;
+  return turn;
+}
+
+function normalizeTurns(value: unknown): AgentChatDisplayTurn[] | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  const turns: AgentChatDisplayTurn[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const turn = normalizeTurn(value[index], index % 2 === 0 ? 'user' : 'assistant');
+    if (!turn) return null;
+    turns.push(turn);
+  }
+  if (turns[turns.length - 1]?.role !== 'assistant') return null;
+  return turns;
+}
+
+function normalizeAttachment(value: unknown, imgPath: string): AttachmentSnapshot | null {
+  if (!isRecord(value)) return null;
+  const attachment: AttachmentSnapshot = {};
+  if ('imgPath' in value) {
+    if (value.imgPath !== imgPath) return null;
+    attachment.imgPath = imgPath;
+  }
+  if ('caption' in value) {
+    if (typeof value.caption !== 'string' || value.caption.trim() === '') return null;
+    attachment.caption = value.caption;
+  }
+  return attachment;
+}
+
+function normalizeStoredChat(value: unknown, imgPath: string): StoredChat | null {
+  if (!isRecord(value) || typeof value.reflectedCaption !== 'string') return null;
+  const turns = normalizeTurns(value.turns);
+  const attachment = normalizeAttachment(value.attachment, imgPath);
+  if (!turns || !attachment) return null;
+  return { turns, attachment, reflectedCaption: value.reflectedCaption };
+}
+
+function parseStoredChat(raw: string, imgPath: string): StoredChat | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch (error) {
+    console.error('Failed to read chat history:', error);
+    return null;
+  }
+  const record = normalizeStoredChat(value, imgPath);
+  if (!record) {
+    console.error('Failed to read chat history:', value);
+    return null;
+  }
+  return record;
+}
+
+function readStoredChat(imgPath: string | null): InitialChat {
+  if (!imgPath || typeof window === 'undefined') return emptyChat();
+  let raw: string | null;
+  try {
+    raw = localStorage.getItem(chatStorageKey(imgPath));
+  } catch (error) {
+    console.error('Failed to read chat history:', error);
+    return emptyChat();
+  }
+  if (raw === null) return emptyChat();
+  const record = parseStoredChat(raw, imgPath);
+  if (!record) {
+    removeStoredChat(imgPath);
+    return emptyChat();
+  }
+  return record;
+}
+
+function writeStoredChat(imgPath: string | null, record: StoredChat): void {
+  if (!imgPath) return;
+  try {
+    localStorage.setItem(chatStorageKey(imgPath), JSON.stringify(record));
+  } catch (error) {
+    console.error('Failed to write chat history:', error);
+  }
+}
+
+function removeStoredChat(imgPath: string | null): void {
+  if (!imgPath) return;
+  try {
+    localStorage.removeItem(chatStorageKey(imgPath));
+  } catch (error) {
+    console.error('Failed to remove chat history:', error);
+  }
+}
+
 function ThinkingBlock({ reasoning, expanded = false }: { reasoning: string; expanded?: boolean }) {
   const body = (
     <>
@@ -175,10 +293,11 @@ function ThinkingBlock({ reasoning, expanded = false }: { reasoning: string; exp
 export default function AgentChatPanel({ imgPath, caption }: Props) {
   const [draft, setDraft] = useState('');
   const [reasoning, setReasoning] = usePersistedBoolean(AGENT_REASONING_KEY, true);
-  const [turns, setTurns] = useState<AgentChatDisplayTurn[]>([]);
+  const [storedChat] = useState(() => readStoredChat(imgPath));
+  const [turns, setTurns] = useState(storedChat.turns);
   const [streaming, setStreaming] = useState<StreamPartial | null>(null);
-  const [attachment, setAttachment] = useState<AttachmentSnapshot | null>(null);
-  const [reflectedCaption, setReflectedCaption] = useState<string | null>(null);
+  const [attachment, setAttachment] = useState(storedChat.attachment);
+  const [reflectedCaption, setReflectedCaption] = useState(storedChat.reflectedCaption);
   const [error, setError] = useState('');
   const [isSending, setIsSending] = useState(false);
   const sendingRef = useRef(false);
@@ -227,6 +346,23 @@ export default function AgentChatPanel({ imgPath, caption }: Props) {
     pending.controller.abort();
     rollback(pending);
     if (mountedRef.current) setIsSending(false);
+  };
+
+  const clearChat = () => {
+    const pending = pendingRef.current;
+    if (pending) {
+      pendingRef.current = null;
+      sendingRef.current = false;
+      pending.controller.abort();
+    }
+    removeStoredChat(imgPath);
+    if (!mountedRef.current) return;
+    setTurns([]);
+    setAttachment(null);
+    setReflectedCaption(null);
+    setStreaming(null);
+    setError('');
+    setIsSending(false);
   };
 
   const send = async () => {
@@ -310,10 +446,24 @@ export default function AgentChatPanel({ imgPath, caption }: Props) {
 
       const assistantTurn: AgentChatDisplayTurn = { role: 'assistant', content: outcome.content };
       if (outcome.reasoning.trim()) assistantTurn.reasoning = outcome.reasoning;
+      const completedTurns = [...nextTurns, assistantTurn];
+      const nextReflectedCaption = isOpening
+        ? (snapshot.caption ?? '')
+        : loadedCaption !== null
+          ? loadedCaption
+          : reflectedCaption;
       setStreaming(null);
-      setTurns([...nextTurns, assistantTurn]);
-      if (isOpening) setReflectedCaption(snapshot.caption ?? '');
-      else if (loadedCaption !== null) setReflectedCaption(loadedCaption);
+      setTurns(completedTurns);
+      if (nextReflectedCaption === null) {
+        console.error('Failed to write chat history: missing reflected caption');
+      } else {
+        setReflectedCaption(nextReflectedCaption);
+        writeStoredChat(imgPath, {
+          turns: completedTurns,
+          attachment: snapshot,
+          reflectedCaption: nextReflectedCaption,
+        });
+      }
     } catch (requestError) {
       if (!isCurrent()) return;
       if (!signal.aborted) console.error('Agent chat request failed:', requestError);
@@ -334,6 +484,11 @@ export default function AgentChatPanel({ imgPath, caption }: Props) {
     event.preventDefault();
     if (sendingRef.current) cancel();
     else void send();
+  };
+
+  const onClearClick = (event: MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    clearChat();
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -385,15 +540,27 @@ export default function AgentChatPanel({ imgPath, caption }: Props) {
           />
           <div className="flex items-center justify-between px-2 pb-1">
             <Checkbox label="Reasoning" checked={reasoning} onChange={setReasoning} />
-            <button
-              type="button"
-              disabled={!isSending && !canSend}
-              aria-label={isSending ? 'Cancel' : 'Send'}
-              onClick={onButtonClick}
-              className="rounded-md p-1 text-gray-400 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              {isSending ? <Square className="h-4 w-4" /> : <Send className="h-4 w-4" />}
-            </button>
+            <div className="flex items-center gap-1">
+              {turns.length > 0 ? (
+                <button
+                  type="button"
+                  aria-label="Clear chat"
+                  onClick={onClearClick}
+                  className="rounded-md p-1 text-gray-400"
+                >
+                  <Trash className="h-4 w-4" />
+                </button>
+              ) : null}
+              <button
+                type="button"
+                disabled={!isSending && !canSend}
+                aria-label={isSending ? 'Cancel' : 'Send'}
+                onClick={onButtonClick}
+                className="rounded-md p-1 text-gray-400 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {isSending ? <Square className="h-4 w-4" /> : <Send className="h-4 w-4" />}
+              </button>
+            </div>
           </div>
         </div>
       </form>
