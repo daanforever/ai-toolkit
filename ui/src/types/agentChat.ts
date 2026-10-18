@@ -17,4 +17,5 @@ export interface AgentChatRequest {
 export type AgentChatStreamEvent =
   | { type: 'reasoning'; delta: string }
   | { type: 'content'; delta: string }
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string }
+  | { type: 'edit'; caption: string };

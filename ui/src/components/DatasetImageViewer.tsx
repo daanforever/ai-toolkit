@@ -5,9 +5,11 @@ import { createPortal } from 'react-dom';
 import { Dialog, DialogBackdrop, DialogPanel } from '@headlessui/react';
 import { ChevronLeft, ChevronRight, X } from 'lucide-react';
 import classNames from 'classnames';
-import { apiClient, fetchCaption } from '@/utils/api';
+import { fetchCaption } from '@/utils/api';
 import { isAudio, isVideo } from '@/utils/basic';
 import AgentChatPanel from '@/components/AgentChatPanel';
+import { useCaptionEdit } from '@/hooks/useCaptionEdit';
+import { persistCaption } from '@/utils/persistCaption';
 
 export interface CaptionSync {
   imgPath: string;
@@ -39,6 +41,15 @@ export default function DatasetImageViewer({ imgPath, images, onChange, onCaptio
   const [savedCaption, setSavedCaption] = useState('');
   const [isCaptionLoaded, setIsCaptionLoaded] = useState(false);
   const activePathRef = useRef<string | null>(imgPath);
+  const captionEdit = useCaptionEdit({
+    imgPath,
+    caption,
+    savedCaption,
+    isCaptionLoaded,
+    setCaption,
+    setSavedCaption,
+    onCaptionSaved,
+  });
 
   useEffect(() => setMounted(true), []);
 
@@ -100,8 +111,7 @@ export default function DatasetImageViewer({ imgPath, images, onChange, onCaptio
     const path = imgPath;
     const trimmedCaption = caption.trim();
     if (trimmedCaption === savedCaption) return;
-    apiClient
-      .post('/api/img/caption', { imgPath: path, caption: trimmedCaption })
+    persistCaption(path, trimmedCaption)
       .then(() => {
         if (activePathRef.current === path) {
           setSavedCaption(trimmedCaption);
@@ -256,7 +266,13 @@ export default function DatasetImageViewer({ imgPath, images, onChange, onCaptio
             </div>
             <div className="relative hidden w-80 shrink-0 self-stretch md:block">
               <div className="absolute inset-0">
-                <AgentChatPanel key={imgPath ?? ''} imgPath={imgPath} caption={isCaptionLoaded ? caption : null} />
+                <AgentChatPanel
+                  key={imgPath ?? ''}
+                  imgPath={imgPath}
+                  caption={isCaptionLoaded ? caption : null}
+                  onCaptionEdit={captionEdit.applyEdit}
+                  captionUndo={captionEdit.undoAvailable ? { undo: captionEdit.undo } : null}
+                />
               </div>
             </div>
           </DialogPanel>

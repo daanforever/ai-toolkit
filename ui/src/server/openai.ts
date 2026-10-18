@@ -7,7 +7,19 @@ export interface ChatMessage {
   content: string | ContentPart[];
 }
 
-export type ChatStreamEvent = { type: 'reasoning'; delta: string } | { type: 'content'; delta: string };
+export type ChatStreamEvent =
+  | { type: 'reasoning'; delta: string }
+  | { type: 'content'; delta: string }
+  | { type: 'tool_call'; index: number; id?: string; name?: string; arguments: string };
+
+export interface ChatTool {
+  type: 'function';
+  function: {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+  };
+}
 
 export class OpenAIRequestError extends Error {
   readonly status: number;
@@ -203,10 +215,47 @@ function deltasFromPayload(payload: string): ChatStreamEvent[] {
   const reasoning = delta.reasoning_content ?? delta.reasoning;
   if (typeof reasoning === 'string' && reasoning) events.push({ type: 'reasoning', delta: reasoning });
   if (typeof delta.content === 'string' && delta.content) events.push({ type: 'content', delta: delta.content });
+  events.push(...toolCallEvents(delta));
   return events;
 }
 
-function takeEvents(buffer: string): { events: ChatStreamEvent[]; rest: string; done: boolean } {
+function invalidToolCall(value: unknown): never {
+  console.error('OpenAI chat completion returned an invalid tool call:', value);
+  throw new OpenAIRequestError(502, 'Invalid tool call');
+}
+
+function toolCallEvents(delta: Record<string, unknown>): ChatStreamEvent[] {
+  if (!('tool_calls' in delta)) return [];
+  const raw = delta.tool_calls;
+  if (!Array.isArray(raw)) invalidToolCall(raw);
+
+  const events: ChatStreamEvent[] = [];
+  for (const item of raw) {
+    if (!isRecord(item) || typeof item.index !== 'number' || !Number.isInteger(item.index) || item.index < 0) {
+      invalidToolCall(item);
+    }
+    let name: string | undefined;
+    let args = '';
+    if ('function' in item && item.function !== undefined) {
+      if (!isRecord(item.function)) invalidToolCall(item);
+      if ('name' in item.function && item.function.name !== undefined) {
+        if (typeof item.function.name !== 'string' || item.function.name === '') invalidToolCall(item);
+        name = item.function.name;
+      }
+      if ('arguments' in item.function && item.function.arguments !== undefined) {
+        if (typeof item.function.arguments !== 'string') invalidToolCall(item);
+        args = item.function.arguments;
+      }
+    }
+    const event: ChatStreamEvent = { type: 'tool_call', index: item.index, arguments: args };
+    if (typeof item.id === 'string' && item.id) event.id = item.id;
+    if (name) event.name = name;
+    events.push(event);
+  }
+  return events;
+}
+
+export function takeChatStreamEvents(buffer: string): { events: ChatStreamEvent[]; rest: string; done: boolean } {
   const events: ChatStreamEvent[] = [];
   let rest = buffer;
   while (true) {
@@ -276,13 +325,13 @@ async function* readChatStream(
       if (chunk === null) break;
       idle.reset();
       buffer += decoder.decode(chunk, { stream: true });
-      const taken = takeEvents(buffer);
+      const taken = takeChatStreamEvents(buffer);
       buffer = taken.rest;
       for (const event of taken.events) yield event;
       if (taken.done) return;
     }
     buffer += decoder.decode();
-    const taken = takeEvents(buffer);
+    const taken = takeChatStreamEvents(buffer);
     for (const event of taken.events) yield event;
     if (taken.done) return;
     const tail = flushTail(taken.rest);
@@ -297,6 +346,7 @@ export async function streamChatCompletion(
   messages: ChatMessage[],
   signal: AbortSignal,
   reasoning = true,
+  tools?: ChatTool[],
 ): Promise<AsyncIterable<ChatStreamEvent>> {
   const apiUrl = await requireBaseUrl();
   const model = await resolveModel(signal);
@@ -318,6 +368,7 @@ export async function streamChatCompletion(
             chat_template_kwargs: { enable_thinking: false },
             reasoning_effort: 'none',
           }),
+        ...(tools && tools.length > 0 ? { tools } : {}),
       }),
       signal: AbortSignal.any([signal, idle.signal]),
     });

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { EDIT_TOOL, CollectedChatEvent, collectEditCalls } from '@/server/agentTools';
 import { AgentChatRequestError, buildChatMessages, parseAgentChatRequest } from '@/server/agentChat';
-import { ChatStreamEvent, OpenAIRequestAborted, OpenAIRequestError, streamChatCompletion } from '@/server/openai';
+import { OpenAIRequestAborted, OpenAIRequestError, streamChatCompletion } from '@/server/openai';
 import { AgentChatStreamEvent } from '@/types/agentChat';
 
 const encoder = new TextEncoder();
@@ -13,7 +14,7 @@ function encodeNdjsonLine(event: AgentChatStreamEvent): Uint8Array {
 // the client disconnects. After those headers, failures are NDJSON error events
 // and the stream closes. A disconnect after headers closes the stream with no
 // error event and aborts the upstream read.
-function streamNdjson(events: AsyncIterable<ChatStreamEvent>, signal: AbortSignal, cancelUpstream: () => void): Response {
+function streamNdjson(events: AsyncIterable<CollectedChatEvent>, signal: AbortSignal, cancelUpstream: () => void): Response {
   let closed = false;
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -84,8 +85,13 @@ export async function POST(request: NextRequest) {
     if (!parsed) {
       return NextResponse.json({ error: 'Invalid messages' }, { status: 400 });
     }
-    const events = await streamChatCompletion(await buildChatMessages(parsed), signal, parsed.reasoning ?? true);
-    return streamNdjson(events, signal, () => cancelUpstream.abort());
+    const events = await streamChatCompletion(
+      await buildChatMessages(parsed),
+      signal,
+      parsed.reasoning ?? true,
+      parsed.imgPath ? [EDIT_TOOL] : undefined,
+    );
+    return streamNdjson(collectEditCalls(events), signal, () => cancelUpstream.abort());
   } catch (error) {
     if (error instanceof OpenAIRequestAborted) {
       return new NextResponse(null, { status: 499 });
