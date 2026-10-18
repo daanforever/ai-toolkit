@@ -7,7 +7,7 @@ export const EDIT_TOOL: ChatTool = {
   function: {
     name: EDIT_TOOL_NAME,
     description:
-      'Replace the caption of the current image with the full new caption. Use only when the user asks to change, rewrite, or write the caption.',
+      'Replace the caption of the current image with the full new caption. Do not call edit unless the user explicitly asks to change, rewrite, or write the caption.',
     parameters: {
       type: 'object',
       properties: {

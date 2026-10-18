@@ -155,7 +155,12 @@ describe('POST /api/agent/chat tools', () => {
     expect(body.tools).toEqual([
       expect.objectContaining({
         type: 'function',
-        function: expect.objectContaining({ name: 'edit' }),
+        function: expect.objectContaining({
+          name: 'edit',
+          description: expect.stringContaining(
+            'Do not call edit unless the user explicitly asks to change, rewrite, or write the caption.',
+          ),
+        }),
       }),
     ]);
     expect(body.reasoning_effort).toBe('none');
