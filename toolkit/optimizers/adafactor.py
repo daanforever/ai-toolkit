@@ -172,6 +172,7 @@ class Adafactor(torch.optim.Optimizer):
     """
 
     _WEIGHT_DECAY_MODES = ("update_rms", "param_rms", "absolute", "constant")
+    _DIRECTION_EMA_SAMPLE = 1024
 
     def __init__(
         self,
@@ -752,6 +753,7 @@ class Adafactor(torch.optim.Optimizer):
                     state.pop("exp_avg", None)
 
                 self._ensure_second_moment_state(state, factored, p.shape, ref)
+                self._migrate_direction_ema(state, p)
 
     def enable_parameter_swapping(self, parameter_swapping_factor=0.1):
         self.do_parameter_swapping = True
@@ -1318,6 +1320,76 @@ class Adafactor(torch.optim.Optimizer):
         c_factor = exp_avg_sq_col.unsqueeze(-2).rsqrt()
         return torch.mul(r_factor, c_factor)
 
+    @staticmethod
+    def _direction_sample_length(numel: int) -> int:
+        """Coordinates kept for ``dir_consistency``. The whole vector when it is already small."""
+        numel = int(numel)
+        if numel <= Adafactor._DIRECTION_EMA_SAMPLE:
+            return numel
+        return Adafactor._DIRECTION_EMA_SAMPLE
+
+    @staticmethod
+    def _direction_sample_seed(group_index: int, param_index: int, numel: int) -> int:
+        """Stable sample seed. Group order and shape only; not ``id`` or ``data_ptr``."""
+        return (
+            int(group_index) * 1_000_003 + int(param_index) * 1_009 + int(numel)
+        ) & 0x7FFFFFFF
+
+    def _direction_generator(self, device: torch.device) -> torch.Generator:
+        generators = getattr(self, "_direction_generators", None)
+        if generators is None:
+            generators = {}
+            self._direction_generators = generators
+        key = str(device)
+        generator = generators.get(key)
+        if generator is None:
+            generator = torch.Generator(device=device)
+            generators[key] = generator
+        return generator
+
+    def _direction_indices(self, numel: int, device: torch.device, group_index: int, param_index: int):
+        """Device-local sample coordinates, or ``None`` when the whole vector is used.
+
+        Indices are drawn on ``device``. A CPU index must not index a CUDA update.
+        """
+        sample_len = self._direction_sample_length(numel)
+        if numel <= sample_len:
+            return None
+        generator = self._direction_generator(device)
+        generator.manual_seed(self._direction_sample_seed(group_index, param_index, numel))
+        return torch.randint(0, numel, (sample_len,), device=device, generator=generator)
+
+    def _direction_ema(self, state, sample_len: int, device: torch.device):
+        """fp32 direction sketch. A different length is dropped, not cast in place."""
+        buf = state.get("beta2_direction_ema")
+        if (
+            isinstance(buf, torch.Tensor)
+            and buf.ndim == 1
+            and buf.numel() == sample_len
+            and buf.dtype == torch.float32
+            and buf.device == device
+        ):
+            return buf
+        if isinstance(buf, torch.Tensor) and buf.numel() == sample_len:
+            buf = buf.detach().reshape(-1).to(device=device, dtype=torch.float32)
+        else:
+            buf = torch.zeros(sample_len, device=device, dtype=torch.float32)
+        state["beta2_direction_ema"] = buf
+        return buf
+
+    def _migrate_direction_ema(self, state, param) -> None:
+        """Drop a full-size checkpoint buffer. Keep a sketch and restore it to fp32."""
+        expected = self._direction_sample_length(param.numel())
+        buf = state.get("beta2_direction_ema")
+        if not isinstance(buf, torch.Tensor) or buf.numel() != expected:
+            state.pop("beta2_direction_ema", None)
+            return
+        if buf.ndim == 1 and buf.dtype == torch.float32 and buf.device == param.device:
+            return
+        state["beta2_direction_ema"] = buf.detach().reshape(-1).to(
+            device=param.device, dtype=torch.float32
+        )
+
     def step_hook(self):
         if not self.is_stochastic_rounding_accumulation:
             return
@@ -1399,7 +1471,7 @@ class Adafactor(torch.optim.Optimizer):
 
         self._global_lr()
 
-        for group in self.param_groups:
+        for group_index, group in enumerate(self.param_groups):
             decay_rate = group["rms_max_decay_rate"]
             if "rms_max" in group:
                 group["rms_max"] = group["rms_max"] * decay_rate
@@ -1409,7 +1481,7 @@ class Adafactor(torch.optim.Optimizer):
             metrics: List[Tuple[torch.nn.Parameter, torch.Tensor, float]] = []
             deferred: list = []
 
-            for p in group["params"]:
+            for param_index, p in enumerate(group["params"]):
                 if p.grad is None or not p.requires_grad:
                     continue
 
@@ -1509,20 +1581,20 @@ class Adafactor(torch.optim.Optimizer):
                     (self._rms(update) / group["clip_threshold"]).clamp_(min=1.0))
                 self._maybe_finite_or_eps_inplace(update_hat, eps0)
 
-                if (
-                    "beta2_direction_ema" not in state
-                    or state["beta2_direction_ema"].shape != grad.shape
-                ):
-                    state["beta2_direction_ema"] = torch.zeros_like(grad)
-                else:
-                    state["beta2_direction_ema"] = state["beta2_direction_ema"].to(grad)
-
-                # Directional Consistency on beta2-preconditioned trajectory (before LR).
-                beta2_direction_ema = state["beta2_direction_ema"]
-                state["dir_consistency"] = torch.nn.functional.cosine_similarity(
-                    update_hat.flatten(), beta2_direction_ema.flatten(), dim=0, eps=1e-8
+                # Directional consistency on a fixed coordinate sample. The sketch
+                # is a metric only; the weight update does not read it.
+                flat = update_hat.reshape(-1)
+                if not flat.is_contiguous():
+                    flat = flat.contiguous()
+                indices = self._direction_indices(
+                    flat.numel(), flat.device, group_index, param_index
                 )
-                beta2_direction_ema.mul_(beta2t).add_(update_hat, alpha=(1.0 - beta2t))
+                sample = flat if indices is None else flat.index_select(0, indices)
+                direction_ema = self._direction_ema(state, sample.numel(), sample.device)
+                state["dir_consistency"] = torch.nn.functional.cosine_similarity(
+                    sample, direction_ema, dim=0, eps=1e-8
+                )
+                direction_ema.mul_(beta2t).add_(sample, alpha=(1.0 - beta2t))
 
                 lr = self._get_lr(group)
                 scaled_update = update_hat.mul(lr)

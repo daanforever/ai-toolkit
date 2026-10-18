@@ -476,6 +476,7 @@ def test_bf16_cuda_stochastic_rounding_uses_copy_stochastic(monkeypatch):
 
     def _spy(target, source, eps=None):
         calls["n"] += 1
+        assert target is p
         orig_copy(target, source, eps)
 
     monkeypatch.setattr("toolkit.optimizers.adafactor.copy_stochastic", _spy)
@@ -488,6 +489,7 @@ def test_bf16_cuda_stochastic_rounding_uses_copy_stochastic(monkeypatch):
     p.grad = torch.ones_like(p)
     opt.step()
     assert calls["n"] == 1
+    assert opt.state[p]["beta2_direction_ema"].dtype == torch.float32
     assert p.dtype == torch.bfloat16
 
 
@@ -509,6 +511,7 @@ def test_low_precision_cpu_writeback_uses_unaliased_fp32_copy(dtype, monkeypatch
 
     def _update_spy(target, result_float):
         calls["update"] += 1
+        assert target is p
         _assert_fp32_copy_not_aliased(target, result_float, before)
         orig_update(target, result_float)
 
@@ -529,6 +532,7 @@ def test_low_precision_cpu_writeback_uses_unaliased_fp32_copy(dtype, monkeypatch
     grad_ptr = grad.data_ptr()
     opt.step()
     assert calls == {"update": 1, "copy": 0}
+    assert opt.state[p]["beta2_direction_ema"].dtype == torch.float32
     assert p.dtype == dtype
     assert not torch.equal(p.detach(), before)
     assert p.grad.data_ptr() == grad_ptr
@@ -561,6 +565,7 @@ def test_fp32_param_updates_in_place_without_writeback(monkeypatch):
     grad_ptr = grad.data_ptr()
     opt.step()
     assert calls == {"update": 0, "copy": 0}
+    assert opt.state[p]["beta2_direction_ema"].dtype == torch.float32
     assert p.dtype == torch.float32
     assert not torch.equal(p.detach(), before)
     assert p.grad.data_ptr() == grad_ptr
@@ -612,6 +617,7 @@ def test_quantized_param_writeback_uses_unaliased_fp32_copy(monkeypatch):
     p.grad = torch.ones_like(before)
     opt.step()
     assert calls == {"update": 1, "copy": 0}
+    assert opt.state[p]["beta2_direction_ema"].dtype == torch.float32
     assert isinstance(p, QBytesTensor)
     assert not torch.equal(p.dequantize().detach(), before)
 
@@ -629,6 +635,7 @@ def test_low_precision_cuda_writeback_uses_unaliased_fp32_copy(dtype, monkeypatc
 
     def _copy_spy(target, source, eps=None):
         calls["copy"] += 1
+        assert target is p
         _assert_fp32_copy_not_aliased(target, source, before)
         orig_copy(target, source, eps)
 
@@ -646,6 +653,7 @@ def test_low_precision_cuda_writeback_uses_unaliased_fp32_copy(dtype, monkeypatc
     p.grad = torch.ones_like(p)
     opt.step()
     assert calls == {"update": 0, "copy": 1}
+    assert opt.state[p]["beta2_direction_ema"].dtype == torch.float32
     assert p.dtype == dtype
     assert not torch.equal(p.detach(), before)
 
