@@ -209,19 +209,22 @@ export interface CheckboxProps {
   disabled?: boolean;
   docKey?: string | null;
   doc?: ConfigDoc | null;
+  ariaLabel?: string;
+  title?: string;
 }
 
 export const Checkbox = (props: CheckboxProps) => {
-  const { label, checked, onChange, required, disabled } = props;
+  const { label, checked, onChange, required, disabled, ariaLabel, title } = props;
   let { doc } = props;
   if (!doc && props.docKey) {
     doc = getDoc(props.docKey);
   }
 
   const id = React.useId();
+  const toggleName = ariaLabel ?? (typeof label === 'string' ? label : '');
 
   return (
-    <div className={classNames('flex items-center gap-3', props.className)}>
+    <div className={classNames('flex items-center gap-3', props.className)} title={title}>
       <button
         type="button"
         role="switch"
@@ -236,7 +239,7 @@ export const Checkbox = (props: CheckboxProps) => {
           disabled ? 'opacity-50 cursor-not-allowed' : 'hover:bg-opacity-80',
         )}
       >
-        <span className="sr-only">Toggle {label}</span>
+        <span className="sr-only">Toggle {toggleName}</span>
         <span
           className={classNames(
             'pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out',

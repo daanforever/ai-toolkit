@@ -1,7 +1,7 @@
 'use client';
 
 import { FormEvent, KeyboardEvent, MouseEvent, useEffect, useRef, useState } from 'react';
-import { Send, Square, Trash } from 'lucide-react';
+import { Brain, Send, Square, Trash, Wrench } from 'lucide-react';
 import { authHeaders, clearUnauthorized } from '@/utils/api';
 import { AgentChatDisplayTurn, AgentChatRequest } from '@/types/agentChat';
 import { Checkbox } from '@/components/formInputs';
@@ -12,6 +12,7 @@ import { assistantTurnContent, parseAgentChatStreamLine } from '@/utils/agentCha
 import { CaptionEditResult } from '@/utils/captionEdit';
 
 const AGENT_REASONING_KEY = 'AI_TOOLKIT_AGENT_REASONING';
+const AGENT_TOOLS_KEY = 'AI_TOOLKIT_AGENT_TOOLS';
 const AGENT_CHAT_KEY_PREFIX = 'AI_TOOLKIT_AGENT_CHAT:';
 
 interface Props {
@@ -280,7 +281,8 @@ function ThinkingBlock({ reasoning, expanded = false }: { reasoning: string; exp
 
 export default function AgentChatPanel({ imgPath, caption, onCaptionEdit, captionUndo }: Props) {
   const [draft, setDraft] = useState('');
-  const [reasoning, setReasoning] = usePersistedBoolean(AGENT_REASONING_KEY, true);
+  const [reasoning, setReasoning] = usePersistedBoolean(AGENT_REASONING_KEY, false);
+  const [tools, setTools] = usePersistedBoolean(AGENT_TOOLS_KEY, false);
   const [storedChat] = useState(() => readStoredChat(imgPath));
   const [turns, setTurns] = useState(storedChat.turns);
   const [streaming, setStreaming] = useState<StreamPartial | null>(null);
@@ -390,6 +392,7 @@ export default function AgentChatPanel({ imgPath, caption, onCaptionEdit, captio
       const body: AgentChatRequest = {
         messages: nextTurns.map(({ role, content: turnContent }) => ({ role, content: turnContent })),
         reasoning,
+        tools,
       };
       if (snapshot.imgPath) body.imgPath = snapshot.imgPath;
       if (snapshot.caption) body.caption = snapshot.caption;
@@ -554,7 +557,22 @@ export default function AgentChatPanel({ imgPath, caption, onCaptionEdit, captio
             className="w-full resize-none bg-transparent px-3 pt-2 text-sm text-gray-200 outline-none"
           />
           <div className="flex items-center justify-between px-2 pb-1">
-            <Checkbox label="Reasoning" checked={reasoning} onChange={setReasoning} />
+            <div className="flex items-center gap-3">
+              <Checkbox
+                ariaLabel="Reasoning"
+                title="Reasoning"
+                label={<Brain aria-hidden className="h-4 w-4" />}
+                checked={reasoning}
+                onChange={setReasoning}
+              />
+              <Checkbox
+                ariaLabel="Tools"
+                title="Tools"
+                label={<Wrench aria-hidden className="h-4 w-4" />}
+                checked={tools}
+                onChange={setTools}
+              />
+            </div>
             <div className="flex items-center gap-1">
               {turns.length > 0 ? (
                 <button

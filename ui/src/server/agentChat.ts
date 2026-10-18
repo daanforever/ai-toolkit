@@ -30,6 +30,7 @@ export interface ParsedAgentChatRequest {
   imgPath?: string;
   caption?: string;
   reasoning?: boolean;
+  tools?: boolean;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -77,6 +78,9 @@ export function parseAgentChatRequest(value: unknown): ParsedAgentChatRequest | 
   if ('reasoning' in value && value.reasoning !== undefined && typeof value.reasoning !== 'boolean') {
     throw new AgentChatRequestError(400, 'Invalid reasoning');
   }
+  if ('tools' in value && value.tools !== undefined && typeof value.tools !== 'boolean') {
+    throw new AgentChatRequestError(400, 'Invalid tools');
+  }
 
   const messages = parseMessages(value.messages);
   if (!messages) return null;
@@ -84,11 +88,13 @@ export function parseAgentChatRequest(value: unknown): ParsedAgentChatRequest | 
   const imgPath = typeof value.imgPath === 'string' ? value.imgPath.trim() : '';
   const caption = typeof value.caption === 'string' ? value.caption : undefined;
   const reasoning = typeof value.reasoning === 'boolean' ? value.reasoning : undefined;
+  const tools = typeof value.tools === 'boolean' ? value.tools : undefined;
   return {
     messages,
     ...(imgPath ? { imgPath } : {}),
     ...(caption !== undefined ? { caption } : {}),
     ...(reasoning !== undefined ? { reasoning } : {}),
+    ...(tools !== undefined ? { tools } : {}),
   };
 }
 

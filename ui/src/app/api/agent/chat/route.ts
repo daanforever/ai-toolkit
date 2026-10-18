@@ -89,7 +89,7 @@ export async function POST(request: NextRequest) {
       await buildChatMessages(parsed),
       signal,
       parsed.reasoning ?? true,
-      parsed.imgPath ? [EDIT_TOOL] : undefined,
+      parsed.tools === true && parsed.imgPath ? [EDIT_TOOL] : undefined,
     );
     return streamNdjson(collectEditCalls(events), signal, () => cancelUpstream.abort());
   } catch (error) {

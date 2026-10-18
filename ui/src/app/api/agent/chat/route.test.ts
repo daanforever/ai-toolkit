@@ -131,7 +131,7 @@ describe('POST /api/agent/chat tools', () => {
     expect(body.stream).toBe(true);
   });
 
-  it('sends the edit tool only when an image is open', async () => {
+  it('sends the edit tool when tools is on and an image is open', async () => {
     const server = await start(res => {
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
       res.end(
@@ -148,6 +148,7 @@ describe('POST /api/agent/chat tools', () => {
         imgPath: imagePath,
         caption: 'dog',
         reasoning: false,
+        tools: true,
       }),
     );
     expect(await ndjson(response)).toEqual([{ type: 'edit', caption: 'brown dog' }]);
@@ -167,6 +168,39 @@ describe('POST /api/agent/chat tools', () => {
     expect(body.chat_template_kwargs).toEqual({ enable_thinking: false });
   });
 
+  it('omits tools when the flag is off or missing, even with an image', async () => {
+    const server = await start(res => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.end(`${sseChunk({ content: 'ok' })}data: [DONE]\n\n`);
+    });
+    const off = await POST(
+      chatRequest({ messages: [{ role: 'user', content: 'hi' }], imgPath: imagePath, tools: false }),
+    );
+    const omitted = await POST(chatRequest({ messages: [{ role: 'user', content: 'hi' }], imgPath: imagePath }));
+    expect(off.status).toBe(200);
+    expect(omitted.status).toBe(200);
+    const bodies = chatBodies(server);
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0].tools).toBeUndefined();
+    expect(bodies[1].tools).toBeUndefined();
+  });
+
+  it('omits tools when no image is open even if tools is on', async () => {
+    const server = await start(res => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.end(`${sseChunk({ content: 'ok' })}data: [DONE]\n\n`);
+    });
+    const response = await POST(chatRequest({ messages: [{ role: 'user', content: 'hi' }], tools: true }));
+    expect(response.status).toBe(200);
+    expect(chatBodies(server)[0].tools).toBeUndefined();
+  });
+
+  it('rejects a non-boolean tools flag', async () => {
+    const response = await POST(chatRequest({ messages: [{ role: 'user', content: 'hi' }], tools: 'x' }));
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: 'Invalid tools' });
+  });
+
   it('relays text and then the edit', async () => {
     await start(res => {
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
@@ -179,7 +213,7 @@ describe('POST /api/agent/chat tools', () => {
       );
     });
     const response = await POST(
-      chatRequest({ messages: [{ role: 'user', content: 'rewrite' }], imgPath: imagePath }),
+      chatRequest({ messages: [{ role: 'user', content: 'rewrite' }], imgPath: imagePath, tools: true }),
     );
     expect(await ndjson(response)).toEqual([
       { type: 'content', delta: 'Updated.' },
@@ -197,22 +231,23 @@ describe('POST /api/agent/chat tools', () => {
       );
     });
     const response = await POST(
-      chatRequest({ messages: [{ role: 'user', content: 'rewrite' }], imgPath: imagePath }),
+      chatRequest({ messages: [{ role: 'user', content: 'rewrite' }], imgPath: imagePath, tools: true }),
     );
     expect(response.status).toBe(200);
     expect(await ndjson(response)).toEqual([{ type: 'error', message: 'Invalid tool arguments' }]);
   });
 
   it('returns the upstream error when the server rejects tools', async () => {
-    await start(res => {
+    const server = await start(res => {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: { message: 'tools not supported' } }));
     });
     const response = await POST(
-      chatRequest({ messages: [{ role: 'user', content: 'rewrite' }], imgPath: imagePath }),
+      chatRequest({ messages: [{ role: 'user', content: 'rewrite' }], imgPath: imagePath, tools: true }),
     );
     expect(response.status).toBe(502);
     expect(await response.json()).toEqual({ error: 'tools not supported' });
+    expect(chatBodies(server)[0].tools).toEqual([expect.objectContaining({ type: 'function' })]);
   });
 
   it('does not emit an edit when the client aborts mid tool call', async () => {
@@ -231,7 +266,7 @@ describe('POST /api/agent/chat tools', () => {
     });
     const controller = new AbortController();
     const pending = POST(
-      chatRequest({ messages: [{ role: 'user', content: 'rewrite' }], imgPath: imagePath }, controller.signal),
+      chatRequest({ messages: [{ role: 'user', content: 'rewrite' }], imgPath: imagePath, tools: true }, controller.signal),
     );
     await opened;
     controller.abort();
