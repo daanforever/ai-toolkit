@@ -39,6 +39,18 @@ class OptimizerStepMetrics:
         return tensor.norm(2) / (tensor.numel() ** 0.5)
 
     @staticmethod
+    def _visible_grad(param: torch.nn.Parameter) -> Optional[torch.Tensor]:
+        """Grad the optimizer will apply.
+
+        Stochastic accumulation parks the grad on ``_accum_grad`` and clears
+        ``param.grad`` until ``step()`` restores it.
+        """
+        grad = param.grad
+        if grad is not None:
+            return grad
+        return getattr(param, "_accum_grad", None)
+
+    @staticmethod
     def _stored_float(store: dict, key: str) -> Optional[float]:
         t = store.get(key)
         if t is None:
@@ -135,13 +147,13 @@ class OptimizerStepMetrics:
                 gs["grad_rms_max"] = gs["grad_rms_max"] * dr
 
             for p in group["params"]:
-                if p.grad is None or not p.requires_grad:
+                grad = self._visible_grad(p)
+                if grad is None or not p.requires_grad:
                     continue
                 snapshot = p.data.detach().clone()
                 self._snapshots[id(p)] = snapshot
 
                 param_rms = self._rms(snapshot)
-                grad = p.grad
                 grad_rms = self._rms(grad)
 
                 self._before_rows[gi].append(

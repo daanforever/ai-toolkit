@@ -1,4 +1,6 @@
 """OptimizerStepMetrics: generic metrics outside Adafactor / HFAdafactor."""
+import math
+
 import pytest
 import torch
 import torch.nn as nn
@@ -113,6 +115,89 @@ def test_nonfinite_candidate_leaves_finite_running_extrema():
     assert metrics.get_min_rms() == pytest.approx(finite_min / 0.5)
     assert metrics.get_max_rms()["layer0"] == pytest.approx(finite_named_max * 0.5)
     assert metrics.get_mean_update_rms_max() == pytest.approx(finite_update_max * 0.5)
+
+
+def _backward_twice(param: nn.Parameter) -> None:
+    for _ in range(2):
+        inputs = torch.randn(4, param.shape[0], dtype=param.dtype, device=param.device)
+        (inputs @ param).pow(2).mean().backward()
+
+
+def _assert_positive_finite(*values: float) -> None:
+    for value in values:
+        assert math.isfinite(value)
+        assert value > 0.0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="stochastic rounding requires CUDA")
+def test_step_metrics_see_stochastically_accumulated_grad():
+    param = nn.Parameter(torch.randn(8, 16, dtype=torch.bfloat16, device="cuda") * 0.02)
+    opt = Adafactor(
+        [param],
+        lr=1e-3,
+        beta1=None,
+        scale_parameter=False,
+        relative_step=False,
+        warmup_init=False,
+        stochastic_accumulation=True,
+    )
+    metrics = OptimizerStepMetrics()
+    _backward_twice(param)
+    assert param.grad is None
+    assert param._accum_grad is not None
+    before = param.detach().clone()
+    metrics.before_step(opt)
+    assert param._accum_grad is not None
+    opt.step()
+    metrics.after_step(opt)
+    assert not hasattr(param, "_accum_grad")
+    assert not torch.equal(param.detach(), before)
+    _assert_positive_finite(
+        metrics.get_mean_grad_rms(),
+        metrics.get_mean_grad_rms_max(),
+        metrics.get_mean_rms(),
+        metrics.get_mean_update_rms(),
+        metrics.get_mean_update_rms_max(),
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="stochastic rounding requires CUDA")
+def test_step_metrics_with_visible_bf16_grad():
+    param = nn.Parameter(torch.randn(8, 16, dtype=torch.bfloat16, device="cuda") * 0.02)
+    opt = Adafactor(
+        [param],
+        lr=1e-3,
+        beta1=None,
+        scale_parameter=False,
+        relative_step=False,
+        warmup_init=False,
+        stochastic_accumulation=False,
+    )
+    metrics = OptimizerStepMetrics()
+    _backward_twice(param)
+    assert param.grad is not None
+    metrics.before_step(opt)
+    opt.step()
+    metrics.after_step(opt)
+    _assert_positive_finite(
+        metrics.get_mean_grad_rms(),
+        metrics.get_mean_grad_rms_max(),
+        metrics.get_mean_rms(),
+        metrics.get_mean_update_rms(),
+        metrics.get_mean_update_rms_max(),
+    )
+
+
+def test_before_step_reads_accum_grad_rms():
+    param = nn.Parameter(torch.full((4, 4), 0.02))
+    accum = torch.full_like(param, 0.1)
+    param._accum_grad = accum.clone()
+    opt = torch.optim.SGD([param], lr=0.0)
+    metrics = OptimizerStepMetrics()
+    metrics.before_step(opt)
+    expected = OptimizerStepMetrics._rms(accum).item()
+    assert metrics.get_mean_grad_rms() == pytest.approx(expected)
+    assert metrics.get_mean_rms() > 0.0
 
 
 def test_first_nonfinite_candidate_reads_as_missing():
