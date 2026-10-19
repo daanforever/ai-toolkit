@@ -11,10 +11,11 @@ import { redirect } from 'next/navigation';
 import JobActionBar from '@/components/JobActionBar';
 import JobConfigViewer from '@/components/JobConfigViewer';
 import JobLossGraph from '@/components/JobLossGraph';
+import JobHeatmapGraph from '@/components/JobHeatmapGraph';
 import JobRuntimeConfig from '@/components/JobRuntimeConfig';
 import { Job } from '@prisma/client';
 
-type PageKey = 'overview' | 'samples' | 'runtime' | 'config' | 'loss_log';
+type PageKey = 'overview' | 'samples' | 'runtime' | 'config' | 'loss_log' | 'heatmap';
 
 interface Page {
   name: string;
@@ -48,6 +49,12 @@ const pages: Page[] = [
     name: 'Loss Graph',
     value: 'loss_log',
     component: JobLossGraph,
+    mainCss: 'pt-24',
+  },
+  {
+    name: 'Heatmap Graph',
+    value: 'heatmap',
+    component: JobHeatmapGraph,
     mainCss: 'pt-24',
   },
   {
