@@ -21,6 +21,8 @@ config:
         lokr_full_rank: false
         lokr_factor: -1
         network_kwargs:
+          # Percent to shrink LoRA A each optimizer step. 0 disables. Omitted means 1.
+          stable_lora_shrink: 1
           ignore_if_contains:
             - "noise_refiner"
             - "context_refiner"

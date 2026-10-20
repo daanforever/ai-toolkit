@@ -4,6 +4,14 @@ from toolkit.extension import Extension
 from toolkit.print import print_acc
 from extensions_built_in.sd_trainer.DiffusionTrainer import DiffusionTrainer
 from .model import _disable_network_merge_in
+from .stable_lora import (
+    apply_shrink,
+    format_setup_log,
+    format_stable_log,
+    setup_stable_lora,
+    should_check,
+    shrink_percent_from_configs,
+)
 
 
 def _read_use_diffsynth_training_loop_from_config(config) -> bool:
@@ -282,6 +290,37 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
             sd.apply_turbo_teacher_mode(enabled)
             self.network = sd.network
         self.train_config.turbo_teacher_weight = enabled
+
+    def hook_before_optimizer_step(self):
+        """Shrink LoRA A when ``stable_lora_shrink`` is not 0. See ``stable_lora.py``."""
+        super().hook_before_optimizer_step()
+        percent = shrink_percent_from_configs(
+            getattr(self, "network_config", None),
+            getattr(getattr(self, "network", None), "network_config", None),
+        )
+        if percent == 0.0:
+            return
+        network = getattr(self, "network", None)
+        if network is None:
+            return
+        if getattr(self, "_stable_lora_network_id", None) != id(network):
+            setup = setup_stable_lora(network)
+            self._stable_lora_network_id = id(network)
+            self._stable_lora_setup = setup
+            self._stable_lora_step = 0
+            print_acc(format_setup_log(percent, setup))
+        setup = self._stable_lora_setup
+        if setup.skip_reason is not None:
+            return
+        self._stable_lora_step += 1
+        newly = apply_shrink(
+            setup.pairs,
+            percent,
+            check=should_check(self._stable_lora_step),
+        )
+        if newly:
+            stable = sum(1 for pair in setup.pairs if pair.stable)
+            print_acc(format_stable_log(stable, len(setup.pairs)))
 
     def hook_before_train_loop(self):
         """

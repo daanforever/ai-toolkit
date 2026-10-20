@@ -1517,6 +1517,16 @@ class SDTrainer(BaseSDTrainProcess):
     def end_of_training_loop(self):
         pass
 
+    def hook_before_optimizer_step(self):
+        """No-op extension point immediately before ``optimizer.step()``.
+
+        Called after gradient clipping and before step metrics snapshot the
+        parameters, and only on a real optimizer step (not on a gradient
+        accumulation micro-step). The snapshot then matches the weights the
+        optimizer updates.
+        """
+        return None
+
     def predict_noise(
         self,
         noisy_latents: torch.Tensor,
@@ -2468,6 +2478,9 @@ class SDTrainer(BaseSDTrainProcess):
                     self.accelerator.clip_grad_norm_(self.params, self.train_config.max_grad_norm)
             # only step if we are not accumulating
             with self.timer('optimizer_step'):
+                # Shrink (or any other pre-step hook) before the metrics
+                # snapshot so the recorded update is the optimizer delta.
+                self.hook_before_optimizer_step()
                 step_metrics = getattr(self, "_step_metrics", None)
                 if step_metrics is not None:
                     step_metrics.before_step(self.optimizer)

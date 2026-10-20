@@ -149,6 +149,14 @@ train:
       - layers
 ```
 
+## `stable_lora_shrink`
+
+Percent subtracted from LoRA A (`lora_down` / `lora_A`) before each optimizer step. `network.network_kwargs.stable_lora_shrink` (default `1` when the key is omitted, so `A` is multiplied by `0.99`). `0` turns it off. Values outside `[0, 100)` raise `ValueError`.
+
+Shrinkage stops for a pair once `rms(A) <= rms(B)`. B is not modified. The check runs on the first optimizer step and then every 10 steps, so a pair can shrink a few steps past the threshold. The stable flag is not saved. `peft_dora` is skipped. fp32 weights are scaled in place. Any other dtype is scaled in fp32 and written back with stochastic rounding, which requires CUDA.
+
+This default is on for existing configs that do not set the key, and `1` is larger than the paper range (0.05 to 0.5). Set `0` to keep the previous update. Contract and logs: `docs/stable-LoRA/README.md`.
+
 ## Tests
 
 - `test_scheduler_dynamic_shifting.py` — `use_dynamic_shifting` scheduler config and per-resolution timesteps.
@@ -161,3 +169,4 @@ train:
 - `testing/test_pad_to_square.py` — letterbox geometry, validity/loss masks, latent cache keys.
 - `testing/test_gaussian_full.py` — regression with `use_diffsynth_training_loop: false` (toolkit gaussian path).
 - `test_lora_param_groups.py` — LoRA block groups (`layers_N` + `index`; refiners unindexed).
+- `test_stable_lora.py` — Stable-LoRA pairs, fp32/bf16 shrink, stop condition, hook placement.
