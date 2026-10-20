@@ -14,8 +14,8 @@ type MetricHelp = {
 };
 
 const SHARED_HELP = [
-  'This is a snapshot of one saved LoRA file, not a chart over training steps. Each row is a model layer: early layers at the top, later layers at the bottom. Each column is one part of that layer. The name comes from the file.',
-  'When the columns are q, k, and v, they are where the layer looks: what to search for, what to compare, and what to take. out is how that look is written back. w1, w2, and w3 are what the layer does with what it saw.',
+  'This is a snapshot of one saved LoRA file, not a chart over training steps. Each column is a model layer: early layers on the left, later layers on the right. Each row is one part of that layer. The name comes from the file.',
+  'When the rows are q, k, and v, they are where the layer looks: what to search for, what to compare, and what to take. out is how that look is written back. w1, w2, and w3 are what the layer does with what it saw.',
   'Color compares cells only with each other on this map. The brightest cell is the largest value here. The darkest is the smallest. If the whole map is one color, the values are close together: read the numbers on the scale to see whether that shared value is small or large. Brightness is size, not a grade. An empty cell means one of the two adapter halves is still zero, usually at the very start of training, so there is nothing to measure.',
 ];
 
@@ -134,7 +134,7 @@ export default function JobHeatmapGraph({ job }: Props) {
   if (status === 'loading') statusText = 'Loading...';
   else if (status === 'error') statusText = 'Error';
   else if (status === 'success' && data?.available === false) statusText = 'No saved LoRA yet';
-  else if (hasGrid) statusText = `${rows.length} × ${cols.length}`;
+  else if (hasGrid) statusText = `${cols.length} × ${rows.length}`;
 
   return (
     <div className="bg-gray-900 rounded-xl shadow-lg overflow-hidden border border-gray-800 flex flex-col">
@@ -184,22 +184,23 @@ export default function JobHeatmapGraph({ job }: Props) {
             <div className="overflow-auto max-h-[36rem]">
               <div
                 className="inline-grid gap-px"
-                style={{ gridTemplateColumns: `max-content repeat(${cols.length}, 1.5rem)` }}
+                style={{ gridTemplateColumns: `max-content repeat(${rows.length}, 1.5rem)` }}
               >
-                <div />
-                {cols.map(col => (
-                  <div key={col} className="h-40 flex items-end justify-center" title={col}>
-                    <span className="max-h-40 overflow-hidden text-[10px] leading-none text-gray-400 [writing-mode:vertical-rl] rotate-180">
-                      {col}
+                <div className="sticky left-0 z-10 bg-gray-950" />
+                {rows.map(layer => (
+                  <div key={layer} className="flex items-end justify-center" title={layer}>
+                    <span className="whitespace-nowrap text-[10px] leading-none text-gray-400 [writing-mode:vertical-rl] rotate-180">
+                      {layer}
                     </span>
                   </div>
                 ))}
-                {rows.map((row, rowIndex) => (
-                  <Row
-                    key={row}
-                    row={row}
-                    cols={cols}
-                    values={matrix[rowIndex] ?? []}
+                {cols.map((typeName, typeIndex) => (
+                  <TypeRow
+                    key={typeName}
+                    typeName={typeName}
+                    typeIndex={typeIndex}
+                    layers={rows}
+                    matrix={matrix}
                     range={range}
                     onTip={setTip}
                   />
@@ -285,30 +286,34 @@ function HeatmapHelp({ metricId }: { metricId: string }) {
   );
 }
 
-function Row({
-  row,
-  cols,
-  values,
+function TypeRow({
+  typeName,
+  typeIndex,
+  layers,
+  matrix,
   range,
   onTip,
 }: {
-  row: string;
-  cols: string[];
-  values: (number | null)[];
+  typeName: string;
+  typeIndex: number;
+  layers: string[];
+  matrix: (number | null)[][];
   range: { min: number; max: number } | null;
   onTip: (tip: { text: string; x: number; y: number } | null) => void;
 }) {
   return (
     <>
-      <div className="text-[11px] text-gray-400 pr-2 flex items-center whitespace-nowrap">{row}</div>
-      {cols.map((col, index) => {
-        const value = values[index] ?? null;
+      <div className="sticky left-0 z-10 flex items-center whitespace-nowrap bg-gray-950 pr-2 text-[11px] text-gray-400">
+        {typeName}
+      </div>
+      {layers.map((layer, layerIndex) => {
+        const value = matrix[layerIndex]?.[typeIndex] ?? null;
         const t = value == null || range == null ? 0 : range.max === range.min ? 1 : (value - range.min) / (range.max - range.min);
         const background = value == null ? 'rgba(255,255,255,0.04)' : heatColor(t);
-        const label = value == null ? `${row} · ${col}: n/a` : `${row} · ${col}: ${formatNum(value)}`;
+        const label = value == null ? `${layer} · ${typeName}: n/a` : `${layer} · ${typeName}: ${formatNum(value)}`;
         return (
           <div
-            key={col}
+            key={layer}
             title={label}
             className="h-5 rounded-[2px]"
             style={{
