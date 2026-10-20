@@ -43,7 +43,7 @@ Artifacts (commands, URLs, exact error strings, file paths, sample values) go in
 ### Config
 
 - Key: `network.network_kwargs.stable_lora_shrink`. Read from the trainer `network_config` first, then from `network.network_config`.
-- Absent key means `1` (multiply A by `0.99`). `0` disables the feature: no pairs are built and no weights are written.
+- Absent key means `0.1` (multiply A by `0.999`). `0` disables the feature: no pairs are built and no weights are written.
 - Accepted values are real numbers in `[0, 100)`. `bool` is rejected. Anything else raises `ValueError` with text `stable_lora_shrink must be a number in [0, 100), got {value!r}`.
 
 ### Trainer hook
@@ -68,7 +68,7 @@ Artifacts (commands, URLs, exact error strings, file paths, sample values) go in
 
 ### Limits
 
-- The default `1` percent per step is larger than the paper range 0.05 to 0.5. It is on when the key is omitted, so existing Z-Image LoRA configs change. Set `0` to keep the old update.
+- Shrinkage is on when the key is omitted, so existing Z-Image LoRA configs change. Set `0` to keep the old update.
 - Because the check runs every 10 steps after the first, a pair can be shrunk up to 9 more times after `rms(A)` drops to `rms(B)`.
 - Norms are computed with `torch._foreach_norm` on fp32 copies, in chunks of 8, so one check does not hold every A and B in fp32 at once. The host sync is one boolean transfer per check, not one sync per pair.
 - Shrinkage compounds with optimizer `weight_decay`. Both are multiplicative on A. B is not decayed by this feature.
@@ -83,4 +83,4 @@ Artifacts (commands, URLs, exact error strings, file paths, sample values) go in
 
 - Unit tests are `extensions_built_in/diffusion_models/z_image_diffsynth/test_stable_lora.py`. From the repo root, `venv\Scripts\python.exe -m pytest extensions_built_in/diffusion_models/z_image_diffsynth/test_stable_lora.py -q` reported `25 passed`. That run included the CUDA bf16 case. Without CUDA that case is skipped; fp32 shrink and the stop condition still run on CPU.
 - The same command on `test_lora_param_groups.py`, `test_turbo_teacher.py`, `test_scheduler_dynamic_shifting.py`, `test_snr_weighting.py`, `test_turbo_prior.py`, and `test_diffsynth_training.py` reported `126 passed` and 2 failed. The failures are `test_calculate_loss_applies_timestep_weight_after_snr` and `test_zimage_calculate_loss_does_not_double_apply_timestep_weight`, both `AttributeError: '_Batch' object has no attribute 'get_network_weight_list'` at `SDTrainer.py:810`. That line is outside this change.
-- A short train comparing `stable_lora_shrink: 1` against `0` and against `0.1`, including `peft` and `peft_dora`, was not run with the Z-Image weights.
+- A short train comparing the default `0.1` against `0`, including `peft` and `peft_dora`, was not run with the Z-Image weights.

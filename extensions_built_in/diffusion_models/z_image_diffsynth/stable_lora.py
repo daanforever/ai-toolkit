@@ -43,12 +43,12 @@ def validate_shrink_percent(value) -> float:
 
 
 def shrink_percent_from_configs(*configs) -> float:
-    """Read stable_lora_shrink from the first config that sets it. Default is 1."""
+    """Read stable_lora_shrink from the first config that sets it. Default is 0.1."""
     for config in configs:
         kwargs = getattr(config, "network_kwargs", None) if config is not None else None
         if isinstance(kwargs, dict) and "stable_lora_shrink" in kwargs:
             return validate_shrink_percent(kwargs["stable_lora_shrink"])
-    return 1.0
+    return 0.1
 
 
 def should_check(step: int, interval: int = STABILITY_CHECK_INTERVAL) -> bool:

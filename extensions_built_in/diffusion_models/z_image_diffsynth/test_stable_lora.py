@@ -171,8 +171,8 @@ def test_reject_invalid_percent(value):
         validate_shrink_percent(value)
 
 
-def test_absent_key_defaults_to_one_percent():
-    assert shrink_percent_from_configs(SimpleNamespace(network_kwargs={})) == 1.0
+def test_absent_key_defaults_to_tenth_percent():
+    assert shrink_percent_from_configs(SimpleNamespace(network_kwargs={})) == 0.1
     assert shrink_percent_from_configs(
         SimpleNamespace(network_kwargs={"stable_lora_shrink": 0}),
         SimpleNamespace(network_kwargs={"stable_lora_shrink": 2}),
@@ -207,7 +207,9 @@ def test_trainer_hook_shrinks_until_stable_and_rebuilds_on_new_network():
     trainer.hook_before_optimizer_step()
     trainer.hook_before_optimizer_step()
 
-    assert torch.equal(module.lora_down.weight, torch.full((2, 6), 2.0) * 0.99 * 0.99)
+    factor = 1.0 - shrink_percent_from_configs() / 100.0
+    expected = torch.full((2, 6), 2.0).mul_(factor).mul_(factor)
+    assert torch.equal(module.lora_down.weight, expected)
     assert torch.equal(module.lora_up.weight, up_before)
     assert trainer._stable_lora_step == 2
 
