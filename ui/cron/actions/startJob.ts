@@ -3,6 +3,7 @@ import { Job } from '@prisma/client';
 import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
+import { applySqliteDbPath, loadJobConfigDocument, type JobConfigDocument } from '../loadJobConfig';
 import { TOOLKIT_ROOT, getTrainingFolder, getHFToken, resolveVenvPython } from '../paths';
 const isWindows = process.platform === 'win32';
 
@@ -45,9 +46,24 @@ const startAndWatchJob = (job: Job) => {
       console.error('Error moving log file:', e);
     }
 
-    // update the config dataset path
-    const jobConfig = JSON.parse(job.job_config);
-    jobConfig.config.process[0].sqlite_db_path = path.join(TOOLKIT_ROOT, 'aitk_db.db');
+    // Prefer output/config.yaml. The database copy is only used when that file is absent.
+    let jobConfig: JobConfigDocument;
+    try {
+      jobConfig = loadJobConfigDocument(trainingFolder, job.job_config);
+      applySqliteDbPath(jobConfig, path.join(TOOLKIT_ROOT, 'aitk_db.db'));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('Error loading job config:', error);
+      await prisma.job.update({
+        where: { id: jobID },
+        data: {
+          status: 'error',
+          info: `Error loading job config: ${message}`,
+        },
+      });
+      resolve();
+      return;
+    }
 
     // write the config file
     fs.writeFileSync(configPath, JSON.stringify(jobConfig, null, 2));
