@@ -2,6 +2,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
+import { isPathInsideAny } from '@/server/safePath';
 import { getDatasetsRoot, getTrainingFolder } from '@/server/settings';
 
 export async function GET(request: NextRequest, { params }: { params: { filePath: string } }) {
@@ -16,8 +17,7 @@ export async function GET(request: NextRequest, { params }: { params: { filePath
     const allowedDirs = [datasetRoot, trainingRoot];
 
     // Security check: Ensure path is in allowed directory
-    const isAllowed =
-      allowedDirs.some(allowedDir => decodedFilePath.startsWith(allowedDir)) && !decodedFilePath.includes('..');
+    const isAllowed = isPathInsideAny(decodedFilePath, allowedDirs);
 
     if (!isAllowed) {
       console.warn(`Access denied: ${decodedFilePath} not in ${allowedDirs.join(', ')}`);

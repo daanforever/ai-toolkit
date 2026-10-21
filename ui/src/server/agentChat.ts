@@ -1,6 +1,7 @@
 import { readFile, stat } from 'fs/promises';
 import path from 'path';
 import { ChatMessage, ContentPart } from '@/server/openai';
+import { isPathInsideRoot } from '@/server/safePath';
 import { getDatasetsRoot } from '@/server/settings';
 import { AgentChatTurn } from '@/types/agentChat';
 
@@ -96,12 +97,6 @@ export function parseAgentChatRequest(value: unknown): ParsedAgentChatRequest | 
     ...(reasoning !== undefined ? { reasoning } : {}),
     ...(tools !== undefined ? { tools } : {}),
   };
-}
-
-function isPathInsideRoot(filePath: string, root: string): boolean {
-  const relative = path.relative(path.resolve(root), path.resolve(filePath));
-  if (relative === '' || path.isAbsolute(relative)) return false;
-  return relative !== '..' && !relative.startsWith(`..${path.sep}`);
 }
 
 function captionText(caption: string | undefined): string | null {

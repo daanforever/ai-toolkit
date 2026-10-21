@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import fs from 'fs';
+import { isPathInsideAny } from '@/server/safePath';
 import { getDatasetsRoot, getTrainingFolder } from '@/server/settings';
 
 export async function POST(request: Request) {
@@ -10,7 +11,7 @@ export async function POST(request: Request) {
     const trainingPath = await getTrainingFolder();
 
     // make sure the dataset path is in the image path
-    if (!imgPath.startsWith(datasetsPath) && !imgPath.startsWith(trainingPath)) {
+    if (!isPathInsideAny(imgPath, [datasetsPath, trainingPath])) {
       return NextResponse.json({ error: 'Invalid image path' }, { status: 400 });
     }
 
@@ -36,6 +37,7 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ success: true });
   } catch (error) {
-    return NextResponse.json({ error: 'Failed to create dataset' }, { status: 500 });
+    console.error('Failed to delete image:', error);
+    return NextResponse.json({ error: 'Failed to delete image' }, { status: 500 });
   }
 }
