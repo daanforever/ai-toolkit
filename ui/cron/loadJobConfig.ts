@@ -136,23 +136,137 @@ function parseDbJobConfig(dbJobConfig: string): JobConfigDocument {
   return assertJobConfigDocument(parsed);
 }
 
-export function loadJobConfigDocument(trainingFolder: string, dbJobConfig: string): JobConfigDocument {
+type YamlFileRead =
+  | { status: 'missing' }
+  | { status: 'invalid'; message: string }
+  | { status: 'ok'; document: JobConfigDocument };
+
+function readConfigYamlFile(trainingFolder: string): YamlFileRead {
   const yamlPath = path.join(trainingFolder, 'config.yaml');
   let stat: fs.Stats;
   try {
     stat = fs.statSync(yamlPath);
   } catch (error) {
     if (isEnoent(error)) {
-      return parseDbJobConfig(dbJobConfig);
+      return { status: 'missing' };
+    }
+    throw error;
+  }
+  if (!stat.isFile()) {
+    return { status: 'invalid', message: 'config.yaml is not a file' };
+  }
+  try {
+    return { status: 'ok', document: parseJobConfigYaml(fs.readFileSync(yamlPath, 'utf8')) };
+  } catch (error) {
+    if (error instanceof JobConfigError) {
+      return { status: 'invalid', message: error.message };
+    }
+    throw error;
+  }
+}
+
+export interface LoadedJobConfig {
+  source: 'yaml' | 'database';
+  document: JobConfigDocument;
+}
+
+export function loadJobConfig(trainingFolder: string, dbJobConfig: string): LoadedJobConfig {
+  const yamlFile = readConfigYamlFile(trainingFolder);
+  if (yamlFile.status === 'missing') {
+    return { source: 'database', document: parseDbJobConfig(dbJobConfig) };
+  }
+  if (yamlFile.status === 'invalid') {
+    throw new JobConfigError(yamlFile.message);
+  }
+  return { source: 'yaml', document: yamlFile.document };
+}
+
+export function loadJobConfigDocument(trainingFolder: string, dbJobConfig: string): JobConfigDocument {
+  return loadJobConfig(trainingFolder, dbJobConfig).document;
+}
+
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(item => canonicalize(item));
+  }
+  if (!isRecord(value)) {
+    return value;
+  }
+  const sorted: Record<string, unknown> = {};
+  for (const key of Object.keys(value).sort()) {
+    sorted[key] = canonicalize(value[key]);
+  }
+  return sorted;
+}
+
+export function jobConfigDocumentsEqual(left: unknown, right: unknown): boolean {
+  return JSON.stringify(canonicalize(left)) === JSON.stringify(canonicalize(right));
+}
+
+export function storedJobConfigMatches(stored: string, document: JobConfigDocument): boolean {
+  if (stored === JSON.stringify(document)) {
+    return true;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stored);
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      return false;
+    }
+    throw error;
+  }
+  return jobConfigDocumentsEqual(parsed, document);
+}
+
+export type JobConfigProjection =
+  | { action: 'keep' }
+  | { action: 'replace'; jobConfig: string }
+  | { action: 'invalid'; message: string };
+
+export function projectJobConfig(trainingFolder: string, dbJobConfig: string): JobConfigProjection {
+  const yamlFile = readConfigYamlFile(trainingFolder);
+  if (yamlFile.status === 'missing') {
+    return { action: 'keep' };
+  }
+  if (yamlFile.status === 'invalid') {
+    return { action: 'invalid', message: yamlFile.message };
+  }
+  if (storedJobConfigMatches(dbJobConfig, yamlFile.document)) {
+    return { action: 'keep' };
+  }
+  return { action: 'replace', jobConfig: JSON.stringify(yamlFile.document) };
+}
+
+export function applySqliteDbPath(jobConfig: JobConfigDocument, sqliteDbPath: string): void {
+  jobConfig.config.process[0].sqlite_db_path = sqliteDbPath;
+}
+
+export function launchJobConfig(document: JobConfigDocument, sqliteDbPath: string): JobConfigDocument {
+  const launch = JSON.parse(JSON.stringify(document)) as JobConfigDocument;
+  applySqliteDbPath(launch, sqliteDbPath);
+  return launch;
+}
+
+export function writeJobConfigYamlIfPresent(
+  trainingFolder: string,
+  document: unknown,
+): { wroteFile: boolean; jobConfig: string } {
+  const jobConfig = JSON.stringify(document);
+  const yamlPath = path.join(trainingFolder, 'config.yaml');
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(yamlPath);
+  } catch (error) {
+    if (isEnoent(error)) {
+      return { wroteFile: false, jobConfig };
     }
     throw error;
   }
   if (!stat.isFile()) {
     throw new JobConfigError('config.yaml is not a file');
   }
-  return parseJobConfigYaml(fs.readFileSync(yamlPath, 'utf8'));
-}
-
-export function applySqliteDbPath(jobConfig: JobConfigDocument, sqliteDbPath: string): void {
-  jobConfig.config.process[0].sqlite_db_path = sqliteDbPath;
+  const yamlText = YAML.stringify(document);
+  fs.writeFileSync(yamlPath, yamlText.endsWith('\n') ? yamlText : `${yamlText}\n`, 'utf8');
+  return { wroteFile: true, jobConfig };
 }

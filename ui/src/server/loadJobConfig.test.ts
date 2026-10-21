@@ -2,7 +2,15 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { applySqliteDbPath, loadJobConfigDocument } from '../../cron/loadJobConfig';
+import {
+  applySqliteDbPath,
+  launchJobConfig,
+  loadJobConfig,
+  loadJobConfigDocument,
+  parseJobConfigYaml,
+  projectJobConfig,
+  writeJobConfigYamlIfPresent,
+} from '../../cron/loadJobConfig';
 
 const roots: string[] = [];
 
@@ -148,5 +156,94 @@ describe('loadJobConfigDocument', () => {
     expect(fromYaml.config.process[0].lr).toBe(0.0001);
     expect(fromYaml.config.process[0].flag).toBe(true);
     expect(fromYaml.config.process[0].note).toBeNull();
+  });
+});
+
+describe('config.yaml projection', () => {
+  it('keeps the yaml document free of the launch sqlite path', () => {
+    const root = makeRoot();
+    writeConfig(root, orderedDictYaml);
+    const loaded = loadJobConfig(root, sentinelDbJobConfig);
+    expect(loaded.source).toBe('yaml');
+    expect(loaded.document).toEqual(document);
+    expect(loaded.document.config.process[0].sqlite_db_path).toBeUndefined();
+
+    const launch = launchJobConfig(loaded.document, sqliteDbPath);
+    expect(launch.config.process[0].sqlite_db_path).toBe(sqliteDbPath);
+    expect(loaded.document.config.process[0].sqlite_db_path).toBeUndefined();
+
+    const projection = projectJobConfig(root, sentinelDbJobConfig);
+    expect(projection).toEqual({ action: 'replace', jobConfig: JSON.stringify(loaded.document) });
+    if (projection.action === 'replace') {
+      expect(JSON.parse(projection.jobConfig).config.process[0].sqlite_db_path).toBeUndefined();
+    }
+  });
+
+  it('does not replace the column when config.yaml is missing', () => {
+    const root = makeRoot();
+    const loaded = loadJobConfig(root, dbJobConfig);
+    expect(loaded.source).toBe('database');
+    expect(projectJobConfig(root, dbJobConfig)).toEqual({ action: 'keep' });
+  });
+
+  it('does not request a write when the stored document already matches', () => {
+    const root = makeRoot();
+    writeConfig(root, plainYaml);
+    const reordered = JSON.stringify({
+      config: {
+        process: document.config.process,
+        name: 'sample_job',
+      },
+      job: 'extension',
+    });
+    expect(projectJobConfig(root, reordered)).toEqual({ action: 'keep' });
+
+    const first = projectJobConfig(root, sentinelDbJobConfig);
+    expect(first.action).toBe('replace');
+    if (first.action !== 'replace') {
+      throw new Error('expected a replacement projection');
+    }
+    expect(projectJobConfig(root, first.jobConfig)).toEqual({ action: 'keep' });
+  });
+
+  it('replaces the column when yaml lr differs', () => {
+    const root = makeRoot();
+    writeConfig(root, plainYaml);
+    const stale = JSON.parse(dbJobConfig) as typeof document;
+    stale.config.process[0].lr = 1;
+    const projection = projectJobConfig(root, JSON.stringify(stale));
+    expect(projection.action).toBe('replace');
+    if (projection.action === 'replace') {
+      expect(JSON.parse(projection.jobConfig)).toEqual(document);
+    }
+  });
+
+  it('reports invalid yaml without a replacement document', () => {
+    const root = makeRoot();
+    writeConfig(root, '');
+    const projection = projectJobConfig(root, sentinelDbJobConfig);
+    expect(projection.action).toBe('invalid');
+    expect(projection).not.toHaveProperty('jobConfig');
+  });
+
+  it('writes an existing config.yaml and stores the same json', () => {
+    const root = makeRoot();
+    writeConfig(root, plainYaml);
+    const submitted = JSON.parse(dbJobConfig) as typeof document;
+    submitted.config.process[0].lr = 0.0002;
+    const saved = writeJobConfigYamlIfPresent(root, submitted);
+    expect(saved.wroteFile).toBe(true);
+    expect(JSON.parse(saved.jobConfig)).toEqual(submitted);
+    const written = fs.readFileSync(path.join(root, 'config.yaml'), 'utf8');
+    expect(parseJobConfigYaml(written)).toEqual(submitted);
+    expect(projectJobConfig(root, saved.jobConfig)).toEqual({ action: 'keep' });
+  });
+
+  it('does not create config.yaml when saving without the file', () => {
+    const root = makeRoot();
+    const saved = writeJobConfigYamlIfPresent(root, document);
+    expect(saved.wroteFile).toBe(false);
+    expect(saved.jobConfig).toBe(JSON.stringify(document));
+    expect(fs.existsSync(path.join(root, 'config.yaml'))).toBe(false);
   });
 });

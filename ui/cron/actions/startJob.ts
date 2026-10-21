@@ -3,7 +3,13 @@ import { Job } from '@prisma/client';
 import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
-import { applySqliteDbPath, loadJobConfigDocument, type JobConfigDocument } from '../loadJobConfig';
+import {
+  launchJobConfig,
+  loadJobConfig,
+  storedJobConfigMatches,
+  type JobConfigDocument,
+  type LoadedJobConfig,
+} from '../loadJobConfig';
 import { TOOLKIT_ROOT, getTrainingFolder, getHFToken, resolveVenvPython } from '../paths';
 const isWindows = process.platform === 'win32';
 
@@ -46,11 +52,10 @@ const startAndWatchJob = (job: Job) => {
       console.error('Error moving log file:', e);
     }
 
-    // Prefer output/config.yaml. The database copy is only used when that file is absent.
-    let jobConfig: JobConfigDocument;
+    // config.yaml is the source of truth when it exists. The database column is its projection.
+    let loaded: LoadedJobConfig;
     try {
-      jobConfig = loadJobConfigDocument(trainingFolder, job.job_config);
-      applySqliteDbPath(jobConfig, path.join(TOOLKIT_ROOT, 'aitk_db.db'));
+      loaded = loadJobConfig(trainingFolder, job.job_config);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.error('Error loading job config:', error);
@@ -64,6 +69,34 @@ const startAndWatchJob = (job: Job) => {
       resolve();
       return;
     }
+
+    if (loaded.source === 'yaml' && !storedJobConfigMatches(job.job_config, loaded.document)) {
+      try {
+        await prisma.job.update({
+          where: { id: jobID },
+          data: {
+            job_config: JSON.stringify(loaded.document),
+          },
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error('Error saving job config:', error);
+        await prisma.job.update({
+          where: { id: jobID },
+          data: {
+            status: 'error',
+            info: `Error saving job config: ${message}`,
+          },
+        });
+        resolve();
+        return;
+      }
+    }
+
+    const jobConfig: JobConfigDocument = launchJobConfig(
+      loaded.document,
+      path.join(TOOLKIT_ROOT, 'aitk_db.db'),
+    );
 
     // write the config file
     fs.writeFileSync(configPath, JSON.stringify(jobConfig, null, 2));
