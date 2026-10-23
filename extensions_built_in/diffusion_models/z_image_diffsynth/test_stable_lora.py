@@ -1,5 +1,8 @@
-"""Stable-LoRA shrink: pairs, precision, stop condition, and the pre-step hook."""
+"""Stable-LoRA shrink: pairs, precision, stop condition, resume flags, and the pre-step hook."""
 
+import os
+import pickle
+import tempfile
 from types import SimpleNamespace
 
 import pytest
@@ -7,9 +10,15 @@ import torch
 
 from extensions_built_in.diffusion_models.z_image_diffsynth.stable_lora import (
     STABILITY_CHECK_INTERVAL,
+    STABLE_LORA_STATE_FILENAME,
     StableLoraPair,
+    StableStateRestore,
     apply_shrink,
+    format_restore_ignored_log,
+    format_restored_log,
     format_setup_log,
+    restore_stable_state,
+    save_stable_state,
     setup_stable_lora,
     should_check,
     shrink_percent_from_configs,
@@ -188,12 +197,50 @@ def test_check_cadence():
         should_check(0)
 
 
-def _trainer(network, shrink):
+def _trainer(network, shrink, save_root=None):
     trainer = ZImageDiffSynthTrainer.__new__(ZImageDiffSynthTrainer)
     kwargs = {} if shrink is None else {"stable_lora_shrink": shrink}
     trainer.network_config = SimpleNamespace(network_kwargs=kwargs)
     trainer.network = network
+    if save_root is None:
+        save_root = os.path.join(
+            tempfile.gettempdir(), "ai-toolkit-stable-lora-absent"
+        )
+    trainer.save_root = save_root
     return trainer
+
+
+def _capture_print_acc(monkeypatch):
+    lines = []
+
+    def _record(*args, **_kwargs):
+        lines.append(" ".join(str(arg) for arg in args))
+
+    monkeypatch.setattr(
+        "extensions_built_in.diffusion_models.z_image_diffsynth.trainer.print_acc",
+        _record,
+    )
+    return lines
+
+
+def _state_path(root):
+    return os.path.join(root, STABLE_LORA_STATE_FILENAME)
+
+
+def _stable_module():
+    module = _LoRA()
+    with torch.no_grad():
+        module.lora_down.weight.fill_(0.1)
+        module.lora_up.weight.fill_(5.0)
+    return module
+
+
+def _unstable_module():
+    module = _LoRA()
+    with torch.no_grad():
+        module.lora_down.weight.fill_(2.0)
+        module.lora_up.weight.fill_(0.0)
+    return module
 
 
 def test_trainer_hook_shrinks_until_stable_and_rebuilds_on_new_network():
@@ -248,6 +295,197 @@ def test_trainer_hook_rejects_out_of_range_percent():
     trainer = _trainer(_network([_LoRA()]), shrink=100)
     with pytest.raises(ValueError, match="stable_lora_shrink"):
         trainer.hook_before_optimizer_step()
+
+
+def test_save_restore_round_trip(tmp_path):
+    path = _state_path(tmp_path)
+    saved = [_pair(1.0, 1.0) for _ in range(3)]
+    saved[0].stable = True
+    saved[2].stable = True
+
+    save_stable_state(path, saved)
+
+    assert os.path.isfile(path)
+    assert list(tmp_path.glob(".stable_lora.*.tmp")) == []
+    payload = torch.load(path, weights_only=True)
+    assert payload["version"] == 1
+    assert payload["stable"].dtype == torch.bool
+    assert payload["stable"].tolist() == [True, False, True]
+
+    fresh = [_pair(9.0, 9.0) for _ in range(3)]
+    fresh[1].stable = True
+    result = restore_stable_state(path, fresh)
+
+    assert result == StableStateRestore(applied=True, stable_count=2, saved_length=3)
+    assert [pair.stable for pair in fresh] == [True, False, True]
+
+
+def test_length_mismatch_restores_nothing(tmp_path):
+    path = _state_path(tmp_path)
+    save_stable_state(path, [_pair(1.0, 1.0), _pair(1.0, 1.0)])
+    current = [_pair(1.0, 1.0)]
+    current[0].stable = True
+
+    result = restore_stable_state(path, current)
+
+    assert result == StableStateRestore(applied=False, stable_count=0, saved_length=2)
+    assert current[0].stable is True
+
+
+def test_corrupt_state_raises(tmp_path):
+    path = _state_path(tmp_path)
+    with open(path, "wb") as handle:
+        handle.write(b"not-a-checkpoint")
+    pair = _pair(1.0, 1.0)
+    pair.stable = True
+
+    with pytest.raises(pickle.UnpicklingError):
+        restore_stable_state(path, [pair])
+
+    assert pair.stable is True
+
+
+@pytest.mark.parametrize(
+    ("payload", "match"),
+    [
+        ({"version": 2, "stable": torch.tensor([True])}, "version must be 1"),
+        ({"version": 1, "stable": torch.zeros(1)}, "1-D bool tensor"),
+        ({"version": 1}, "1-D bool tensor"),
+        ([True, False], "must be a dict"),
+    ],
+)
+def test_invalid_state_payload_raises(tmp_path, payload, match):
+    path = _state_path(tmp_path)
+    torch.save(payload, path)
+    pair = _pair(1.0, 1.0)
+    pair.stable = True
+
+    with pytest.raises(ValueError, match=match):
+        restore_stable_state(path, [pair])
+
+    assert pair.stable is True
+
+
+def test_resume_restores_stable_and_still_shrinks_the_rest(tmp_path, monkeypatch):
+    logs = _capture_print_acc(monkeypatch)
+    stable_module = _stable_module()
+    unstable_module = _unstable_module()
+    first = _trainer(
+        _network([stable_module, unstable_module]),
+        shrink=10,
+        save_root=tmp_path,
+    )
+
+    first.hook_before_optimizer_step()
+    assert [pair.stable for pair in first._stable_lora_setup.pairs] == [True, False]
+    first.post_save_hook(None)
+
+    assert os.path.isfile(_state_path(tmp_path))
+    assert list(tmp_path.glob(".stable_lora.*.tmp")) == []
+    with torch.no_grad():
+        stable_module.lora_down.weight.fill_(8.0)
+    stable_before = stable_module.lora_down.weight.detach().clone()
+    unstable_before = unstable_module.lora_down.weight.detach().clone()
+    logs.clear()
+    second = _trainer(
+        _network([stable_module, unstable_module]),
+        shrink=10,
+        save_root=tmp_path,
+    )
+    second.hook_before_optimizer_step()
+
+    assert format_restored_log(1, 2) in logs
+    assert second._stable_lora_setup.pairs[0].stable is True
+    assert second._stable_lora_setup.pairs[1].stable is False
+    assert torch.equal(stable_module.lora_down.weight, stable_before)
+    assert torch.equal(unstable_module.lora_down.weight, unstable_before * 0.9)
+
+
+def test_changed_weights_do_not_restore(tmp_path, monkeypatch):
+    logs = _capture_print_acc(monkeypatch)
+    module = _stable_module()
+    first = _trainer(_network([module]), shrink=10, save_root=tmp_path)
+    first.hook_before_optimizer_step()
+    first.post_save_hook(None)
+    with torch.no_grad():
+        module.lora_down.weight.fill_(8.0)
+    before = module.lora_down.weight.detach().clone()
+    network = _network([module])
+    network.did_change_weights = True
+    logs.clear()
+    second = _trainer(network, shrink=10, save_root=tmp_path)
+
+    second.hook_before_optimizer_step()
+
+    assert format_restore_ignored_log("weights changed") in logs
+    assert second._stable_lora_setup.pairs[0].stable is False
+    assert torch.equal(module.lora_down.weight, before * 0.9)
+
+
+def test_resume_ignores_pair_count_mismatch(tmp_path, monkeypatch):
+    logs = _capture_print_acc(monkeypatch)
+    first = _trainer(
+        _network([_stable_module(), _stable_module()]),
+        shrink=10,
+        save_root=tmp_path,
+    )
+    first.hook_before_optimizer_step()
+    first.post_save_hook(None)
+    module = _unstable_module()
+    before = module.lora_down.weight.detach().clone()
+    logs.clear()
+    second = _trainer(_network([module]), shrink=10, save_root=tmp_path)
+
+    second.hook_before_optimizer_step()
+
+    assert format_restore_ignored_log("pair count 2 != 1") in logs
+    assert second._stable_lora_setup.pairs[0].stable is False
+    assert torch.equal(module.lora_down.weight, before * 0.9)
+
+
+def test_rebuild_does_not_read_state_again(tmp_path, monkeypatch):
+    logs = _capture_print_acc(monkeypatch)
+    trainer = _trainer(_network([_stable_module()]), shrink=10, save_root=tmp_path)
+    trainer.hook_before_optimizer_step()
+    trainer.post_save_hook(None)
+    other = _unstable_module()
+    before = other.lora_down.weight.detach().clone()
+    logs.clear()
+    trainer.network = _network([other])
+
+    trainer.hook_before_optimizer_step()
+
+    assert format_restored_log(1, 1) not in logs
+    assert all("restore ignored" not in line for line in logs)
+    assert trainer._stable_lora_setup.pairs[0].stable is False
+    assert trainer._stable_lora_step == 1
+    assert torch.equal(other.lora_down.weight, before * 0.9)
+
+
+def test_disabled_runs_do_not_write_state(tmp_path):
+    module = _LoRA()
+    with torch.no_grad():
+        module.lora_down.weight.fill_(2.0)
+    before = module.lora_down.weight.detach().clone()
+
+    disabled = _trainer(_network([module]), shrink=0, save_root=tmp_path)
+    disabled.hook_before_optimizer_step()
+    disabled.post_save_hook(None)
+
+    dora = _trainer(
+        _network([module], network_type="peft_dora"), shrink=1, save_root=tmp_path
+    )
+    dora.hook_before_optimizer_step()
+    dora.post_save_hook(None)
+
+    empty = _trainer(
+        _network([_LoRA(full_rank=True)]), shrink=1, save_root=tmp_path
+    )
+    empty.hook_before_optimizer_step()
+    empty.post_save_hook(None)
+
+    assert torch.equal(module.lora_down.weight, before)
+    assert not os.path.exists(_state_path(tmp_path))
 
 
 class _Probe(SDTrainer):

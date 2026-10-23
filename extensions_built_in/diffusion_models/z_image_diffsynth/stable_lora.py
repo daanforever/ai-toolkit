@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass
 import math
+import os
+import tempfile
 from typing import List, Optional, Sequence
 
 import torch
@@ -9,6 +11,8 @@ import torch
 from toolkit.optimizers.optimizer_utils import copy_stochastic
 
 STABILITY_CHECK_INTERVAL = 10
+STABLE_LORA_STATE_FILENAME = "stable_lora.pt"
+STATE_VERSION = 1
 _FOREACH_CHUNK = 8
 
 
@@ -164,6 +168,113 @@ def format_setup_log(percent: float, setup: StableLoraSetup) -> str:
 
 def format_stable_log(stable: int, total: int) -> str:
     return f"[zimage_diffsynth] stable_lora stable={stable}/{total}"
+
+
+def format_restored_log(stable: int, total: int) -> str:
+    return f"[zimage_diffsynth] stable_lora restored={stable}/{total}"
+
+
+def format_restore_ignored_log(reason: str) -> str:
+    return f"[zimage_diffsynth] stable_lora restore ignored: {reason}"
+
+
+@dataclass
+class StableStateRestore:
+    """Outcome of reading ``stable_lora.pt`` against the current pairs."""
+
+    applied: bool
+    stable_count: int
+    saved_length: int
+
+
+def _state_payload(pairs: Sequence[StableLoraPair]) -> dict:
+    return {
+        "version": STATE_VERSION,
+        "stable": torch.tensor(
+            [bool(pair.stable) for pair in pairs], dtype=torch.bool
+        ),
+    }
+
+
+def _remove_state_temp(tmp_path: str) -> None:
+    """Drop a temp file left by a failed write. Already-replaced files are gone."""
+    try:
+        os.remove(tmp_path)
+    except FileNotFoundError:
+        return
+
+
+def save_stable_state(path: str, pairs: Sequence[StableLoraPair]) -> None:
+    """Write pair flags atomically. A failed write leaves ``path`` unchanged."""
+    directory = os.path.dirname(os.path.abspath(path))
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=".stable_lora.", suffix=".tmp", dir=directory
+    )
+    os.close(fd)
+    try:
+        torch.save(_state_payload(pairs), tmp_path)
+        os.replace(tmp_path, path)
+    except BaseException:
+        _remove_state_temp(tmp_path)
+        raise
+
+
+def _require_state_dict(payload) -> dict:
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"stable_lora state must be a dict, got {type(payload).__name__}"
+        )
+    return payload
+
+
+def _require_version(payload: dict) -> None:
+    version = payload.get("version")
+    if version != STATE_VERSION:
+        raise ValueError(
+            f"stable_lora state version must be {STATE_VERSION}, got {version!r}"
+        )
+
+
+def _require_stable_flags(payload: dict) -> torch.Tensor:
+    flags = payload.get("stable")
+    if (
+        isinstance(flags, torch.Tensor)
+        and flags.ndim == 1
+        and flags.dtype == torch.bool
+    ):
+        return flags
+    if isinstance(flags, torch.Tensor):
+        got = f"Tensor dtype={flags.dtype} ndim={flags.ndim}"
+    else:
+        got = type(flags).__name__
+    raise ValueError(
+        f"stable_lora state 'stable' must be a 1-D bool tensor, got {got}"
+    )
+
+
+def restore_stable_state(
+    path: str, pairs: Sequence[StableLoraPair]
+) -> StableStateRestore:
+    """Copy saved flags onto ``pairs`` when the length matches.
+
+    A length mismatch changes nothing. A missing file is the caller's case.
+    A corrupt file or an unknown version raises.
+    """
+    payload = _require_state_dict(torch.load(path, weights_only=True))
+    _require_version(payload)
+    flags = _require_stable_flags(payload)
+    saved_length = int(flags.numel())
+    if saved_length != len(pairs):
+        return StableStateRestore(
+            applied=False, stable_count=0, saved_length=saved_length
+        )
+    stable_count = 0
+    for pair, flag in zip(pairs, flags.tolist()):
+        pair.stable = bool(flag)
+        stable_count += int(pair.stable)
+    return StableStateRestore(
+        applied=True, stable_count=stable_count, saved_length=saved_length
+    )
 
 
 def _rms(tensors: Sequence[torch.Tensor]) -> torch.Tensor:

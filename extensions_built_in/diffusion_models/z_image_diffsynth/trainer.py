@@ -1,13 +1,20 @@
 # ZImageDiffSynthTrainer: DiffusionTrainer for arch zimage_diffsynth (DiffSynth DiT/forward).
 
+import os
+
 from toolkit.extension import Extension
 from toolkit.print import print_acc
 from extensions_built_in.sd_trainer.DiffusionTrainer import DiffusionTrainer
 from .model import _disable_network_merge_in
 from .stable_lora import (
+    STABLE_LORA_STATE_FILENAME,
     apply_shrink,
+    format_restore_ignored_log,
+    format_restored_log,
     format_setup_log,
     format_stable_log,
+    restore_stable_state,
+    save_stable_state,
     setup_stable_lora,
     should_check,
     shrink_percent_from_configs,
@@ -304,11 +311,7 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
         if network is None:
             return
         if getattr(self, "_stable_lora_network_id", None) != id(network):
-            setup = setup_stable_lora(network)
-            self._stable_lora_network_id = id(network)
-            self._stable_lora_setup = setup
-            self._stable_lora_step = 0
-            print_acc(format_setup_log(percent, setup))
+            self._build_stable_lora_setup(network, percent)
         setup = self._stable_lora_setup
         if setup.skip_reason is not None:
             return
@@ -321,6 +324,48 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
         if newly:
             stable = sum(1 for pair in setup.pairs if pair.stable)
             print_acc(format_stable_log(stable, len(setup.pairs)))
+
+    def _build_stable_lora_setup(self, network, percent: float) -> None:
+        """Build pairs for ``network``. Restore flags only on the first setup."""
+        restore = not hasattr(self, "_stable_lora_setup")
+        setup = setup_stable_lora(network)
+        self._stable_lora_network_id = id(network)
+        self._stable_lora_setup = setup
+        self._stable_lora_step = 0
+        print_acc(format_setup_log(percent, setup))
+        if restore:
+            self._restore_stable_lora_flags(network, setup)
+
+    def _restore_stable_lora_flags(self, network, setup) -> None:
+        """Apply ``stable_lora.pt`` before the step-1 check. Later rebuilds skip this."""
+        if setup.skip_reason is not None or not setup.pairs:
+            return
+        if getattr(network, "did_change_weights", False):
+            print_acc(format_restore_ignored_log("weights changed"))
+            return
+        path = os.path.join(self.save_root, STABLE_LORA_STATE_FILENAME)
+        if not os.path.exists(path):
+            return
+        loaded = restore_stable_state(path, setup.pairs)
+        if loaded.applied:
+            print_acc(format_restored_log(loaded.stable_count, len(setup.pairs)))
+            return
+        print_acc(
+            format_restore_ignored_log(
+                f"pair count {loaded.saved_length} != {len(setup.pairs)}"
+            )
+        )
+
+    def post_save_hook(self, save_path):
+        """Write stable flags beside ``optimizer.pt``. Runs after the base save."""
+        super().post_save_hook(save_path)
+        setup = getattr(self, "_stable_lora_setup", None)
+        if setup is None or setup.skip_reason is not None or not setup.pairs:
+            return
+        save_stable_state(
+            os.path.join(self.save_root, STABLE_LORA_STATE_FILENAME),
+            setup.pairs,
+        )
 
     def hook_before_train_loop(self):
         """
