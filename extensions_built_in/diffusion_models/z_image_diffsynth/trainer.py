@@ -19,6 +19,7 @@ from .stable_lora import (
     should_check,
     shrink_percent_from_configs,
 )
+from .util_ui.queue import drain_runtime_commands
 
 
 def _read_use_diffsynth_training_loop_from_config(config) -> bool:
@@ -324,6 +325,11 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
         if newly:
             stable = sum(1 for pair in setup.pairs if pair.stable)
             print_acc(format_stable_log(stable, len(setup.pairs)))
+
+    def end_step_hook(self):
+        """Apply queued util-ui commands after the other runtime updates."""
+        super().end_step_hook()
+        drain_runtime_commands(self)
 
     def _build_stable_lora_setup(self, network, percent: float) -> None:
         """Build pairs for ``network``. Restore flags only on the first setup."""

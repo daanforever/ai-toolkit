@@ -36,6 +36,7 @@ model Job {
   speed_string    String          @default("")
   queue_position  Int             @default(0)
   runtimeParams   RuntimeParams?
+  runtimeCommands RuntimeCommand[]
 
   @@index([status])
   @@index([gpu_ids])
@@ -81,4 +82,14 @@ model RuntimeParams {
   runtime_min_snr_gamma    Float?
   runtime_debug            Boolean?
   updated_at               DateTime @updatedAt
+}
+
+model RuntimeCommand {
+  id        Int      @id @default(autoincrement())
+  jobId     String
+  action    String
+  createdAt DateTime @default(now())
+  job       Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId, id])
 }

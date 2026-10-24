@@ -1,0 +1,7 @@
+[
+  {
+    "id": "shrink_lora",
+    "icon": "TriangleAlert",
+    "title": "Multiply LoRA A and B by 0.9"
+  }
+]

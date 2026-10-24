@@ -1,12 +1,13 @@
 'use client';
 
 import Link from 'next/link';
-import { useState } from 'react';
-import { Eye, Trash2, Pen, Play, Pause, Cog, X, RotateCcw, Eraser, ChevronsUp, ChevronsDown } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Eye, Trash2, Pen, Play, Pause, Cog, X, RotateCcw, Eraser, ChevronsUp, ChevronsDown, TriangleAlert } from 'lucide-react';
 import { Button } from '@headlessui/react';
 import { openConfirm } from '@/components/ConfirmModal';
 import { Job } from '@prisma/client';
-import { startJob, stopJob, deleteJob, getAvaliableJobActions, markJobAsStopped, resetJob, clearSamplesAndLossLog, adjustJobLr } from '@/utils/jobs';
+import { startJob, stopJob, deleteJob, getAvaliableJobActions, markJobAsStopped, resetJob, clearSamplesAndLossLog, adjustJobLr, getJobConfig } from '@/utils/jobs';
+import { apiClient } from '@/utils/api';
 import { startQueue } from '@/utils/queue';
 import { Menu, MenuButton, MenuItem, MenuItems } from '@headlessui/react';
 
@@ -18,7 +19,18 @@ interface JobActionBarProps {
   className?: string;
   autoStartQueue?: boolean;
   showLrScale?: boolean;
+  showExtensionActions?: boolean;
 }
+
+interface ExtensionAction {
+  id: string;
+  icon: string;
+  title: string;
+}
+
+const EXTENSION_ICONS: Record<string, typeof TriangleAlert> = {
+  TriangleAlert,
+};
 
 export default function JobActionBar({
   job,
@@ -28,10 +40,36 @@ export default function JobActionBar({
   hideView,
   autoStartQueue = false,
   showLrScale = false,
+  showExtensionActions = false,
 }: JobActionBarProps) {
   const { canStart, canStop, canDelete, canEdit, canRemoveFromQueue, canReset, canClear } = getAvaliableJobActions(job);
   const [lrScaleBusy, setLrScaleBusy] = useState(false);
   const [lrDeltaInput, setLrDeltaInput] = useState('0.0001');
+  const [extensionActions, setExtensionActions] = useState<ExtensionAction[]>([]);
+  const [extensionBusy, setExtensionBusy] = useState(false);
+  const extensionTrainer =
+    showExtensionActions && getJobConfig(job).config.process[0]?.type === 'z_image_diffsynth_trainer';
+
+  useEffect(() => {
+    if (!extensionTrainer || !canStop) {
+      setExtensionActions([]);
+      return;
+    }
+    let cancelled = false;
+    apiClient
+      .get(`/api/jobs/${job.id}/ui-actions`)
+      .then(res => {
+        if (cancelled) return;
+        const actions = res.data?.actions;
+        setExtensionActions(Array.isArray(actions) ? actions : []);
+      })
+      .catch(error => {
+        console.error('Error loading ui actions:', error);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [extensionTrainer, canStop, job.id]);
 
   if (!afterDelete) afterDelete = onRefresh;
 
@@ -50,8 +88,37 @@ export default function JobActionBar({
     }
   };
 
+  const postExtensionAction = async (actionId: string) => {
+    if (extensionBusy || !canStop) return;
+    setExtensionBusy(true);
+    try {
+      await apiClient.post(`/api/jobs/${job.id}/ui-actions`, { action: actionId });
+    } catch (error) {
+      console.error('Error posting ui action:', error);
+    } finally {
+      setExtensionBusy(false);
+    }
+  };
+
   return (
     <div className={`${className}`}>
+      {showExtensionActions &&
+        canStop &&
+        extensionActions.map(action => {
+          const Icon = EXTENSION_ICONS[action.icon];
+          if (!Icon) return null;
+          return (
+            <Button
+              key={action.id}
+              title={action.title}
+              disabled={extensionBusy}
+              onClick={() => postExtensionAction(action.id)}
+              className="ml-2 opacity-100"
+            >
+              <Icon />
+            </Button>
+          );
+        })}
       {canStart && (
         <Button
           onClick={async () => {
