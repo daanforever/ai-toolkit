@@ -5,7 +5,7 @@ import sqlite3
 from toolkit.print import print_acc
 
 from extensions_built_in.diffusion_models.z_image_diffsynth.util_ui.scale import (
-    SHRINK_ACTION,
+    ACTION_FACTORS,
     scale_lora,
 )
 
@@ -53,7 +53,9 @@ def drain_runtime_commands(trainer) -> None:
     if not rows:
         return
     for row_id, action in rows:
-        if action != SHRINK_ACTION:
-            raise ValueError(f"unknown util-ui action: {action}")
-        print_acc(scale_lora(trainer.network))
+        try:
+            factor = ACTION_FACTORS[action]
+        except KeyError as exc:
+            raise ValueError(f"unknown util-ui action: {action}") from exc
+        print_acc(scale_lora(trainer.network, factor))
         _delete_command(trainer, row_id)

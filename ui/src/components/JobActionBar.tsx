@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
-import { Eye, Trash2, Pen, Play, Pause, Cog, X, RotateCcw, Eraser, ChevronsUp, ChevronsDown, TriangleAlert } from 'lucide-react';
+import { Eye, Trash2, Pen, Play, Pause, Cog, X, RotateCcw, Eraser, ChevronsUp, ChevronsDown, ArrowUp, ArrowDown } from 'lucide-react';
 import { Button } from '@headlessui/react';
 import { openConfirm } from '@/components/ConfirmModal';
 import { Job } from '@prisma/client';
@@ -28,8 +28,9 @@ interface ExtensionAction {
   title: string;
 }
 
-const EXTENSION_ICONS: Record<string, typeof TriangleAlert> = {
-  TriangleAlert,
+const EXTENSION_ICONS: Record<string, typeof ArrowUp> = {
+  ArrowUp,
+  ArrowDown,
 };
 
 export default function JobActionBar({

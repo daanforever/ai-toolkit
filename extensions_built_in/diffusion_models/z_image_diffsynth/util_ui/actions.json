@@ -1,7 +1,12 @@
 [
   {
+    "id": "grow_lora",
+    "icon": "ArrowUp",
+    "title": "Multiply LoRA A and B by 1.1"
+  },
+  {
     "id": "shrink_lora",
-    "icon": "TriangleAlert",
+    "icon": "ArrowDown",
     "title": "Multiply LoRA A and B by 0.9"
   }
 ]

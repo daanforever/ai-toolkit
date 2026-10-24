@@ -85,8 +85,13 @@ describe('GET /api/jobs/:id/ui-actions', () => {
     expect(await response.json()).toEqual({
       actions: [
         {
+          id: 'grow_lora',
+          icon: 'ArrowUp',
+          title: 'Multiply LoRA A and B by 1.1',
+        },
+        {
           id: 'shrink_lora',
-          icon: 'TriangleAlert',
+          icon: 'ArrowDown',
           title: 'Multiply LoRA A and B by 0.9',
         },
       ],
@@ -147,5 +152,12 @@ describe('POST /api/jobs/:id/ui-actions', () => {
     expect(response.status).toBe(200);
     expect(state.commands).toEqual([{ jobId: 'job-1', action: 'shrink_lora' }]);
     expect(await response.json()).toMatchObject({ id: 1, jobId: 'job-1', action: 'shrink_lora' });
+  });
+
+  it('inserts one grow_lora command', async () => {
+    runningJob();
+    const response = await post('job-1', { action: 'grow_lora' });
+    expect(response.status).toBe(200);
+    expect(state.commands).toEqual([{ jobId: 'job-1', action: 'grow_lora' }]);
   });
 });

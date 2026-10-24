@@ -18,6 +18,7 @@ from extensions_built_in.diffusion_models.z_image_diffsynth.util_ui.queue import
     drain_runtime_commands,
 )
 from extensions_built_in.diffusion_models.z_image_diffsynth.util_ui.scale import (
+    ACTION_FACTORS,
     ACTIONS_PATH,
     scale_lora,
 )
@@ -52,13 +53,18 @@ def _filled(a_value=2.0, b_value=4.0):
     return module
 
 
-def test_actions_json_is_the_shrink_button():
+def test_actions_json_is_grow_then_shrink():
     assert json.loads(ACTIONS_PATH.read_text(encoding="utf-8")) == [
         {
+            "id": "grow_lora",
+            "icon": "ArrowUp",
+            "title": "Multiply LoRA A and B by 1.1",
+        },
+        {
             "id": "shrink_lora",
-            "icon": "TriangleAlert",
+            "icon": "ArrowDown",
             "title": "Multiply LoRA A and B by 0.9",
-        }
+        },
     ]
 
 
@@ -79,6 +85,23 @@ def test_fp32_scales_both_matrices_and_leaves_stable_flag_and_optimizer_state():
     assert optimizer_state["step"] == 3
     assert torch.equal(optimizer_state["exp_avg"], exp_avg)
     assert line == "[zimage_diffsynth] lora_scale factor=0.9 pairs=1"
+
+
+def test_fp32_grow_scales_both_matrices_and_leaves_stable_flag():
+    module = _filled(2.0, 4.0)
+    held = setup_stable_lora(_network([module]))
+    held.pairs[0].stable = True
+    optimizer_state = {"step": 3, "exp_avg": torch.tensor([1.25])}
+    exp_avg = optimizer_state["exp_avg"].clone()
+
+    line = scale_lora(_network([module]), ACTION_FACTORS["grow_lora"])
+
+    assert held.pairs[0].stable is True
+    assert torch.equal(module.lora_down.weight, torch.full_like(module.lora_down.weight, 2.0) * 1.1)
+    assert torch.equal(module.lora_up.weight, torch.full_like(module.lora_up.weight, 4.0) * 1.1)
+    assert optimizer_state["step"] == 3
+    assert torch.equal(optimizer_state["exp_avg"], exp_avg)
+    assert line == "[zimage_diffsynth] lora_scale factor=1.1 pairs=1"
 
 
 def test_frozen_and_full_rank_stay_put_while_a_live_pair_scales():
@@ -203,6 +226,33 @@ def test_two_commands_scale_by_0_81_and_clear_the_queue(tmp_path, monkeypatch):
         "[zimage_diffsynth] lora_scale factor=0.9 pairs=1",
         "[zimage_diffsynth] lora_scale factor=0.9 pairs=1",
     ]
+
+
+def test_grow_then_shrink_leaves_0_99(tmp_path, monkeypatch):
+    module = _filled(10.0, 2.0)
+    db = str(_create_db(tmp_path / "queue.db", ["grow_lora", "shrink_lora"]))
+    lines = _capture_print(monkeypatch)
+
+    drain_runtime_commands(_ui_trainer(db, _network([module])))
+
+    assert torch.equal(module.lora_down.weight, torch.full_like(module.lora_down.weight, 10.0) * 1.1 * 0.9)
+    assert torch.equal(module.lora_up.weight, torch.full_like(module.lora_up.weight, 2.0) * 1.1 * 0.9)
+    assert _actions(db) == []
+    assert lines == [
+        "[zimage_diffsynth] lora_scale factor=1.1 pairs=1",
+        "[zimage_diffsynth] lora_scale factor=0.9 pairs=1",
+    ]
+
+
+def test_two_grows_leave_1_21(tmp_path):
+    module = _filled(10.0, 2.0)
+    db = str(_create_db(tmp_path / "queue.db", ["grow_lora", "grow_lora"]))
+
+    drain_runtime_commands(_ui_trainer(db, _network([module])))
+
+    assert torch.equal(module.lora_down.weight, torch.full_like(module.lora_down.weight, 10.0) * 1.1 * 1.1)
+    assert torch.equal(module.lora_up.weight, torch.full_like(module.lora_up.weight, 2.0) * 1.1 * 1.1)
+    assert _actions(db) == []
 
 
 def test_unknown_action_raises_and_keeps_that_row(tmp_path):
