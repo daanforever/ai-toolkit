@@ -98,22 +98,20 @@ def quantize(
         exclude = [exclude] if isinstance(exclude, str) else exclude
 
     if isinstance(weights, aotype):
-        try:
-            from torchao.quantization.quant_api import _is_linear
-            def filter_fn(m: torch.nn.Module, name: str) -> bool:
-                if not _is_linear(m):
-                    return False
-                if include is not None and not any(
-                    fnmatch(name, pattern) for pattern in include
-                ):
-                    return False
-                if exclude is not None and any(fnmatch(name, pattern) for pattern in exclude):
-                    return False
-                return True
+        from torchao.quantization.quant_api import _is_linear
 
-            torchao_quantize_(model, weights.config, filter_fn=filter_fn)
-        except Exception as e:
-            print(f"Failed to quantize model with torchao: {e}")
+        def filter_fn(m: torch.nn.Module, name: str) -> bool:
+            if not _is_linear(m):
+                return False
+            if include is not None and not any(
+                fnmatch(name, pattern) for pattern in include
+            ):
+                return False
+            if exclude is not None and any(fnmatch(name, pattern) for pattern in exclude):
+                return False
+            return True
+
+        torchao_quantize_(model, weights.config, filter_fn=filter_fn)
         return
 
     for name, m in model.named_modules():
@@ -123,22 +121,16 @@ def quantize(
             continue
         if exclude is not None and any(fnmatch(name, pattern) for pattern in exclude):
             continue
-        try:
-            # check if m is QLinear or QConv2d
-            if m.__class__.__name__ in Q_MODULES:
-                continue
-            else:
-                _quantize_submodule(
-                    model,
-                    name,
-                    m,
-                    weights=weights,
-                    activations=activations,
-                    optimizer=optimizer,
-                )
-        except Exception as e:
-            print(f"Failed to quantize {name}: {e}")
-            # raise e
+        if m.__class__.__name__ in Q_MODULES:
+            continue
+        _quantize_submodule(
+            model,
+            name,
+            m,
+            weights=weights,
+            activations=activations,
+            optimizer=optimizer,
+        )
 
 
 def quantize_model(

@@ -273,10 +273,7 @@ def load_components(
             te_root, subfolder="text_encoder", dtype=dtype
         )
     # Load on CPU first; move to CUDA only after DiTs are fully parked.
-    try:
-        text_encoder.to("cpu")
-    except Exception:
-        pass
+    text_encoder.to("cpu")
     flush()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
