@@ -361,7 +361,7 @@ def test_format_turbo_lora_weight_strips_trailing_zeros():
 
 
 def test_pass_module_has_no_compile_path():
-    import extensions_built_in.diffusion_models.z_image_diffsynth.turbo_lora as mod
+    import extensions_built_in.diffusion_models.z_image_diffsynth.turbo_lora.turbo_lora as mod
 
     source = inspect.getsource(mod)
     assert "compile_dit_blocks" not in source
@@ -532,7 +532,7 @@ def test_pass_requires_cached_prompt_embeds():
 
 
 def test_imitation_pass_contract(monkeypatch):
-    import extensions_built_in.diffusion_models.z_image_diffsynth.turbo_lora as turbo_lora
+    import extensions_built_in.diffusion_models.z_image_diffsynth.turbo_lora.turbo_lora as turbo_lora
     import extensions_built_in.diffusion_models.z_image_diffsynth.turbo_schedule as schedule
 
     def _forbid_slot_weights(*args, **kwargs):
@@ -655,6 +655,24 @@ def test_imitation_pass_contract(monkeypatch):
     assert world.sd.network is world.base_net
 
 
+def test_imitation_places_prompt_embeds_on_latent_device():
+    shared = nn.Parameter(torch.tensor([0.25], dtype=torch.float32))
+    world = _build_world(shared, weight=1.0)
+    batch = _batch(1)
+    calls = []
+    real_to = batch.prompt_embeds.to
+
+    def _to(*args, **kwargs):
+        calls.append((args, kwargs))
+        return real_to(*args, **kwargs)
+
+    batch.prompt_embeds.to = _to
+    run_imitation_pass(world.trainer, batch, 1.0)
+    assert len(calls) == 1
+    assert calls[0][0] == ()
+    assert calls[0][1]["device"] == batch.latents.device
+
+
 def test_raise_restores_base_residency_and_dropout():
     shared = nn.Parameter(torch.tensor([0.25]))
     world = _build_world(shared, fail_turbo_on=True)
@@ -764,7 +782,7 @@ def test_hook_one_step_sums_both_gradients(monkeypatch):
 
 
 def test_hook_two_microbatches_weight_the_logged_mse(monkeypatch):
-    import extensions_built_in.diffusion_models.z_image_diffsynth.turbo_lora as turbo_lora
+    import extensions_built_in.diffusion_models.z_image_diffsynth.turbo_lora.turbo_lora as turbo_lora
 
     slots = iter((0, 3))
     noises = {"n": 0}

@@ -3,7 +3,7 @@
 import torch
 import torch.nn.functional as F
 
-from .turbo_schedule import get_turbo_sigmas_and_timesteps
+from ..turbo_schedule import get_turbo_sigmas_and_timesteps
 
 _DROPOUT_ATTRS = ("rank_dropout", "module_dropout")
 
@@ -50,7 +50,8 @@ def _require_imitation_inputs(sd, batch) -> None:
 
 def _imitation_forwards(trainer, sd, batch, microbatch_scale: float) -> torch.Tensor:
     latents = batch.latents
-    embeds = batch.prompt_embeds
+    # Cached embeds stay on CPU. get_noise_prediction only casts dtype.
+    embeds = batch.prompt_embeds.to(device=latents.device)
     x_t, timestep = _shared_noisy_latent(trainer, sd, latents)
     _set_inactive(sd.network)
     _set_inactive(sd._sampling_network)
