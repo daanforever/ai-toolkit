@@ -1,3 +1,4 @@
+import math
 import os
 import re
 import time
@@ -559,6 +560,37 @@ class TrainConfig:
                 "turbo_teacher_weight must be boolean true/false; "
                 "legacy float weights are not supported"
             )
+        raw_turbo_lora = kwargs.get('turbo_lora', False)
+        if isinstance(raw_turbo_lora, bool):
+            self.turbo_lora: bool = raw_turbo_lora
+        elif raw_turbo_lora is None:
+            self.turbo_lora = False
+        else:
+            raise ValueError(
+                f"turbo_lora must be boolean true/false; got {raw_turbo_lora!r}"
+            )
+        # Weight is ignored unless turbo_lora is true. Absent key defaults to 1.0.
+        if self.turbo_lora:
+            if 'turbo_lora_weight' in kwargs:
+                raw_turbo_lora_weight = kwargs['turbo_lora_weight']
+                if isinstance(raw_turbo_lora_weight, bool) or not isinstance(
+                    raw_turbo_lora_weight, (int, float)
+                ):
+                    raise ValueError(
+                        "turbo_lora_weight must be a finite number > 0, "
+                        f"got {raw_turbo_lora_weight!r}"
+                    )
+                turbo_lora_weight = float(raw_turbo_lora_weight)
+                if not math.isfinite(turbo_lora_weight) or turbo_lora_weight <= 0.0:
+                    raise ValueError(
+                        "turbo_lora_weight must be a finite number > 0, "
+                        f"got {raw_turbo_lora_weight!r}"
+                    )
+                self.turbo_lora_weight: float = turbo_lora_weight
+            else:
+                self.turbo_lora_weight = 1.0
+        else:
+            self.turbo_lora_weight = 1.0
         # Not an A/B feature; if present and not dsigma, _sample_turbo_prior raises.
         if 'turbo_slot_weighting' in kwargs:
             self.turbo_slot_weighting = kwargs['turbo_slot_weighting']

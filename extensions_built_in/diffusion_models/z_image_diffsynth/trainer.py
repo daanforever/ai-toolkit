@@ -5,6 +5,8 @@ import os
 from toolkit.extension import Extension
 from toolkit.print import print_acc
 from extensions_built_in.sd_trainer.DiffusionTrainer import DiffusionTrainer
+from extensions_built_in.sd_trainer.SDTrainer import batch_num_samples
+from .turbo_lora import format_turbo_lora_weight, run_imitation_pass
 from .model import _disable_network_merge_in
 from .stable_lora import (
     STABLE_LORA_STATE_FILENAME,
@@ -150,6 +152,32 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
                 raise ValueError(
                     "turbo_teacher_weight=true requires model.sampling_name_or_path "
                     "(Z-Image-Turbo / _sampling_transformer)."
+                )
+
+        if getattr(tc, "turbo_lora", False) is True:
+            opt = getattr(tc, "optimizer", None)
+            if not isinstance(opt, str) or opt.lower() != "adafactor":
+                raise ValueError(
+                    "turbo_lora=true requires train.optimizer='adafactor' "
+                    f"(got {opt!r})."
+                )
+            sampling_path = getattr(self.model_config, "sampling_name_or_path", None)
+            if not sampling_path:
+                raise ValueError(
+                    "turbo_lora=true requires model.sampling_name_or_path "
+                    "(Z-Image-Turbo / _sampling_transformer)."
+                )
+            if getattr(tc, "turbo_teacher_weight", False) is True:
+                raise ValueError(
+                    "turbo_lora=true is incompatible with train.turbo_teacher_weight=true."
+                )
+            if getattr(self.model_config, "compile", False) is True:
+                raise ValueError(
+                    "turbo_lora=true is incompatible with model.compile=true."
+                )
+            if getattr(tc, "cache_text_embeddings", False) is not True:
+                raise ValueError(
+                    "turbo_lora=true requires train.cache_text_embeddings=true."
                 )
 
         self.use_diffsynth_training_loop = use_diffsynth_training_loop
@@ -298,6 +326,36 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
             sd.apply_turbo_teacher_mode(enabled)
             self.network = sd.network
         self.train_config.turbo_teacher_weight = enabled
+
+    def hook_train_loop(self, batch):
+        """Concept loop, then one imitation backward per microbatch when enabled."""
+        turbo_lora = getattr(self.train_config, "turbo_lora", False) is True
+        if turbo_lora:
+            if not getattr(self, "_turbo_lora_announced", False):
+                weight = format_turbo_lora_weight(self.train_config.turbo_lora_weight)
+                slots = self.train_config.turbo_prior_steps
+                print_acc(
+                    f"[zimage_diffsynth] turbo_lora=true weight={weight} slots={slots}"
+                )
+                self._turbo_lora_announced = True
+            self._turbo_lora_mse_terms = []
+        loss_dict = super().hook_train_loop(batch)
+        if turbo_lora:
+            total = 0.0
+            weighted = 0.0
+            for mse, n_samples in self._turbo_lora_mse_terms:
+                weighted += mse * n_samples
+                total += n_samples
+            loss_dict["turbo_lora"] = weighted / total
+        return loss_dict
+
+    def _after_train_single_accumulation(self, batch, microbatch_scale: float) -> None:
+        if getattr(self.train_config, "turbo_lora", False) is not True:
+            return
+        residual_mse = run_imitation_pass(self, batch, microbatch_scale)
+        self._turbo_lora_mse_terms.append(
+            (float(residual_mse.detach()), batch_num_samples(batch))
+        )
 
     def hook_before_optimizer_step(self):
         """Shrink LoRA A when ``stable_lora_shrink`` is not 0. See ``stable_lora.py``."""

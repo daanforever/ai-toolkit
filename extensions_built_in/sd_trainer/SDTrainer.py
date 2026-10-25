@@ -2434,6 +2434,10 @@ class SDTrainer(BaseSDTrainProcess):
         return loss.detach()
         # flush()
 
+    def _after_train_single_accumulation(self, batch, microbatch_scale: float) -> None:
+        """Hook after the concept backward and before the optimizer step."""
+        return None
+
     def hook_train_loop(self, batch: Union[DataLoaderBatchDTO, List[DataLoaderBatchDTO]]):
         if isinstance(batch, list):
             batch_list = batch
@@ -2459,6 +2463,7 @@ class SDTrainer(BaseSDTrainProcess):
                             break
             microbatch_scale = scales[i]
             loss = self.train_single_accumulation(batch, microbatch_scale=microbatch_scale)
+            self._after_train_single_accumulation(batch, microbatch_scale)
             self.steps_this_boundary += 1
             weighted_term = loss * batch_sizes[i]
             if weighted_loss_sum is None:
