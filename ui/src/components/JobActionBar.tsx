@@ -43,7 +43,7 @@ export default function JobActionBar({
   showLrScale = false,
   showExtensionActions = false,
 }: JobActionBarProps) {
-  const { canStart, canStop, canDelete, canEdit, canRemoveFromQueue, canReset, canClear } = getAvaliableJobActions(job);
+  const { canStart, canStop, canDelete, canEdit, canRemoveFromQueue, canReset } = getAvaliableJobActions(job);
   const [lrScaleBusy, setLrScaleBusy] = useState(false);
   const [lrDeltaInput, setLrDeltaInput] = useState('0.0001');
   const [extensionActions, setExtensionActions] = useState<ExtensionAction[]>([]);
@@ -196,26 +196,23 @@ export default function JobActionBar({
           </Button>
         </>
       )}
-      {canClear && (
-        <Button
-          onClick={() => {
-            if (!canClear) return;
-            openConfirm({
-              title: 'Clear samples & loss log',
-              message: `Are you sure you want to clear the samples folder and loss_log.* files for job "${job.name}"? This will permanently delete the samples directory and all loss_log files in the job output directory. The job will continue running.`,
-              type: 'warning',
-              confirmText: 'Clear',
-              onConfirm: async () => {
-                await clearSamplesAndLossLog(job.id);
-                if (onRefresh) onRefresh();
-              },
-            });
-          }}
-          className={`ml-2 opacity-100`}
-        >
-          <Eraser />
-        </Button>
-      )}
+      <Button
+        onClick={() => {
+          openConfirm({
+            title: 'Clear samples, loss log & log.txt',
+            message: `Are you sure you want to delete all files in the samples folder, purge all loss log data and truncate log.txt for job "${job.name}"? The loss_log.db file itself is kept.`,
+            type: 'warning',
+            confirmText: 'Clear',
+            onConfirm: async () => {
+              await clearSamplesAndLossLog(job.id);
+              if (onRefresh) onRefresh();
+            },
+          });
+        }}
+        className={`ml-2 opacity-100`}
+      >
+        <Eraser />
+      </Button>
       {!hideView && (
         <Link href={`/jobs/${job.id}`} className="ml-2 text-gray-200 hover:text-gray-100 inline-block">
           <Eye />
