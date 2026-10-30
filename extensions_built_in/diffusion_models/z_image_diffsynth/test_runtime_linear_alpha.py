@@ -54,6 +54,12 @@ def _network(alpha: float, dim: int) -> LoRASpecialNetwork:
     )
 
 
+def _register(network):
+    """LoRA modules enter state_dict only after apply_to calls add_module."""
+    for module in network.unet_loras:
+        network.add_module(module.lora_name, module)
+
+
 def _pair(alpha: float = 4.0, dim: int = 4):
     main = _network(alpha, dim)
     sampling = _network(alpha, dim)
@@ -386,6 +392,8 @@ def test_end_step_hook_applies_before_drain(tmp_path, monkeypatch):
 
 def test_load_state_dict_overwrites_alpha_not_scale():
     main, sampling = _pair(alpha=4.0, dim=4)
+    _register(main)
+    _register(sampling)
     state = {key: value.detach().clone() for key, value in main.state_dict().items()}
     for key in state:
         if key.endswith(".alpha"):
@@ -399,6 +407,8 @@ def test_load_state_dict_overwrites_alpha_not_scale():
 
 def test_load_weights_reapplies_config_alpha(monkeypatch):
     main, sampling = _pair(alpha=4.0, dim=4)
+    _register(main)
+    _register(sampling)
     for module in sampling.unet_loras:
         module.scale = 99.0
     state = {key: value.detach().clone() for key, value in main.state_dict().items()}
@@ -428,6 +438,8 @@ def test_load_weights_reapplies_config_alpha(monkeypatch):
 
 def test_load_weights_leaves_non_lora_and_zero_alpha(monkeypatch):
     main, sampling = _pair(alpha=4.0, dim=4)
+    _register(main)
+    _register(sampling)
     state = {key: value.detach().clone() for key, value in main.state_dict().items()}
     for key in state:
         if key.endswith(".alpha"):
