@@ -35,6 +35,7 @@ _RUNTIME_CLEARABLE_COLUMNS = frozenset({
     "runtime_timestep_type",
     "runtime_timestep_weighting",
     "runtime_network_weights",
+    "runtime_dataset_num_repeats",
     "runtime_prompts",
     "runtime_batch_size",
     "runtime_gradient_accumulation",
@@ -1033,37 +1034,115 @@ class DiffusionTrainer(SDTrainer):
                 print_acc(f"\nruntime timestep_weighting from UI/DB: {value}")
         self._clear_runtime_columns("runtime_timestep_weighting")
 
-    def get_runtime_network_weights(self):
-        """Read runtime_network_weights from DB (only when is_ui_trainer). Returns list of float or None."""
+    def _read_runtime_json_list(self, column_name: str):
+        """Read a JSON list from RuntimeParams. Invalid JSON or a missing value means no update."""
+        allowed = ("runtime_network_weights", "runtime_dataset_num_repeats")
+        if column_name not in allowed:
+            raise ValueError(f"runtime column is not a json list: {column_name}")
         if not self.is_ui_trainer:
             return None
 
-        def _read():
-            with self._db_connect() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT runtime_network_weights FROM RuntimeParams WHERE jobId = ?",
-                    (self.job_id,),
-                )
-                row = cursor.fetchone()
-                if row is None or row[0] is None or (isinstance(row[0], str) and row[0].strip() == ""):
-                    return None
-                try:
-                    raw = row[0] if isinstance(row[0], str) else str(row[0])
-                    parsed = json.loads(raw)
-                    if not isinstance(parsed, list):
-                        return None
-                    return [
-                        float(x) for x in parsed
-                        if isinstance(x, (int, float))
-                        and (v := float(x)) == v
-                        and abs(v) != float("inf")
-                        and v >= 0
-                    ]
-                except (ValueError, TypeError):
-                    return None
+        with self._db_connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"SELECT {column_name} FROM RuntimeParams WHERE jobId = ?",
+                (self.job_id,),
+            )
+            row = cursor.fetchone()
+            if row is None or row[0] is None or (isinstance(row[0], str) and row[0].strip() == ""):
+                return None
+            try:
+                raw = row[0] if isinstance(row[0], str) else str(row[0])
+                parsed = json.loads(raw)
+            except (ValueError, TypeError):
+                return None
+            if not isinstance(parsed, list):
+                return None
+            return parsed
 
-        return _read()
+    def get_runtime_network_weights(self):
+        """Read runtime_network_weights from DB (only when is_ui_trainer). Returns list of float or None."""
+        parsed = self._read_runtime_json_list("runtime_network_weights")
+        if parsed is None:
+            return None
+        return [
+            float(x) for x in parsed
+            if isinstance(x, (int, float))
+            and (v := float(x)) == v
+            and abs(v) != float("inf")
+            and v >= 0
+        ]
+
+    def get_runtime_dataset_num_repeats(self):
+        """Read runtime_dataset_num_repeats from DB. Returns list of int >= 1, or None."""
+        parsed = self._read_runtime_json_list("runtime_dataset_num_repeats")
+        if not parsed:
+            return None
+        repeats = []
+        for value in parsed:
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                return None
+            repeats.append(value)
+        return repeats
+
+    def _runtime_dataset_groups(self):
+        """Group dataset_configs the way one UI dataset row expands across resolutions."""
+        groups = []
+        index = 0
+        configs = getattr(self, "dataset_configs", None) or []
+        while index < len(configs):
+            resolution = configs[index].resolution
+            size = len(resolution) if isinstance(resolution, list) else 1
+            group = configs[index:index + size]
+            if any(item.resolution != resolution for item in group):
+                group = [configs[index]]
+            groups.append(group)
+            index += len(group)
+        return groups
+
+    def apply_runtime_dataset_num_repeats(self):
+        """Apply per-dataset num_repeats by rebuilding repeat slots, then the sampler."""
+        if not self.is_ui_trainer:
+            return
+        repeats = self.get_runtime_dataset_num_repeats()
+        if repeats is None or self.data_loader is None:
+            return
+
+        from toolkit.data_loader import rebuild_dataloader_network_weights
+
+        datasets_by_config = {}
+        for loader in (self.data_loader, self.data_loader_reg):
+            if loader is None:
+                continue
+            for ds in get_dataloader_datasets(loader):
+                config = getattr(ds, "dataset_config", None)
+                if config is not None:
+                    datasets_by_config[id(config)] = ds
+
+        changed = False
+        seen = set()
+        for group_index, group in enumerate(self._runtime_dataset_groups()):
+            if group_index >= len(repeats):
+                break
+            for config in group:
+                ds = datasets_by_config.get(id(config))
+                if ds is None or id(ds) in seen:
+                    continue
+                seen.add(id(ds))
+                if ds.rebuild_for_num_repeats(repeats[group_index]):
+                    changed = True
+
+        self.data_loader = rebuild_dataloader_network_weights(
+            self.data_loader, epoch_num=self.epoch_num
+        )
+        if self.data_loader_reg is not None:
+            self.data_loader_reg = rebuild_dataloader_network_weights(
+                self.data_loader_reg, epoch_num=self.epoch_num
+            )
+        if changed and is_debug_enabled():
+            print_acc(f"\nruntime dataset num_repeats from UI/DB applied: {list(repeats)}")
+
+        self._clear_runtime_columns("runtime_dataset_num_repeats")
 
     def apply_runtime_network_weights(self):
         """If runtime_network_weights are set in DB, apply them to dataloader dataset_configs."""
@@ -1451,6 +1530,7 @@ class DiffusionTrainer(SDTrainer):
             self.apply_runtime_turbo_teacher_weight()
             self.apply_runtime_timestep_weighting()
             self.apply_runtime_batch_size()
+            self.apply_runtime_dataset_num_repeats()
             self.apply_runtime_network_weights()
             self.apply_runtime_gradient_accumulation()
             self.apply_runtime_save_every()

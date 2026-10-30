@@ -158,3 +158,33 @@ describe('PATCH /api/jobs/:id/runtime-config linear_alpha', () => {
     expect(state.writes[0].update).not.toHaveProperty('runtime_linear_alpha');
   });
 });
+
+describe('PATCH /api/jobs/:id/runtime-config dataset_num_repeats', () => {
+  it('stores a JSON array of repeats', async () => {
+    state.job = zImageLoraJob();
+    const response = await patch({ dataset_num_repeats: [1, 4], network_weights: [1, 0.5] });
+    expect(response.status).toBe(200);
+    expect(state.writes[0].update).toMatchObject({
+      runtime_dataset_num_repeats: JSON.stringify([1, 4]),
+      runtime_network_weights: JSON.stringify([1, 0.5]),
+    });
+  });
+
+  it('rejects an empty array, zero, negatives, and non-integers without writing', async () => {
+    state.job = zImageLoraJob();
+    const cases = [
+      { body: { dataset_num_repeats: [] }, error: 'dataset_num_repeats must be a non-empty array' },
+      { body: { dataset_num_repeats: [0] }, error: 'dataset_num_repeats[0] must be an integer >= 1' },
+      { body: { dataset_num_repeats: [-2] }, error: 'dataset_num_repeats[0] must be an integer >= 1' },
+      { body: { dataset_num_repeats: [1.5] }, error: 'dataset_num_repeats[0] must be an integer >= 1' },
+      { body: { dataset_num_repeats: [1, 2.2] }, error: 'dataset_num_repeats[1] must be an integer >= 1' },
+    ];
+    for (const { body, error } of cases) {
+      state.writes = [];
+      const response = await patch(body);
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toBe(error);
+      expect(state.writes).toEqual([]);
+    }
+  });
+});

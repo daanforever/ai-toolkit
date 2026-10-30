@@ -68,6 +68,7 @@ def _build_non_bucket_dataloader(
         dataloader_kwargs: dict,
         drop_last: bool = False,
 ) -> DataLoader:
+    concat_dataset.cumulative_sizes = ConcatDataset.cumsum(concat_dataset.datasets)
     indices = _active_concat_indices(concat_dataset)
     _assert_active_training_items(indices)
     sampler = SubsetRandomSampler(indices)
@@ -496,6 +497,8 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
         self.resolution = dataset_config.current_resolution
         self.caption_dict = None
         self.file_list: List['FileItemDTO'] = []
+        # One DTO per source file. Repeat slots are copies built in build_file_list.
+        self.base_file_items: List['FileItemDTO'] = []
 
         # check if dataset_path is a folder or json
         if os.path.isdir(self.dataset_path):
@@ -513,10 +516,6 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
                 
         # remove items in the _controls_ folder
         file_list = [x for x in file_list if not os.path.basename(os.path.dirname(x)) == "_controls"]
-
-        if self.dataset_config.num_repeats > 1:
-            # repeat the list
-            file_list = file_list * self.dataset_config.num_repeats
 
         if self.dataset_config.standardize_images:
             if self.sd.is_xl or self.sd.is_vega or self.sd.is_ssd:
@@ -601,7 +600,7 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
                     te_padding_side=self.sd.te_padding_side if self.sd else "right",
                     latent_space_version=latent_space_version,
                 )
-                self.file_list.append(file_item)
+                self.base_file_items.append(file_item)
             except Exception as e:
                 print_acc(traceback.format_exc())
                 if self.is_video:
@@ -614,7 +613,25 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
         # save the size database
         with open(dataset_size_file, 'w') as f:
             json.dump(self.size_database, f)
-        
+
+        self.build_file_list(self.dataset_config.num_repeats)
+        self.setup_epoch()
+
+    def build_file_list(self, num_repeats: int) -> None:
+        """Expand base file items into one FileItemDTO per repeat slot, then add flips.
+
+        Does not scan the dataset folder. Each slot is its own object so crops and
+        other per-item state stay independent, and bucket shuffle mixes those slots
+        with the rest of the epoch.
+        """
+        repeats = int(num_repeats)
+        if repeats < 1:
+            repeats = 1
+        self.file_list = [
+            copy.deepcopy(base_item)
+            for base_item in self.base_file_items
+            for _ in range(repeats)
+        ]
         if self.is_video:
             print_acc(f"  -  Found {len(self.file_list)} videos")
             assert len(self.file_list) > 0, f"no videos found in {self.dataset_path}"
@@ -622,22 +639,18 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
             print_acc(f"  -  Found {len(self.file_list)} images")
             assert len(self.file_list) > 0, f"no images found in {self.dataset_path}"
 
-        # handle x axis flips
         if self.dataset_config.flip_x:
             print_acc("  -  adding x axis flips")
             current_file_list = [x for x in self.file_list]
             for file_item in current_file_list:
-                # create a copy that is flipped on the x axis
                 new_file_item = copy.deepcopy(file_item)
                 new_file_item.flip_x = True
                 self.file_list.append(new_file_item)
 
-        # handle y axis flips
         if self.dataset_config.flip_y:
             print_acc("  -  adding y axis flips")
             current_file_list = [x for x in self.file_list]
             for file_item in current_file_list:
-                # create a copy that is flipped on the y axis
                 new_file_item = copy.deepcopy(file_item)
                 new_file_item.flip_y = True
                 self.file_list.append(new_file_item)
@@ -648,7 +661,33 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
             else:
                 print_acc(f"  -  Found {len(self.file_list)} images after adding flips")
 
-        self.setup_epoch()
+    def rebuild_for_num_repeats(self, num_repeats: int) -> bool:
+        """Rebuild repeat slots when num_repeats changes. Returns True if the file list changed."""
+        repeats = int(num_repeats)
+        if repeats < 1:
+            raise ValueError(f"num_repeats must be an integer >= 1, got {num_repeats}")
+        if repeats == int(self.dataset_config.num_repeats):
+            return False
+        self.dataset_config.num_repeats = repeats
+        self.build_file_list(repeats)
+        current_weight = float(self.dataset_config.network_weight)
+        for file_item in self.file_list:
+            file_item.network_weight = current_weight
+        if self.dataset_config.buckets:
+            self.setup_buckets(quiet=True, force=True)
+        self._refresh_cached_file_items()
+        return True
+
+    def _refresh_cached_file_items(self) -> None:
+        """Reattach per-item caches after repeat slots are replaced. Disk cache is reused by path."""
+        if self.is_caching_latents:
+            self.cache_latents_all_latents()
+        if self.is_caching_clip_vision_to_disk:
+            self.cache_clip_vision_to_disk()
+        if self.is_caching_text_embeddings:
+            self.cache_text_embeddings()
+        if self.is_generating_controls:
+            self.setup_controls()
 
     def is_pad_to_square_active(self) -> bool:
         """Letterbox pad-to-square only when capability is on and batch_size > 1."""

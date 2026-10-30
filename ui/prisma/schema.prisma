@@ -60,6 +60,7 @@ model RuntimeParams {
   runtime_timestep_type    String?
   runtime_timestep_weighting String?
   runtime_network_weights  String?
+  runtime_dataset_num_repeats String?
   runtime_fixed_cycle_timesteps String?
   runtime_fixed_cycle_seed Int?
   runtime_fixed_cycle_weight_peak_timesteps String?
@@ -81,7 +82,7 @@ model RuntimeParams {
   runtime_scale_lr_mask    String?
   runtime_min_snr_gamma    Float?
   runtime_debug            Boolean?
-  runtime_linear_alpha     Float?
+  runtime_linear_alpha     Int?
   updated_at               DateTime @updatedAt
 }
 

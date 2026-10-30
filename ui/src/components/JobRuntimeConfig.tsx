@@ -466,6 +466,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         gaussian_mean_2?: number;
         gaussian_std_2?: number;
         network_weights?: number[];
+        dataset_num_repeats?: number[];
         prompts?: string[];
         batch_size?: number;
         gradient_accumulation?: number;
@@ -524,6 +525,10 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
       if (lr != null && Number.isFinite(lr)) patchBody.lr = lr;
       if (process.datasets?.length) {
         patchBody.network_weights = process.datasets.map((d: { network_weight?: number }) => d.network_weight ?? 1);
+        patchBody.dataset_num_repeats = process.datasets.map((d: { num_repeats?: number }) => {
+          const repeats = d.num_repeats ?? 1;
+          return Number.isInteger(repeats) && repeats >= 1 ? repeats : 1;
+        });
       }
       if (process.sample?.samples?.length) {
         patchBody.prompts = process.sample.samples.map(
@@ -1260,26 +1265,49 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
 
         {Array.isArray(datasets) && datasets.length > 0 && (
           <div className="space-y-2">
-            <p className="text-xs text-gray-400">Datasets — Network weight</p>
-            <div className="flex items-center gap-2 flex-wrap">
-              {datasets.map((d: { folder_path?: string; network_weight?: number }, i: number) => {
+            <p className="text-xs text-gray-400">Datasets</p>
+            <div className="space-y-3">
+              {datasets.map((d: { folder_path?: string; network_weight?: number; num_repeats?: number }, i: number) => {
                 const name = folderNameFromPath(d.folder_path) || `Dataset ${i + 1}`;
                 return (
-                  <div key={i} className="space-y-1 min-w-[100px]">
+                  <div key={i} className="space-y-1">
                     <label className="block text-xs text-gray-500">Dataset {name}</label>
-                    <input
-                      type="number"
-                      step="any"
-                      value={d.network_weight ?? 1}
-                      onChange={(e) => {
-                        const v = parseFloat(e.target.value);
-                        if (Number.isFinite(v)) {
-                          setValue(v, `config.process[0].datasets[${i}].network_weight`);
-                          setApplyStatus('idle');
-                        }
-                      }}
-                      className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none"
-                    />
+                    <div className="flex items-end gap-2 flex-wrap">
+                      <div className="space-y-1 min-w-[100px] flex-1">
+                        <label className="block text-xs text-gray-500">Weight</label>
+                        <input
+                          type="number"
+                          step="any"
+                          value={d.network_weight ?? 1}
+                          onChange={(e) => {
+                            const v = parseFloat(e.target.value);
+                            if (Number.isFinite(v)) {
+                              setValue(v, `config.process[0].datasets[${i}].network_weight`);
+                              setApplyStatus('idle');
+                            }
+                          }}
+                          className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none"
+                        />
+                      </div>
+                      <div className="space-y-1 min-w-[100px] flex-1">
+                        <label className="block text-xs text-gray-500">Repeats</label>
+                        <input
+                          type="number"
+                          step={1}
+                          min={1}
+                          value={d.num_repeats ?? 1}
+                          onChange={(e) => {
+                            const v = e.target.value.trim();
+                            const num = v === '' ? 1 : parseInt(v, 10);
+                            if (Number.isInteger(num) && num >= 1) {
+                              setValue(num, `config.process[0].datasets[${i}].num_repeats`);
+                              setApplyStatus('idle');
+                            }
+                          }}
+                          className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none"
+                        />
+                      </div>
+                    </div>
                   </div>
                 );
               })}
