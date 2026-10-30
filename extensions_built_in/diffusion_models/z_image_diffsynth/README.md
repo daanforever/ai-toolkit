@@ -25,16 +25,6 @@
 - Fully padded DiT patches (`patch_size=2`) are excluded from attention via an extension-local adapter (DiffSynth and Diffusers). The DiffSynth-Studio submodule and `site-packages` are not modified.
 - **Latent cache:** pad mode adds `pad_to_square` / `pad_x` / `pad_y` / content size to the cache key. Starting at `batch_size: 1` with `cache_latents_to_disk` does **not** create pad caches; raising batch size at runtime rebuilds geometry and **creates** the missing pad latents on disk.
 
-## `model.compile` (per-block DiT `torch.compile`)
-
-- Set **`model.compile: true`** to JIT-compile DiffSynth DiT blocks with `torch.compile(..., dynamic=True)` (Z-Image paper §4.2 style).
-- Order: **quantize → LoRA → compile** (compile runs in `hook_before_train_loop` after the main DiT is on GPU). Gradient checkpointing stays **outside** each compiled block.
-- Works with the usual **`quantize: true`** (quanto float8) path.
-- Diffusers transformers (`loader: diffusers` / `_main_is_diffusers` / `_sampling_is_diffusers`) are **not** compiled by this path; only DiffSynth `ZImageDiT` ModuleLists (`layers`, optional refiners).
-- Device moves (sample / offload): **same-device is a no-op** (keeps compiled blocks); real moves **unwrap → Parameter/buffer replace (not `Module.to`) → recompile on GPU** so quanto + compile do not hit `Couldn't swap ... weight` / weakref errors.
-- On Windows or when inductor/Triton is unavailable, failures are soft: training continues in eager mode.
-- Expect slower first steps while JIT warms up.
-
 ## `use_diffsynth_training_loop`
 
 - **Source of truth:** `model.model_kwargs["use_diffsynth_training_loop"]` (default `true` if omitted).
@@ -164,7 +154,7 @@ This default is on for existing configs that do not set the key. Set `0` to keep
 - `test_snr_weighting.py` — SNR / `min_snr_gamma` for toolkit loop (`use_diffsynth_training_loop: false`).
 - `test_smoke.py` step 4d — SNR API guard for default DiffSynth adapter (`compute_snr`; SNR disabled in default training).
 - `test_smoke.py` step 7a — trainer flags and `linear_timesteps`.
-- `test_compile_quantized_blocks.py` — per-block compile helper (CPU) + float8/quanto + checkpoint smoke (CUDA).
+- `test_safe_module_to_device.py` — quanto float8 `safe_module_to_device` payload move and LoRA parameter identity (CUDA).
 - `test_spatial_attention.py` — pad validity → patch masks, adapter attn_mask, batch plumbing.
 - `testing/test_pad_to_square.py` — letterbox geometry, validity/loss masks, latent cache keys.
 - `testing/test_gaussian_full.py` — regression with `use_diffsynth_training_loop: false` (toolkit gaussian path).

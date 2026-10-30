@@ -11,7 +11,7 @@ Train-time `t` comes from the official Turbo grid (`timestep_type: turbo_prior`)
 
 When `true`, this is **not** “train base, infer Turbo”: it is **direct LoRA on distilled Turbo**. Runtime toggle `false→true` parks base on CPU and pins Turbo on CUDA; `true→false` reverses that via `apply_turbo_teacher_mode`.
 
-Use process type `z_image_diffsynth_trainer` and `model.arch: zimage_diffsynth`. Adapter flags and letterbox / compile behaviour are documented in `README.md`. Example YAML: `config/examples/train_lora_zimage_diffsynth_turbo_prior.yaml`.
+Use process type `z_image_diffsynth_trainer` and `model.arch: zimage_diffsynth`. Adapter flags and letterbox behaviour are documented in `README.md`. Example YAML: `config/examples/train_lora_zimage_diffsynth_turbo_prior.yaml`.
 
 ## Checkpoints
 

@@ -52,6 +52,74 @@ def _resolve_use_diffsynth_prompt_encoding(model_kwargs):
     return mk.get("use_diffsynth_training_loop", True)
 
 
+_DIT_BLOCK_ATTRS = ("layers", "noise_refiner", "context_refiner")
+
+
+def discover_dit_block_names(dit):
+    """Return ModuleList attribute names that hold DiT blocks."""
+    names = []
+    for name in _DIT_BLOCK_ATTRS:
+        if isinstance(getattr(dit, name, None), torch.nn.ModuleList):
+            names.append(name)
+    return names
+
+
+def _resolve_target_device(_module, *args, **kwargs):
+    """Target device from nn.Module.to(*args, **kwargs). None = dtype-only / no move."""
+    if "device" in kwargs:
+        return torch.device(kwargs["device"])
+    if args:
+        first = args[0]
+        if isinstance(first, torch.device):
+            return first
+        if isinstance(first, str):
+            return torch.device(first)
+        if isinstance(first, torch.Tensor):
+            return first.device
+        if isinstance(first, int):
+            return torch.device("cuda", first)
+        if isinstance(first, torch.dtype):
+            return None
+    if "dtype" in kwargs or "memory_format" in kwargs:
+        return None
+    return None
+
+
+def _module_already_on_device(module, device) -> bool:
+    from toolkit.util.device import devices_equal, quantized_payload_device
+
+    target = torch.device(device)
+    for p in module.parameters():
+        if not devices_equal(p.device, target):
+            return False
+        payload = quantized_payload_device(p)
+        if payload is not None and not devices_equal(payload, target):
+            return False
+    for b in module.buffers():
+        if not devices_equal(b.device, target):
+            return False
+    return True
+
+
+def move_dit_to_device(dit, target):
+    """Move a DiT without Module.to(). Pack frozen block weights on CUDA.
+
+    Same-device is a no-op. Quantized weights are relocated by Parameter replace
+    so quanto swap_tensors is not used.
+    """
+    from toolkit.util.device import safe_module_to_device
+
+    target = torch.device(target)
+    if _module_already_on_device(dit, target):
+        return dit
+    if target.type == "cuda":
+        for name in discover_dit_block_names(dit):
+            for block in getattr(dit, name):
+                safe_module_to_device(block, target, dtype=None, pack=True)
+    safe_module_to_device(dit, target, dtype=None)
+    return dit
+
+
 class _DiTUnetWrapper(torch.nn.Module):
     """Wraps ZImageDiT so that .config.patch_size exists for BatchProcessor / timestep scheduling.
     Forwards all other attributes and calls to the inner DiT. Uses _inner_dit so that .device/.training
@@ -68,10 +136,10 @@ class _DiTUnetWrapper(torch.nn.Module):
         return self._modules["_inner_dit"](*args, **kwargs)
 
     def to(self, *args, **kwargs):
-        # torch.compile leaves weakrefs that break nn.Module._apply / swap_tensors (quanto).
-        from .compile_blocks import move_dit_with_compiled_blocks
-
-        move_dit_with_compiled_blocks(self._inner_dit, None, *args, **kwargs)
+        # quanto Module.to() uses swap_tensors, which fails on quantized weights.
+        target = _resolve_target_device(self._inner_dit, *args, **kwargs)
+        if target is not None:
+            move_dit_to_device(self._inner_dit, target)
         return self
 
     def cpu(self):
@@ -137,7 +205,6 @@ class ZImageDiffSynthModel(BaseModel):
         # Enable gradient checkpointing by default for DiffSynth DiT to
         # reduce peak VRAM usage during training forwards.
         self.gradient_checkpointing = True
-        self._dit_blocks_compiled = False
 
     @staticmethod
     def get_train_scheduler(use_diffsynth_loop=True, use_dynamic_shifting=False):
@@ -176,9 +243,7 @@ class ZImageDiffSynthModel(BaseModel):
             return False
         dit = getattr(self, "_raw_dit", None)
         if dit is not None:
-            from .compile_blocks import move_dit_with_compiled_blocks
-
-            move_dit_with_compiled_blocks(dit, None, target)
+            move_dit_to_device(dit, target)
         elif self.model is not None:
             self.model.to(target)
         self._assert_dit_on_device(target)
@@ -290,7 +355,7 @@ class ZImageDiffSynthModel(BaseModel):
             # gc.collect() is not part of the caching allocator's cudaMalloc retry.
             if target.type == "cuda":
                 self._flush_cuda()
-            # Wrapper.to unwraps compiled blocks; plain Module uses nn.Module.to.
+            # _DiTUnetWrapper.to moves quantized weights without Module.to(); a plain Module uses nn.Module.to.
             # Do not swallow failures: a silent CUDA leave leaves both DiTs resident.
             try:
                 st.to(device)
@@ -402,8 +467,6 @@ class ZImageDiffSynthModel(BaseModel):
         orig_to = unet.to
 
         def _to_guard(*a, **kw):
-            from .compile_blocks import _resolve_target_device
-
             dit = getattr(unet, "_inner_dit", None) or unet
             target = _resolve_target_device(dit, *a, **kw)
             if target is not None and torch.device(target).type == "cuda":
@@ -1083,67 +1146,6 @@ class ZImageDiffSynthModel(BaseModel):
         if not getattr(self, "_disable_context_refiner", True):
             names.append("context_refiner")
         return names
-
-    def compile_dit_blocks(self):
-        """Per-block torch.compile on DiffSynth DiT ModuleLists (after quantize + LoRA)."""
-        if getattr(self, "_dit_blocks_compiled", False):
-            return
-        from .compile_blocks import compile_dit_module_lists
-
-        names = self.get_transformer_block_names() or []
-        log = self.print_and_status_update
-        totals = {"ok": 0, "failed": 0, "skipped": 0}
-        train_on_turbo = bool(getattr(self, "_train_on_turbo", False))
-
-        def _accumulate(stats):
-            for k in totals:
-                totals[k] += stats.get(k, 0)
-
-        try:
-            # Never co-reside: compile only the active train DiT.
-            if (
-                not train_on_turbo
-                and self._raw_dit is not None
-                and names
-                and not getattr(self, "_main_is_diffusers", False)
-            ):
-                log(
-                    "[zimage_diffsynth] Compiling main DiT blocks "
-                    "(torch.compile dynamic=True)"
-                )
-                _accumulate(compile_dit_module_lists(self._raw_dit, names, log_fn=log))
-            elif train_on_turbo:
-                log("[zimage_diffsynth] Skipping main DiT compile (train-on-Turbo)")
-
-            sampling = getattr(self, "_sampling_transformer", None)
-            if (
-                train_on_turbo
-                and sampling is not None
-                and not getattr(self, "_sampling_is_diffusers", False)
-                and names
-            ):
-                inner = getattr(sampling, "_inner_dit", None)
-                if inner is None:
-                    inner = unwrap_model(sampling)
-                    if hasattr(inner, "_inner_dit"):
-                        inner = inner._inner_dit
-                if inner is not None:
-                    log("[zimage_diffsynth] Compiling sampling DiT blocks")
-                    # Active Turbo is already on CUDA via apply_turbo_teacher_mode;
-                    # do not pull sampling onto CUDA while base is resident, and
-                    # do not park Turbo on CPU afterward (breaks train-on-Turbo).
-                    _accumulate(compile_dit_module_lists(inner, names, log_fn=log))
-            elif not train_on_turbo and sampling is not None:
-                log("[zimage_diffsynth] Skipping sampling DiT compile (train-on-base)")
-        finally:
-            # Restore exclusive residency after any compile-side moves.
-            self.apply_turbo_teacher_mode(train_on_turbo)
-
-        self._dit_blocks_compiled = True
-        log(
-            f"[zimage_diffsynth] DiT compile summary: ok={totals['ok']} "
-            f"failed={totals['failed']} skipped={totals['skipped']}"
-        )
 
     def get_lora_optimizer_param_groups(self, network, unet_lr, default_lr):
         unet_loras = getattr(network, "unet_loras", None)

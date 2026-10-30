@@ -5,7 +5,6 @@ No real model weights. Run from the repo root:
   venv\\Scripts\\python.exe -m pytest extensions_built_in/diffusion_models/z_image_diffsynth/test_turbo_lora.py -q
 """
 
-import inspect
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -33,7 +32,9 @@ _SAMPLING_ERROR = (
     "(Z-Image-Turbo / _sampling_transformer)."
 )
 _TEACHER_ERROR = "turbo_lora=true is incompatible with train.turbo_teacher_weight=true."
-_COMPILE_ERROR = "turbo_lora=true is incompatible with model.compile=true."
+_COMPILE_UNSUPPORTED = (
+    "zimage_diffsynth does not support model.compile; set model.compile: false."
+)
 _CACHE_ERROR = "turbo_lora=true requires train.cache_text_embeddings=true."
 _TRANSFORMER_ERROR = (
     "turbo_lora=true requires a loaded sampling transformer "
@@ -206,7 +207,6 @@ def _build_world(shared, *, fail_turbo_on=False, weight=2.0, slots=8):
     sd._move_main_network = residency.host_base
     sd._flush_cuda = lambda: events.append("flush")
     sd.apply_turbo_teacher_mode = MagicMock()
-    sd.compile_dit_blocks = MagicMock()
 
     def _force(net, device):
         kind = device.type if isinstance(device, torch.device) else _is_cpu(device)
@@ -276,7 +276,7 @@ def _bind_loop(world, optimizer, concept, *, accumulate=False):
     trainer.train_single_accumulation = concept
     trainer.steps_this_boundary = 0
     trainer.is_grad_accumulation_step = accumulate
-    trainer.model_config = SimpleNamespace(low_vram=False, compile=False)
+    trainer.model_config = SimpleNamespace(low_vram=False)
     trainer.embedding = None
     trainer.adapter = None
     trainer.ema = None
@@ -360,15 +360,6 @@ def test_format_turbo_lora_weight_strips_trailing_zeros():
     assert format_turbo_lora_weight(2) == "2"
 
 
-def test_pass_module_has_no_compile_path():
-    import extensions_built_in.diffusion_models.z_image_diffsynth.turbo_lora.turbo_lora as mod
-
-    source = inspect.getsource(mod)
-    assert "compile_dit_blocks" not in source
-    assert "torch.compile" not in source
-    assert "apply_turbo_teacher_mode" not in source
-
-
 def test_parent_after_concept_hook_is_noop():
     assert SDTrainer._after_train_single_accumulation(SimpleNamespace(), None, 1.0) is None
 
@@ -446,7 +437,6 @@ def test_init_accepts_adafactor_any_case(monkeypatch):
         ({"sampling_name_or_path": None}, _SAMPLING_ERROR),
         ({"sampling_name_or_path": ""}, _SAMPLING_ERROR),
         ({"turbo_teacher_weight": True}, _TEACHER_ERROR),
-        ({"compile": True}, _COMPILE_ERROR),
         ({"cache_text_embeddings": False}, _CACHE_ERROR),
         ({"cache_text_embeddings": None}, _CACHE_ERROR),
     ],
@@ -464,34 +454,32 @@ def test_init_turbo_lora_value_errors(monkeypatch, overrides, message):
     assert str(exc.value) == message
 
 
-def test_false_flag_keeps_compile_path(monkeypatch):
+@pytest.mark.parametrize("turbo_lora", [False, True])
+def test_init_rejects_model_compile(monkeypatch, turbo_lora):
     from extensions_built_in.diffusion_models.z_image_diffsynth.trainer import (
         ZImageDiffSynthTrainer,
     )
 
     _install_trainer_init(
         monkeypatch,
-        turbo_lora=False,
         compile=True,
-        optimizer="adamw",
-        cache_text_embeddings=False,
+        turbo_lora=turbo_lora,
+        optimizer="adafactor",
+        cache_text_embeddings=True,
     )
-    trainer = ZImageDiffSynthTrainer(0, None, _base_cfg())
-    assert trainer.model_config.compile is True
-    trainer.hook_after_sd_init_before_load()
-    assert trainer._compile_dit_blocks is True
-    assert trainer.model_config.compile is False
+    with pytest.raises(ValueError) as exc:
+        ZImageDiffSynthTrainer(0, None, _base_cfg())
+    assert str(exc.value) == _COMPILE_UNSUPPORTED
 
 
-def test_true_flag_compile_raises_before_compile_is_cleared(monkeypatch):
+def test_init_accepts_model_compile_false(monkeypatch):
     from extensions_built_in.diffusion_models.z_image_diffsynth.trainer import (
         ZImageDiffSynthTrainer,
     )
 
-    _install_trainer_init(monkeypatch, turbo_lora=True, compile=True)
-    with pytest.raises(ValueError) as exc:
-        ZImageDiffSynthTrainer(0, None, _base_cfg())
-    assert str(exc.value) == _COMPILE_ERROR
+    _install_trainer_init(monkeypatch, compile=False, turbo_lora=False)
+    trainer = ZImageDiffSynthTrainer(0, None, _base_cfg())
+    assert trainer.model_config.compile is False
 
 
 @pytest.mark.parametrize(
@@ -650,7 +638,6 @@ def test_imitation_pass_contract(monkeypatch):
     assert world.residency.sampling == "cpu"
     _assert_dropout_restored(world)
     world.sd.apply_turbo_teacher_mode.assert_not_called()
-    world.sd.compile_dit_blocks.assert_not_called()
     assert world.trainer.network is world.base_net
     assert world.sd.network is world.base_net
 

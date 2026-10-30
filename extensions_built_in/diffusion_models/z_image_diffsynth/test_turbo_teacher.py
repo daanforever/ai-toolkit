@@ -1420,7 +1420,6 @@ def _run_hook_before_train_loop_timing(monkeypatch, *, turbo_teacher_weight: boo
     )
     trainer = ZImageDiffSynthTrainer(0, None, _base_cfg())
     trainer.is_ui_trainer = False
-    trainer._compile_dit_blocks = False
     trainer.sd = sd
     trainer.network = sd.network
     trainer.train_config.turbo_teacher_weight = turbo_teacher_weight

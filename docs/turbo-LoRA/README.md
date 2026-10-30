@@ -21,7 +21,7 @@ Structure (top to bottom):
 | Section                      | Contains                                                                                                              | Does not contain                          |
 | ---------------------------- | --------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
 | Intro (above)                | What the Turbo-LoRA MVP is, where the second pass runs, the plan rule                                                 | Details covered below                     |
-| `## Contract`                | MVP behavior to implement. Subsections: `Passes`, `Optimizer`, `Config`, `Trainer hook`, `Compile`                     | Shipped behavior, task list, test steps   |
+| `## Contract`                | MVP behavior to implement. Subsections: `Passes`, `Optimizer`, `Config`, `Trainer hook`                                | Shipped behavior, task list, test steps   |
 | `## 1. Done`                 | Behavior that is already in the tree. Empty until a `Contract` subsection is moved here                               | The unimplemented spec                    |
 | `## 2. To do`                | Unimplemented items, one bullet each, one line                                                                        | Done items, ideas without a concrete task |
 | `## 3. Notes for continuing` | Subsections: `Limits` (accepted constraints), `Known issue` (confirmed defects with exact error text), `Testing`      | Behavior already described in `Contract` or `1. Done` |
@@ -62,12 +62,12 @@ Artifacts (commands, URLs, exact error strings, file paths, sample values) go in
 
 - `train.turbo_lora`: bool, default false when the key is absent or the value is `None`. Any other non-bool raises `ValueError` with text `turbo_lora must be boolean true/false; got {value!r}`.
 - `train.turbo_lora_weight`: finite float `> 0`, default `1.0` when the key is absent. Read and checked only when `turbo_lora` is true. `bool` is rejected. Otherwise `ValueError` with text `turbo_lora_weight must be a finite number > 0, got {value!r}`.
+- `model.compile` is true. `ZImageDiffSynthTrainer.__init__` after `super().__init__` raises `ValueError` with text `zimage_diffsynth does not support model.compile; set model.compile: false.`
 - When `turbo_lora` is false the weight is ignored and the checks below do not run.
 - When `turbo_lora` is true, `ZImageDiffSynthTrainer.__init__` after `super().__init__` raises `ValueError` if any of these hold:
   - `train.optimizer`, compared case-insensitively, is not `adafactor`. Text: `turbo_lora=true requires train.optimizer='adafactor' (got {opt!r}).`
   - `model.sampling_name_or_path` is missing. Text: `turbo_lora=true requires model.sampling_name_or_path (Z-Image-Turbo / _sampling_transformer).`
   - `train.turbo_teacher_weight` is true. Text: `turbo_lora=true is incompatible with train.turbo_teacher_weight=true.`
-  - `model.compile` is true. Text: `turbo_lora=true is incompatible with model.compile=true.`
   - `train.cache_text_embeddings` is false. Text: `turbo_lora=true requires train.cache_text_embeddings=true.`
 - A true flag with `sd._sampling_transformer is None` raises at the first imitation pass. Text: `turbo_lora=true requires a loaded sampling transformer (set model.sampling_name_or_path to Z-Image-Turbo).`
 - A true flag with `sd._sampling_network is None` raises at that pass. Text: `turbo_lora=true requires a loaded sampling network (shared LoRA on the sampling DiT).`
@@ -79,11 +79,6 @@ Artifacts (commands, URLs, exact error strings, file paths, sample values) go in
 - `loss_dict['loss']` is the concept loss. When the flag is true, `loss_dict['turbo_lora']` is the sample-weighted mean of the detached per-microbatch residual MSEs (`mse(turbo_on, target)` before `turbo_lora_weight`), using the same batch-size weights as `loss`. When the flag is false the key is absent.
 - When the flag is true, once, before the loop: `[zimage_diffsynth] turbo_lora=true weight={weight} slots={turbo_prior_steps}`. `{weight}` has trailing zeros stripped.
 
-### Compile
-
-- The imitation pass contains no `torch.compile` path and does not call `compile_dit_blocks`.
-- `model.compile: true` together with `turbo_lora: true` raises in `__init__` (see `Config`). The raise runs before `hook_after_sd_init_before_load` clears `model_config.compile`.
-
 ## 2. To do
 
 ## 3. Notes for continuing
@@ -91,7 +86,6 @@ Artifacts (commands, URLs, exact error strings, file paths, sample values) go in
 ### Limits
 
 - The delayed second pass and `turbo_lora_steps` are outside this MVP.
-- `compile_blocks.py` stays for jobs with `turbo_lora: false`.
 - `docs/turbo-LoRA/Source.md` is the sketch. This file wins where they differ. The imitation target is the residual in `Passes`. Its `[0.85, 0.65, 0.45, 0.25, 0.15, 0.07, 0.03]` list is not an imitation `t`.
 - Concept `t` stays on the job's `timestep_type`. Imitation `t` is one turbo-grid center.
 - `clip_threshold` caps update RMS. It leaves the mix to `turbo_lora_weight`.

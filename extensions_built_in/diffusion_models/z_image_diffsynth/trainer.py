@@ -91,6 +91,12 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
         # Let DiffusionTrainer / SDTrainer do their normal initialization first.
         super().__init__(process_id, job, config, **kwargs)
 
+        model_config = getattr(self, "model_config", None)
+        if model_config is not None and getattr(model_config, "compile", False) is True:
+            raise ValueError(
+                "zimage_diffsynth does not support model.compile; set model.compile: false."
+            )
+
         tc = self.train_config
 
         cfg = getattr(self, "config", None)
@@ -170,10 +176,6 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
             if getattr(tc, "turbo_teacher_weight", False) is True:
                 raise ValueError(
                     "turbo_lora=true is incompatible with train.turbo_teacher_weight=true."
-                )
-            if getattr(self.model_config, "compile", False) is True:
-                raise ValueError(
-                    "turbo_lora=true is incompatible with model.compile=true."
                 )
             if getattr(tc, "cache_text_embeddings", False) is not True:
                 raise ValueError(
@@ -458,10 +460,6 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
             sd.gradient_checkpointing = bool(
                 getattr(self.train_config, "gradient_checkpointing", True)
             )
-            if getattr(self, "_compile_dit_blocks", False) and hasattr(
-                sd, "compile_dit_blocks"
-            ):
-                sd.compile_dit_blocks()
         self.internal_hook_before_train_loop()
 
     def hook_after_sd_init_before_load(self):
@@ -470,14 +468,6 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
         but before sd.load_model(). We use this hook to mark the model as
         flow-matching while preserving DiffusionTrainer's existing behavior.
         """
-        # Defer per-block DiT compile to hook_before_train_loop (after quantize + LoRA).
-        # Suppress BaseSDTrainProcess whole-unet torch.compile which is ineffective here.
-        self._compile_dit_blocks = bool(
-            getattr(self.model_config, "compile", False)
-        )
-        if self._compile_dit_blocks:
-            self.model_config.compile = False
-
         # Preserve DiffusionTrainer logic (status updates, hooks, etc.)
         super().hook_after_sd_init_before_load()
 

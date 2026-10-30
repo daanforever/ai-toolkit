@@ -161,7 +161,6 @@ def overlay_run(
     logging["log_every"] = max(log_every_n, 10)
     train["dtype"] = "bf16"
     train["gradient_checkpointing"] = True
-    process0["model"]["compile"] = False
 
     # Warm starts from scratch; fork resumes and should not force a first sample.
     if is_warm:

@@ -122,7 +122,6 @@ def test_hook_before_train_loop_disables_merge_in(monkeypatch):
     )
     trainer = ZImageDiffSynthTrainer(0, None, _base_cfg())
     trainer.is_ui_trainer = False
-    trainer._compile_dit_blocks = False
     trainer.sd = sd
     trainer.network = main
     trainer.hook_before_train_loop()
