@@ -81,6 +81,7 @@ model RuntimeParams {
   runtime_scale_lr_mask    String?
   runtime_min_snr_gamma    Float?
   runtime_debug            Boolean?
+  runtime_linear_alpha     Float?
   updated_at               DateTime @updatedAt
 }
 

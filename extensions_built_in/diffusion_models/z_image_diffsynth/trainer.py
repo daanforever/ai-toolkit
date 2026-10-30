@@ -1,6 +1,8 @@
 # ZImageDiffSynthTrainer: DiffusionTrainer for arch zimage_diffsynth (DiffSynth DiT/forward).
 
+import math
 import os
+import sqlite3
 
 from toolkit.extension import Extension
 from toolkit.print import print_acc
@@ -386,9 +388,144 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
             stable = sum(1 for pair in setup.pairs if pair.stable)
             print_acc(format_stable_log(stable, len(setup.pairs)))
 
+    def _runtime_rank_barrier(self) -> None:
+        """Block until every rank reaches this point. No-op without a process group."""
+        accelerator = getattr(self, "accelerator", None)
+        if accelerator is None:
+            return
+        wait = getattr(accelerator, "wait_for_everyone", None)
+        if wait is None:
+            return
+        wait()
+
+    def _read_runtime_linear_alpha(self):
+        """Read RuntimeParams.runtime_linear_alpha. Missing table or column is absent."""
+        try:
+            return self._get_runtime_scalar("runtime_linear_alpha", float)
+        except sqlite3.OperationalError as exc:
+            message = str(exc).lower()
+            if "no such column" in message or "no such table" in message:
+                return None
+            raise
+
+    def _unwrap_lora_network(self, network):
+        """Peel DDP and compile wrappers until the LoRA network is visible."""
+        current = network
+        for _ in range(4):
+            if getattr(current, "network_type", None) is not None or hasattr(current, "unet_loras"):
+                return current
+            inner = getattr(current, "_orig_mod", None)
+            if inner is None:
+                inner = getattr(current, "module", None)
+            if inner is None or inner is current:
+                return current
+            current = inner
+        return current
+
+    def _linear_alpha_networks(self):
+        """Live LoRA networks, unwrapped and deduped.
+
+        Training swaps ``self.network`` with the sampling network. ``scale`` is
+        not shared across that pair, so each object has to be updated.
+        """
+        sd = getattr(self, "sd", None)
+        candidates = [getattr(self, "network", None)]
+        if sd is not None:
+            candidates.extend(
+                (
+                    getattr(sd, "network", None),
+                    getattr(sd, "_sampling_network", None),
+                    getattr(sd, "_saved_train_network", None),
+                )
+            )
+        networks = []
+        seen = set()
+        for network in candidates:
+            if network is None:
+                continue
+            network = self._unwrap_lora_network(network)
+            if network is None:
+                continue
+            key = id(network)
+            if key in seen:
+                continue
+            seen.add(key)
+            networks.append(network)
+        return networks
+
+    def _set_lora_linear_alpha(self, value: float) -> None:
+        """Set alpha and scale on every live LoRA module. A and B stay put."""
+        networks = self._linear_alpha_networks()
+        if not networks:
+            raise ValueError("runtime linear_alpha: no network")
+        for network in networks:
+            network_type = getattr(network, "network_type", None)
+            if network_type != "lora":
+                raise ValueError(
+                    "runtime linear_alpha requires network.type lora, "
+                    f"got {network_type!r}"
+                )
+            modules = getattr(network, "unet_loras", None)
+            if not modules:
+                raise ValueError("runtime linear_alpha: network has no unet_loras")
+        for network in networks:
+            for module in network.unet_loras:
+                module.alpha.fill_(value)
+                module.scale = value / module.lora_dim
+            network.alpha = value
+
+    def apply_runtime_linear_alpha(self) -> None:
+        """Apply RuntimeParams.runtime_linear_alpha, then clear the column.
+
+        Every rank reads the row before the barrier. Rank 0 clears only after
+        that, so another rank cannot observe NULL and skip the update.
+        """
+        if not self.is_ui_trainer:
+            return
+        value = self._read_runtime_linear_alpha()
+        self._runtime_rank_barrier()
+        if value is None:
+            return
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(
+                f"runtime linear_alpha must be a finite number > 0, got {value!r}"
+            )
+        self._set_lora_linear_alpha(value)
+        print_acc(f"\nruntime linear_alpha from UI/DB: {value}")
+        self._clear_runtime_columns("runtime_linear_alpha")
+
+    def _reapply_config_linear_alpha(self) -> None:
+        """Put config linear_alpha back onto modules after a checkpoint load.
+
+        ``load_state_dict`` restores the alpha buffer and leaves ``scale`` at
+        the value from network init. Config wins when it is a positive finite
+        alpha. Zero stays untouched: module init treats 0 as rank.
+        """
+        raw_network = getattr(self, "network", None)
+        if raw_network is None:
+            return
+        network = self._unwrap_lora_network(raw_network)
+        if getattr(network, "network_type", None) != "lora":
+            return
+        config = getattr(self, "network_config", None)
+        if config is None:
+            return
+        raw = getattr(config, "linear_alpha", None)
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            return
+        value = float(raw)
+        if not math.isfinite(value) or value <= 0:
+            return
+        self._set_lora_linear_alpha(value)
+
+    def load_weights(self, path):
+        super().load_weights(path)
+        self._reapply_config_linear_alpha()
+
     def end_step_hook(self):
         """Apply queued util-ui commands after the other runtime updates."""
         super().end_step_hook()
+        self.apply_runtime_linear_alpha()
         drain_runtime_commands(self)
 
     def _build_stable_lora_setup(self, network, percent: float) -> None:

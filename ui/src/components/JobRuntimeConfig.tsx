@@ -3,6 +3,7 @@
 import { Job } from '@prisma/client';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { migrateJobConfig } from '@/app/jobs/new/jobConfig';
+import { ZIMAGE_DIFFSYNTH_ARCH } from '@/app/jobs/new/utils';
 import { useNestedState } from '@/utils/hooks';
 import { JobConfig, WeightDecayMode } from '@/types';
 import { defaultJobConfig } from '@/app/jobs/new/jobConfig';
@@ -228,6 +229,16 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
   const loggingAny = config?.config?.process?.[0]?.logging as { debug?: boolean } | undefined;
   const debug = loggingAny?.debug ?? false;
 
+  const modelArch = config?.config?.process?.[0]?.model?.arch;
+  const network = config?.config?.process?.[0]?.network;
+  const showLinearAlpha =
+    modelArch === ZIMAGE_DIFFSYNTH_ARCH && network?.type === 'lora';
+  const defaultLinearAlpha = defaultJobConfig.config.process[0].network?.linear_alpha ?? 32;
+  const linearAlpha =
+    typeof network?.linear_alpha === 'number' && Number.isFinite(network.linear_alpha)
+      ? network.linear_alpha
+      : defaultLinearAlpha;
+
   const datasets = config?.config?.process?.[0]?.datasets;
   const sampleSamples = (
     sampleAny?.samples as Array<{ prompt?: string }> | undefined
@@ -409,6 +420,21 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
       tr.turbo_teacher_weight = turboTeacherWeight;
     }
 
+    let linearAlphaToSend: number | undefined;
+    if (
+      process.model?.arch === ZIMAGE_DIFFSYNTH_ARCH &&
+      process.network?.type === 'lora' &&
+      process.network
+    ) {
+      if (typeof linearAlpha !== 'number' || !Number.isFinite(linearAlpha) || !(linearAlpha > 0)) {
+        setApplyStatus('error');
+        setErrorMessage('linear_alpha must be a finite number > 0');
+        return;
+      }
+      process.network.linear_alpha = linearAlpha;
+      linearAlphaToSend = linearAlpha;
+    }
+
     try {
       const postRes = await fetch('/api/jobs', {
         method: 'POST',
@@ -460,6 +486,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         turbo_prior_steps?: number;
         turbo_t_jitter?: number;
         turbo_teacher_weight?: boolean;
+        linear_alpha?: number;
       } = {
         weight_decay: weightDecay,
         weight_decay_increment: weightDecayIncrement,
@@ -519,6 +546,9 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
         patchBody.turbo_t_jitter = tr.turbo_t_jitter as number;
         patchBody.turbo_teacher_weight = tr.turbo_teacher_weight as boolean;
       }
+      if (linearAlphaToSend != null) {
+        patchBody.linear_alpha = linearAlphaToSend;
+      }
 
       const patchRes = await fetch(`/api/jobs/${job.id}/runtime-config`, {
         method: 'PATCH',
@@ -577,6 +607,7 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
     turboPriorSteps,
     turboTJitter,
     turboTeacherWeight,
+    linearAlpha,
   ]);
 
   if (!initialConfig) {
@@ -641,6 +672,26 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
               className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
             />
           </div>
+          {showLinearAlpha && (
+            <div className="space-y-2 flex-1 min-w-[140px]">
+              <p className="text-xs text-gray-400">Linear alpha</p>
+              <input
+                type="number"
+                step="any"
+                value={linearAlpha}
+                onChange={(e) => {
+                  const v = e.target.value.trim();
+                  const num = v === '' ? null : parseFloat(v);
+                  setValue(
+                    num != null && Number.isFinite(num) ? num : undefined,
+                    'config.process[0].network.linear_alpha',
+                  );
+                  setApplyStatus('idle');
+                }}
+                className="w-full rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+              />
+            </div>
+          )}
         </div>
 
         <div className="flex items-end gap-4 flex-wrap">

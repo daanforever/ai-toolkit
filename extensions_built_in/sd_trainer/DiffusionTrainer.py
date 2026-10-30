@@ -55,6 +55,7 @@ _RUNTIME_CLEARABLE_COLUMNS = frozenset({
     "runtime_turbo_prior_steps",
     "runtime_turbo_t_jitter",
     "runtime_turbo_teacher_weight",
+    "runtime_linear_alpha",
 })
 
 
