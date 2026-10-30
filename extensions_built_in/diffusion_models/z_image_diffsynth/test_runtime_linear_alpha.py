@@ -74,7 +74,7 @@ def _pair(alpha: float = 4.0, dim: int = 4):
 def _create_db(path, value):
     conn = sqlite3.connect(path)
     conn.execute(
-        "CREATE TABLE RuntimeParams (jobId TEXT PRIMARY KEY, runtime_linear_alpha REAL)"
+        "CREATE TABLE RuntimeParams (jobId TEXT PRIMARY KEY, runtime_linear_alpha INTEGER)"
     )
     conn.execute(
         "INSERT INTO RuntimeParams (jobId, runtime_linear_alpha) VALUES (?, ?)",
@@ -83,6 +83,16 @@ def _create_db(path, value):
     conn.commit()
     conn.close()
     return str(path)
+
+
+def _write_alpha(path, value):
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "UPDATE RuntimeParams SET runtime_linear_alpha = ? WHERE jobId = ?",
+        (value, "job-1"),
+    )
+    conn.commit()
+    conn.close()
 
 
 def _stored_alpha(path):
@@ -190,11 +200,84 @@ def test_apply_rescales_shared_loras_and_clears_column(tmp_path, monkeypatch):
         assert pair.stable is True
     assert all(module._deferred_lora_init_pending for module in main.unet_loras)
     assert _stored_alpha(db) is None
-    assert any("runtime linear_alpha from UI/DB: 8.0" in line for line in lines)
+    assert any(line.strip() == "runtime linear_alpha from UI/DB: 8" for line in lines)
 
     trainer.apply_runtime_linear_alpha()
     assert main.unet_loras[0].scale == 2.0
     _assert_weights(main, main_weights)
+
+
+def test_repeat_value_skips_set_and_log(tmp_path, monkeypatch):
+    lines = []
+    monkeypatch.setattr(
+        trainer_module,
+        "print_acc",
+        lambda *args, **kwargs: lines.append(" ".join(str(arg) for arg in args)),
+    )
+    calls = []
+    original = ZImageDiffSynthTrainer._set_lora_linear_alpha
+
+    def tracked(self, value):
+        calls.append(value)
+        original(self, value)
+
+    monkeypatch.setattr(ZImageDiffSynthTrainer, "_set_lora_linear_alpha", tracked)
+    main, sampling = _pair()
+    db = _create_db(tmp_path / "repeat.db", 8)
+    trainer = _trainer(db, main, sampling=sampling)
+    trainer.apply_runtime_linear_alpha()
+    _write_alpha(db, 8)
+    trainer.apply_runtime_linear_alpha()
+    assert calls == [8]
+    assert [line.strip() for line in lines if "runtime linear_alpha" in line] == [
+        "runtime linear_alpha from UI/DB: 8"
+    ]
+    assert main.unet_loras[0].scale == 8 / main.unet_loras[0].lora_dim
+    assert _stored_alpha(db) is None
+
+
+def test_changed_value_sets_again(tmp_path, monkeypatch):
+    lines = []
+    monkeypatch.setattr(
+        trainer_module,
+        "print_acc",
+        lambda *args, **kwargs: lines.append(" ".join(str(arg) for arg in args)),
+    )
+    calls = []
+    original = ZImageDiffSynthTrainer._set_lora_linear_alpha
+
+    def tracked(self, value):
+        calls.append(value)
+        original(self, value)
+
+    monkeypatch.setattr(ZImageDiffSynthTrainer, "_set_lora_linear_alpha", tracked)
+    main, sampling = _pair()
+    db = _create_db(tmp_path / "change.db", 8)
+    trainer = _trainer(db, main, sampling=sampling)
+    trainer.apply_runtime_linear_alpha()
+    _write_alpha(db, 16)
+    trainer.apply_runtime_linear_alpha()
+    assert calls == [8, 16]
+    assert [line.strip() for line in lines if "runtime linear_alpha" in line] == [
+        "runtime linear_alpha from UI/DB: 8",
+        "runtime linear_alpha from UI/DB: 16",
+    ]
+    assert main.unet_loras[0].scale == 16 / main.unet_loras[0].lora_dim
+    assert sampling.unet_loras[0].scale == 16 / sampling.unet_loras[0].lora_dim
+    assert _stored_alpha(db) is None
+
+
+def test_fractional_stored_value_raises_and_keeps_column(tmp_path, monkeypatch):
+    _silence_log(monkeypatch)
+    main, sampling = _pair()
+    weights = _weight_snapshot(main)
+    db = _create_db(tmp_path / "frac.db", 8.5)
+    trainer = _trainer(db, main, sampling=sampling)
+    with pytest.raises(ValueError, match="finite number > 0"):
+        trainer.apply_runtime_linear_alpha()
+    assert _stored_alpha(db) == 8.5
+    assert main.unet_loras[0].scale == 1.0
+    _assert_weights(main, weights)
 
 
 def test_turbo_swap_updates_saved_train_network(tmp_path, monkeypatch):
@@ -218,7 +301,7 @@ def test_turbo_swap_updates_saved_train_network(tmp_path, monkeypatch):
             assert float(module.alpha.item()) == 8.0
 
 
-def test_wrapped_network_is_unwrapped_once(tmp_path, monkeypatch):
+def test_wrapped_network_unwraps_without_duplicates(tmp_path, monkeypatch):
     _silence_log(monkeypatch)
     main, sampling = _pair()
     seen = []
@@ -239,7 +322,7 @@ def test_wrapped_network_is_unwrapped_once(tmp_path, monkeypatch):
         saved=SimpleNamespace(module=main),
     )
     trainer.apply_runtime_linear_alpha()
-    assert seen == [main, sampling]
+    assert seen == [main, sampling, main, sampling]
 
 
 def test_invalid_values_raise_and_keep_the_column(tmp_path, monkeypatch):
@@ -296,7 +379,7 @@ def test_missing_row_table_and_network_are_safe(tmp_path, monkeypatch):
     db = tmp_path / "norow.db"
     conn = sqlite3.connect(db)
     conn.execute(
-        "CREATE TABLE RuntimeParams (jobId TEXT PRIMARY KEY, runtime_linear_alpha REAL)"
+        "CREATE TABLE RuntimeParams (jobId TEXT PRIMARY KEY, runtime_linear_alpha INTEGER)"
     )
     conn.commit()
     conn.close()

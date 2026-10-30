@@ -78,6 +78,26 @@ def _write_model_kwarg(trainer, config, key: str, value) -> None:
             pass
 
 
+def _runtime_linear_alpha_int(value) -> int:
+    """Cast a stored linear_alpha to int. Fractional values raise ValueError.
+
+    ``int(8.5)`` would truncate, so a float is accepted only when it is a
+    finite whole number. Non-positive integers pass through; the apply step
+    rejects them after every rank has read the row.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(
+            f"runtime linear_alpha must be a finite number > 0, got {value!r}"
+        )
+    if isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
+            raise ValueError(
+                f"runtime linear_alpha must be a finite number > 0, got {value!r}"
+            )
+        return int(value)
+    return value
+
+
 class ZImageDiffSynthTrainer(DiffusionTrainer):
     """
     Trainer for Z-Image DiffSynth (arch zimage_diffsynth).
@@ -401,7 +421,9 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
     def _read_runtime_linear_alpha(self):
         """Read RuntimeParams.runtime_linear_alpha. Missing table or column is absent."""
         try:
-            return self._get_runtime_scalar("runtime_linear_alpha", float)
+            return self._get_runtime_scalar(
+                "runtime_linear_alpha", _runtime_linear_alpha_int
+            )
         except sqlite3.OperationalError as exc:
             message = str(exc).lower()
             if "no such column" in message or "no such table" in message:
@@ -474,24 +496,54 @@ class ZImageDiffSynthTrainer(DiffusionTrainer):
                 module.scale = value / module.lora_dim
             network.alpha = value
 
+    def _linear_alpha_matches(self, value: int) -> bool:
+        """True when every live LoRA network already has this alpha and scale."""
+        networks = self._linear_alpha_networks()
+        if not networks:
+            return False
+        for network in networks:
+            if getattr(network, "network_type", None) != "lora":
+                return False
+            if getattr(network, "alpha", None) != value:
+                return False
+            modules = getattr(network, "unet_loras", None)
+            if not modules:
+                return False
+            for module in modules:
+                if int(module.alpha.item()) != value:
+                    return False
+                if module.scale != value / module.lora_dim:
+                    return False
+        return True
+
     def apply_runtime_linear_alpha(self) -> None:
         """Apply RuntimeParams.runtime_linear_alpha, then clear the column.
 
         Every rank reads the row before the barrier. Rank 0 clears only after
         that, so another rank cannot observe NULL and skip the update.
+        A value that already matches every live network is not set again and
+        is not logged. The column is still cleared.
         """
         if not self.is_ui_trainer:
             return
-        value = self._read_runtime_linear_alpha()
+        read_error = None
+        value = None
+        try:
+            value = self._read_runtime_linear_alpha()
+        except ValueError as exc:
+            read_error = exc
         self._runtime_rank_barrier()
+        if read_error is not None:
+            raise read_error
         if value is None:
             return
-        if not math.isfinite(value) or value <= 0:
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise ValueError(
                 f"runtime linear_alpha must be a finite number > 0, got {value!r}"
             )
-        self._set_lora_linear_alpha(value)
-        print_acc(f"\nruntime linear_alpha from UI/DB: {value}")
+        if not self._linear_alpha_matches(value):
+            self._set_lora_linear_alpha(value)
+            print_acc(f"\nruntime linear_alpha from UI/DB: {value}")
         self._clear_runtime_columns("runtime_linear_alpha")
 
     def _reapply_config_linear_alpha(self) -> None:

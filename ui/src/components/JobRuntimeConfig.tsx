@@ -426,9 +426,9 @@ export default function JobRuntimeConfig({ job, onRefresh }: JobRuntimeConfigPro
       process.network?.type === 'lora' &&
       process.network
     ) {
-      if (typeof linearAlpha !== 'number' || !Number.isFinite(linearAlpha) || !(linearAlpha > 0)) {
+      if (typeof linearAlpha !== 'number' || !Number.isInteger(linearAlpha) || !(linearAlpha > 0)) {
         setApplyStatus('error');
-        setErrorMessage('linear_alpha must be a finite number > 0');
+        setErrorMessage('linear_alpha must be an integer > 0');
         return;
       }
       process.network.linear_alpha = linearAlpha;

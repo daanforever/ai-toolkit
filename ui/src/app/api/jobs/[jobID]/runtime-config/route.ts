@@ -527,9 +527,9 @@ export async function PATCH(
     if (jobError) {
       return NextResponse.json({ error: jobError }, { status: 400 });
     }
-    if (typeof linearAlpha !== 'number' || !Number.isFinite(linearAlpha) || !(linearAlpha > 0)) {
+    if (typeof linearAlpha !== 'number' || !Number.isInteger(linearAlpha) || !(linearAlpha > 0)) {
       return NextResponse.json(
-        { error: 'linear_alpha must be a finite number > 0' },
+        { error: 'linear_alpha must be an integer > 0' },
         { status: 400 }
       );
     }

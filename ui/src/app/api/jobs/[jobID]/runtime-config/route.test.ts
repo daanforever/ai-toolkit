@@ -94,16 +94,16 @@ describe('PATCH /api/jobs/:id/runtime-config linear_alpha', () => {
     expect(state.writes[0].create.jobId).toBe('job-1');
   });
 
-  it('rejects 0, negative, non-finite, and string values without writing', async () => {
+  it('rejects 0, negative, non-integer, non-finite, and string values without writing', async () => {
     state.job = zImageLoraJob();
-    for (const linear_alpha of [0, -1, Number.POSITIVE_INFINITY, Number.NaN, '8']) {
+    for (const linear_alpha of [0, -1, 8.5, Number.POSITIVE_INFINITY, Number.NaN, '8']) {
       state.writes = [];
       const response = await PATCH(
         { json: async () => ({ linear_alpha, lr: 1e-4 }) } as unknown as NextRequest,
         { params: Promise.resolve({ jobID: 'job-1' }) },
       );
       expect(response.status).toBe(400);
-      expect((await response.json()).error).toBe('linear_alpha must be a finite number > 0');
+      expect((await response.json()).error).toBe('linear_alpha must be an integer > 0');
       expect(state.writes).toEqual([]);
     }
   });
