@@ -6,6 +6,7 @@ import Editor, { OnMount } from '@monaco-editor/react';
 import type { editor } from 'monaco-editor';
 import { Settings } from '@/hooks/useSettings';
 import { migrateJobConfig } from './jobConfig';
+import { PYYAML_COMPATIBLE_OPTIONS, PYYAML_STRINGIFY_OPTIONS } from '@/utils/yaml';
 
 function normalizeParsedConfig(parsed: JobConfig, trainingFolder: string): JobConfig {
   try {
@@ -48,6 +49,7 @@ const yamlConfig: YAML.DocumentOptions &
   defaultStringType: 'QUOTE_DOUBLE',
   defaultKeyType: 'PLAIN',
   directives: true,
+  ...PYYAML_STRINGIFY_OPTIONS,
 };
 
 export default function AdvancedJob({ jobConfig, setJobConfig, settings, configRef }: Props) {
@@ -68,7 +70,7 @@ export default function AdvancedJob({ jobConfig, setJobConfig, settings, configR
           return { error: 'Config is empty' };
         }
         try {
-          const parsed = YAML.parse(raw) as JobConfig;
+          const parsed = YAML.parse(raw, PYYAML_COMPATIBLE_OPTIONS) as JobConfig;
           return { config: normalizeParsedConfig(parsed, settings.TRAINING_FOLDER) };
         } catch (e) {
           return { error: e instanceof Error ? e.message : String(e) };
@@ -138,7 +140,7 @@ export default function AdvancedJob({ jobConfig, setJobConfig, settings, configR
     if (value === undefined) return;
 
     try {
-      const parsed = YAML.parse(value) as JobConfig;
+      const parsed = YAML.parse(value, PYYAML_COMPATIBLE_OPTIONS) as JobConfig;
       // Don't update jobConfig if the change came from the editor itself
       // to avoid a circular update loop
       if (JSON.stringify(parsed) !== lastJobConfigUpdateStringRef.current) {

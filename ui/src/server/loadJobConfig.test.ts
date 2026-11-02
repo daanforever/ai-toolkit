@@ -246,4 +246,64 @@ describe('config.yaml projection', () => {
     expect(saved.jobConfig).toBe(JSON.stringify(document));
     expect(fs.existsSync(path.join(root, 'config.yaml'))).toBe(false);
   });
+
+  it('loads a zero-padded name as a string', () => {
+    const root = makeRoot();
+    writeConfig(root, plainYaml.replace('name: sample_job', 'name: 048'));
+    expect(loadJobConfigDocument(root, sentinelDbJobConfig).config.name).toBe('048');
+  });
+
+  it('keeps the stored document when yaml already has the padded name', () => {
+    const root = makeRoot();
+    writeConfig(root, plainYaml.replace('name: sample_job', 'name: 048'));
+    const stored = JSON.stringify({
+      ...document,
+      config: { ...document.config, name: '048' },
+    });
+    expect(projectJobConfig(root, stored)).toEqual({ action: 'keep' });
+  });
+
+  it('replaces a numeric name with the padded string from yaml', () => {
+    const root = makeRoot();
+    writeConfig(root, plainYaml.replace('name: sample_job', 'name: 048'));
+    const stored = JSON.stringify({
+      ...document,
+      config: { ...document.config, name: 48 },
+    });
+    const projection = projectJobConfig(root, stored);
+    expect(projection.action).toBe('replace');
+    if (projection.action === 'replace') {
+      expect(JSON.parse(projection.jobConfig).config.name).toBe('048');
+    }
+  });
+
+  it('quotes padded names and yes-strings and reloads them as strings', () => {
+    const root = makeRoot();
+    writeConfig(root, plainYaml);
+    const submitted = JSON.parse(dbJobConfig) as typeof document & {
+      config: { note: string };
+    };
+    submitted.config.name = '048';
+    submitted.config.note = 'yes';
+    const saved = writeJobConfigYamlIfPresent(root, submitted);
+    const written = fs.readFileSync(path.join(root, 'config.yaml'), 'utf8');
+    expect(written).toMatch(/name: ["']048["']/);
+    expect(written).toMatch(/note: ["']yes["']/);
+    const reloaded = parseJobConfigYaml(written);
+    expect(reloaded.config.name).toBe('048');
+    expect(reloaded.config.note).toBe('yes');
+    expect(JSON.parse(saved.jobConfig)).toEqual(submitted);
+  });
+
+  it('keeps scientific notation numeric', () => {
+    const root = makeRoot();
+    writeConfig(root, plainYaml.replace('lr: 0.0001', 'lr: 1e-4'));
+    expect(loadJobConfigDocument(root, sentinelDbJobConfig).config.process[0].lr).toBe(0.0001);
+  });
+
+  it('reads a PyYAML octal integer', () => {
+    const root = makeRoot();
+    writeConfig(root, plainYaml.replace('lr: 0.0001', 'lr: 0777'));
+    expect(loadJobConfigDocument(root, sentinelDbJobConfig).config.process[0].lr).toBe(511);
+  });
 });

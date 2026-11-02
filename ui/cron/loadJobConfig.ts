@@ -1,7 +1,8 @@
 import fs from 'fs';
 import path from 'path';
 import YAML, { isMap, isPair, isScalar, isSeq } from 'yaml';
-import type { CollectionTag, Document, ParseOptions, SchemaOptions } from 'yaml';
+import type { CollectionTag, Document, DocumentOptions, ParseOptions, SchemaOptions } from 'yaml';
+import { PYYAML_COMPATIBLE_OPTIONS, PYYAML_STRINGIFY_OPTIONS, withPyyamlDecimalInt } from './pyyamlOptions';
 
 const ORDERED_DICT_TAG = 'tag:yaml.org,2002:python/object/apply:collections.OrderedDict';
 
@@ -83,8 +84,11 @@ const orderedDictTag: CollectionTag = {
   },
 };
 
-const parseOptions: ParseOptions & SchemaOptions = {
-  customTags: [orderedDictTag],
+const parseOptions: ParseOptions & SchemaOptions & DocumentOptions = {
+  ...PYYAML_COMPATIBLE_OPTIONS,
+  customTags(tags) {
+    return [...withPyyamlDecimalInt(tags), orderedDictTag];
+  },
 };
 
 export function assertJobConfigDocument(value: unknown): JobConfigDocument {
@@ -266,7 +270,7 @@ export function writeJobConfigYamlIfPresent(
   if (!stat.isFile()) {
     throw new JobConfigError('config.yaml is not a file');
   }
-  const yamlText = YAML.stringify(document);
+  const yamlText = YAML.stringify(document, PYYAML_STRINGIFY_OPTIONS);
   fs.writeFileSync(yamlPath, yamlText.endsWith('\n') ? yamlText : `${yamlText}\n`, 'utf8');
   return { wroteFile: true, jobConfig };
 }
