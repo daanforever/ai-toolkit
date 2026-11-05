@@ -14,9 +14,9 @@ type MetricHelp = {
 };
 
 const SHARED_HELP = [
-  'This is a snapshot of one saved LoRA file, not a chart over training steps. Each column is a model layer: early layers on the left, later layers on the right. Each row is one part of that layer. The name comes from the file.',
-  'When the rows are q, k, and v, they are where the layer looks: what to search for, what to compare, and what to take. out is how that look is written back. w1, w2, and w3 are what the layer does with what it saw.',
-  'Color compares cells only with each other on this map. The brightest cell is the largest value here. The darkest is the smallest. If the whole map is one color, the values are close together: read the numbers on the scale to see whether that shared value is small or large. Brightness is size, not a grade. An empty cell means one of the two adapter halves is still zero, usually at the very start of training, so there is nothing to measure.',
+  'A snapshot of the newest saved LoRA file, not a chart over training steps. Each column is a model block (ordered by block name, then index). Each row is a module type inside the block, named after its keys in the file: q, k, v, and out are the attention query, key, value, and output projections; w1, w2, and w3 are the feed-forward projections.',
+  'Each cell is the selected metric for one module. Color is linear from the smallest to the largest value on this map, so it compares cells only with each other. Brightness is relative size, not quality. If the whole map is one color, the values are close: read the scale to see whether they are small or large.',
+  'An empty cell has no value: the module does not exist in that block, or, for the ratio and the ranks, its up or down matrix is all zeros (usually at the start of training).',
 ];
 
 const METRICS: { id: string; label: string; help: MetricHelp }[] = [
@@ -25,13 +25,13 @@ const METRICS: { id: string; label: string; help: MetricHelp }[] = [
     label: '||ΔW||_F',
     help: {
       paragraphs: [
-        'LoRA does not rewrite the whole model. It adds a small correction. This number is how loud that correction is in this piece of the layer. It does not compare the correction with the original weights, so the same number in two layers is not the same kind of change.',
-        'Think of two recordings of the same sentence. The words match, but one is quiet and the other is loud. A brighter cell is where the correction is louder than the other cells on this map.',
+        'The Frobenius norm of the weight update this LoRA adds to one module: ΔW = (alpha / rank) · up · down. It is the square root of the sum of the squares of all entries of ΔW, so it measures the total magnitude of the update. Zero means the module is unchanged.',
+        'It is an absolute magnitude. It is not divided by the norm of the original weights, so the same value in two modules is not the same relative change. Matrices with more entries also tend to have larger norms. A brighter cell holds a larger update than a darker cell on this map.',
       ],
       actions: [
-        'A few cells much larger than the rest: those parts took most of the change. If your samples look right, leave them. If the change shows up in the wrong place, train fewer steps or lower the learning rate.',
-        'The numbers on the scale stay tiny late in training: the correction is still quiet everywhere. Train longer or raise the learning rate.',
-        'The numbers on the scale are large and the samples look like copies of the training images: stop earlier or lower the learning rate. The colors alone cannot say this. They only compare cells with each other.',
+        'A few cells much larger than the rest: those modules took most of the update. If your samples look right, leave them. If the change shows up in the wrong place, train fewer steps or lower the learning rate.',
+        'Values on the scale stay close to zero late in training: the update is still small everywhere. Train longer or raise the learning rate.',
+        'Values on the scale are large and the samples look like copies of the training images: stop earlier or lower the learning rate. The colors alone cannot say this. They only compare cells with each other.',
       ],
     },
   },
@@ -40,13 +40,13 @@ const METRICS: { id: string; label: string; help: MetricHelp }[] = [
     label: '||B|| / ||A||',
     help: {
       paragraphs: [
-        'Each LoRA has two halves. The first starts full of random numbers and chooses which features to look at. The second starts empty and, during training, writes what to do with those features. This number is how large the second half has grown compared with the first.',
-        'At the start the second half is silent, so the number is tiny or the cell is empty. That is normal for the first steps. On a long run the second half often ends up larger than the first. Compare cells with each other. There is no single correct value.',
+        'The ratio of the Frobenius norms of the two LoRA factors: ||up|| / ||down||, also written ||B|| / ||A||. The down matrix (A, rank × in) starts as random numbers. The up matrix (B, out × rank) starts at zero, so ΔW is zero and training starts from the original model. The ratio shows how far B has grown relative to A.',
+        'It does not measure how strong the update is. Scaling A up and B down by the same factor leaves ΔW unchanged, so the ratio also reflects initialization and the learning rates of the two factors. It is near zero at the start and the cell is empty while B is still exactly zero. There is no single correct value: compare cells with each other.',
       ],
       actions: [
-        'Tiny numbers across the whole map late in training: the second half is still quiet. Train longer, or raise the learning rate of the second half (the up weights) above the first.',
-        "A few cells much larger than the rest: those pieces' second half grew far ahead of the first. If the samples look blown out or unstable, lower the learning rate. A second half that is simply larger than the first, across the map, is a normal end to a long run.",
-        "Empty cells at the start: keep training. Empty cells late in training: that piece's second half is still zero, so it did not learn.",
+        'Values close to zero across the whole map late in training: B has barely moved from zero, so the update is still small. Train longer, or give the up weights a higher learning rate than the down weights (the idea behind LoRA+).',
+        'A few cells far above the rest: B grew much more there relative to A. If the samples look over-saturated or unstable, lower the learning rate. A uniformly higher ratio across the whole map is not a problem by itself.',
+        'Empty cells at the start: keep training. Empty cells late in training: up or down is all zeros in that module, so it learned nothing.',
       ],
     },
   },
@@ -55,12 +55,12 @@ const METRICS: { id: string; label: string; help: MetricHelp }[] = [
     label: 'stable rank',
     help: {
       paragraphs: [
-        'The LoRA rank is a ceiling: how many different tricks the adapter is allowed to learn. This number says how many of them carry real strength. Near 1, almost all the strength sits in one direction. Near the rank, the strength is spread across the directions the rank allows.',
-        'Picture a row of microphones, one for each rank, and one person talking. The microphones are all there, but only one voice is working. A simple subject can honestly sit near 1. Most trained LoRAs use only a fraction of the rank they were given. This is one snapshot, so it does not show whether the number fell during training.',
+        'The stable rank of ΔW: ||ΔW||_F² / σ_max², the sum of the squared singular values divided by the largest one squared. It is a smooth lower bound on the true rank. It lies between 1 and the LoRA rank and does not change if ΔW is rescaled. Near 1: almost all of the update lies along one direction, the one with the largest singular value. Near the LoRA rank: the update is spread evenly across all the directions the rank allows.',
+        'Small singular values barely change it, so it shows how many directions carry most of the update, not how many exist. Compare it with the LoRA rank to see how much of the allocated rank is used. A simple subject can legitimately sit near 1, and most trained LoRAs use only a fraction of their rank. This is one snapshot, so it does not show how the value changed during training.',
       ],
       actions: [
-        'Low values (near 1): decrease the rank. The extra directions are idle. Do this to make a smaller adapter, not because a low number means the training failed.',
-        'High values (near the rank): the adapter is using the room it was given. Increase the rank only if the samples still miss detail you want. A high number is not automatically better. LoRA often works because the change stays simple, and a higher rank does not always learn more.',
+        'Low values (near 1): decrease the rank. The extra directions carry almost none of the update. Do this to make a smaller adapter, not because a low value means the training failed.',
+        'High values (near the rank): the adapter uses all the directions it was given. Increase the rank only if the samples still miss detail you want. A high value is not automatically better: LoRA often works because the update stays simple, and a higher rank does not always learn more.',
       ],
     },
   },
@@ -69,13 +69,13 @@ const METRICS: { id: string; label: string; help: MetricHelp }[] = [
     label: 'effective rank',
     help: {
       paragraphs: [
-        'This also counts how many different directions are in the correction, including the quiet ones. Stable rank asks which direction holds the strength. Effective rank asks how many directions are present at all, so it is usually higher.',
-        'Picture a soup with one strong flavor and several quieter ones. Near 1 means one direction. Near the rank means many directions are present, including quiet ones.',
+        'The effective rank of ΔW (Roy and Vetterli): exp(H), where H = −Σ p_i ln p_i is the entropy of the normalized singular values p_i = σ_i / Σσ_j. It is a smooth count of how many singular directions contribute. It lies between 1 and the LoRA rank and does not change if ΔW is rescaled. Equal singular values give the LoRA rank. One dominant singular value gives about 1.',
+        'Stable rank compares the total squared magnitude with that of the top direction alone, so the top direction dominates it. Effective rank uses the whole spectrum, so weaker directions count too and it is usually higher. A large gap between the two means one strong direction plus several weaker ones.',
       ],
       actions: [
         'Low values (near 1): decrease the rank. One direction does not need the extra room.',
-        'High values (near the rank) while stable rank is also high: the rank budget is full. Increase the rank only if the samples still miss detail.',
-        'High values while stable rank stays near 1: quiet directions exist, but one direction holds almost all the strength. Decrease the rank. Those quiet directions are not a reason to add more.',
+        'High values (near the rank) while stable rank is also high: the rank is fully used. Increase the rank only if the samples still miss detail.',
+        'High values while stable rank stays near 1: weaker directions exist, but one direction holds almost all of the update. Decrease the rank. The weaker directions are not a reason to add more.',
       ],
     },
   },
