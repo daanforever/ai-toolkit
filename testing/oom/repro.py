@@ -4,8 +4,9 @@ Combat train shape: rank 64 attention LoRA, train dtype fp32, refiners on,
 turbo_lora on, cuda_memory_fraction 0.92.
 Sampling stays off and the step count stays short so the log is train steps.
 Same `run_job` path as training, so `train.cuda_memory_fraction` is applied.
-On Windows the default `max_split_size_mb:24` is set before torch is imported,
-matching `run.py`. A normal pytest process cannot do that: `testing/conftest.py`
+`run.py` does not set `max_split_size_mb`. This file sets it only when
+`OOM_REPRO_MAX_SPLIT` is a positive integer, and that write happens before
+torch is imported. A normal pytest process cannot do that: `testing/conftest.py`
 imports torch first. Launch this file, or the opt-in wrapper
 `testing/oom/test_repro.py`.
 
@@ -14,9 +15,8 @@ Run from the repo root:
 
 Env:
   OOM_CUDA_MEMORY_FRACTION   default 0.92; none/null/off passes null (no cap)
-  OOM_REPRO_MAX_SPLIT        default 24 on Windows; off removes max_split_size_mb;
-                             a number sets that size. An existing max_split_size_mb
-                             is left in place unless this is off or a number.
+  OOM_REPRO_MAX_SPLIT        unset leaves PYTORCH_CUDA_ALLOC_CONF unchanged;
+                             off removes max_split_size_mb; a number sets that size.
   OOM_REPRO_STEPS            default 8
   OOM_REPRO_RESOLUTION       default 2048 (long side of the bucket grid)
   OOM_REPRO_DTYPE            default fp32 (train.dtype)
@@ -32,25 +32,21 @@ import sys
 
 
 def _apply_alloc_conf() -> None:
-    """Mirror run.py, with an explicit off switch for A/B runs."""
+    """Optional max_split_size_mb override. Unset matches run.py and changes nothing."""
+    raw = os.environ.get("OOM_REPRO_MAX_SPLIT", "").strip().lower()
+    if raw == "":
+        return
     current = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
     parts = [part for part in current.split(",") if part]
     kept = [part for part in parts if not part.startswith("max_split_size_mb")]
-    raw = os.environ.get("OOM_REPRO_MAX_SPLIT", "").strip().lower()
     if raw in ("off", "none", "null"):
         _write_alloc_conf(kept)
         return
-    if raw == "":
-        if os.name != "nt" or any(part.startswith("max_split_size_mb") for part in parts):
-            return
-        size = "24"
-    else:
-        if not raw.isdigit() or int(raw) <= 0:
-            raise SystemExit(
-                f"[oom-repro] OOM_REPRO_MAX_SPLIT must be off or a positive integer, got {raw!r}"
-            )
-        size = raw
-    _write_alloc_conf(kept + [f"max_split_size_mb:{size}"])
+    if not raw.isdigit() or int(raw) <= 0:
+        raise SystemExit(
+            f"[oom-repro] OOM_REPRO_MAX_SPLIT must be off or a positive integer, got {raw!r}"
+        )
+    _write_alloc_conf(kept + [f"max_split_size_mb:{raw}"])
 
 
 def _write_alloc_conf(parts: list[str]) -> None:

@@ -2,7 +2,7 @@
 
 Not implemented.
 
-LoRA step time dropped after `train.cuda_memory_fraction` (default 0.95) and, on Windows, `max_split_size_mb:24`. The fraction caps the CUDA caching allocator's reserved pool. At the cap the allocator synchronizes, frees cached blocks, and allocates again. A block at or above 24 MiB is reused only for a request within about 1 MiB of its size, so a bucket change pays that reclaim on the step.
+LoRA step time dropped after `train.cuda_memory_fraction` (default 0.95). The fraction caps the CUDA caching allocator's reserved pool. At the cap the allocator synchronizes, frees cached blocks, and allocates again. `run.py` does not set `max_split_size_mb`.
 
 Every plan based on this file must start with a first item that requires reading this file (`docs/OOMFix/README.md`) before any other step.
 
@@ -88,11 +88,11 @@ Candidates. Not a contract. First check is float8 on the frozen DiT. The repro d
 ### bucket grouping
 
 - `UnifiedBucketManager.shuffle_and_build_batches` shuffles `batch_indices` across buckets, so consecutive steps change `seq`.
-- A cached block at or above 24 MiB is reused only inside the window in the intro. The latent shapes in Known issue fall outside that window of each other. A run of steps on one bucket makes reclaim a boundary event.
+- `run.py` does not set `max_split_size_mb`, so a cached block is not limited to reuse inside a 24 MiB window.
 
 ### expandable_segments
 
-- `run.py` states that Windows has no `expandable_segments`. That is unverified on torch `2.12.1+cu132`. The check is a process that starts with `expandable_segments:True`. That flag would replace `max_split_size_mb:24`.
+- `run.py` does not set `expandable_segments` or `max_split_size_mb`. Whether Windows torch `2.12.1+cu132` accepts `expandable_segments:True` is unverified. The check is a process that starts with that flag.
 
 ### garbage_collection_threshold
 
@@ -135,6 +135,6 @@ Candidates. Not a contract. First check is float8 on the frozen DiT. The repro d
 - The layout census lists owners from `memory_layout_owners` (`lora.params`, `lora.grads`, `optimizer.state`, `base.params`, `base.buffers`, `base.grads`, `vae`, `text_encoder`), then `other_live_tensors` grouped as `dtype shape grad= n= GiB`, then `untracked(autograd/C++)`. On OOM, `log_oom_layout` prints the same census as `[DEBUG OOM at train step N]` inside the `except`, while the failed step's tensors are still alive.
 - Direct run: `venv\Scripts\python.exe testing/oom/repro.py`
 - Pytest skips unless `OOM_REPRO=1`: `venv\Scripts\python.exe -m pytest testing/oom/test_repro.py -q -s`
-- `OOM_CUDA_MEMORY_FRACTION` overrides the cap; `none` passes null. `OOM_REPRO_DTYPE` overrides `train.dtype`. `OOM_REPRO_MAX_SPLIT` defaults to `24` on Windows; `off` removes `max_split_size_mb`. `OOM_REPRO_STEPS` defaults to 8. `OOM_REPRO_RESOLUTION` defaults to 2048. `OOM_REPRO_QUANTIZE` defaults to off (`quantize: false`, `qtype: qfloat8`); `float8` sets `quantize: true` and `qtype: float8`. Base weights: `ZIMAGE_DIFFSYNTH_MODEL_PATH`, otherwise `DEFAULT_ZIMAGE_MODEL_PATH` in `extensions_built_in/diffusion_models/z_image_diffsynth/test_smoke.py`. Turbo weights: `ZIMAGE_DIFFSYNTH_SAMPLING_PATH`, otherwise `models--dimitribarbot--Z-Image-Turbo-BF16` snapshot `e11f18c054525642077b44c5edf00b99515a6182`.
+- `OOM_CUDA_MEMORY_FRACTION` overrides the cap; `none` passes null. `OOM_REPRO_DTYPE` overrides `train.dtype`. `OOM_REPRO_MAX_SPLIT` unset leaves `PYTORCH_CUDA_ALLOC_CONF` unchanged; `off` removes `max_split_size_mb`; a positive integer sets that size. `OOM_REPRO_STEPS` defaults to 8. `OOM_REPRO_RESOLUTION` defaults to 2048. `OOM_REPRO_QUANTIZE` defaults to off (`quantize: false`, `qtype: qfloat8`); `float8` sets `quantize: true` and `qtype: float8`. Base weights: `ZIMAGE_DIFFSYNTH_MODEL_PATH`, otherwise `DEFAULT_ZIMAGE_MODEL_PATH` in `extensions_built_in/diffusion_models/z_image_diffsynth/test_smoke.py`. Turbo weights: `ZIMAGE_DIFFSYNTH_SAMPLING_PATH`, otherwise `models--dimitribarbot--Z-Image-Turbo-BF16` snapshot `e11f18c054525642077b44c5edf00b99515a6182`.
 - A step line is `[oom-repro] step=N wall_s=… latent=… alloc_gib=… reserved_gib=… d_retry=… d_sync=… d_malloc=… d_free=… oversize_seg=… oversize_alloc=…`. After the run, `later_median_s` is the median wall time of every step except the first. No speed threshold.
 - A grad-enabled `get_noise_prediction` prints `[oom-repro] activations turbo=… latent=… alloc_gib=… untracked_gib=…` and `[oom-repro] act dtype shape grad= n= gib=` for each CUDA storage whose nbytes equal the tensor shape and whose group is at least 64 MiB.
